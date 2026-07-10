@@ -3,7 +3,9 @@ import type { ReactNode } from 'react'
 import { PageLoader } from '@/components/page-loader'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import type { IconComponent } from '@/lib/icons'
+import { Tip } from '@/components/ui/tooltip'
+import { Check, HelpCircle, type IconComponent } from '@/lib/icons'
+import { selectableCardClass } from '@/lib/selectable-card'
 import { cn } from '@/lib/utils'
 
 import { PAGE_INSET_X } from '../layout-constants'
@@ -18,6 +20,58 @@ export function SettingsContent({ children }: { children: ReactNode }) {
 
 export function Pill({ tone = 'muted', children }: { tone?: 'muted' | 'primary'; children: ReactNode }) {
   return <Badge variant={tone === 'primary' ? 'default' : 'muted'}>{children}</Badge>
+}
+
+// A selectable "mode" card (connection mode in Settings → Gateway, and the
+// install-vs-connect choice in the first-run overlay). Presentational; the
+// caller owns the active/onSelect state.
+export function ModeCard({
+  active,
+  description,
+  disabled,
+  hint,
+  icon: Icon,
+  onSelect,
+  title
+}: {
+  active: boolean
+  description: string
+  disabled?: boolean
+  hint?: string
+  icon: IconComponent
+  onSelect: () => void
+  title: string
+}) {
+  return (
+    <button
+      className={cn(
+        'flex h-full min-h-0 w-full flex-col p-3 text-left disabled:cursor-not-allowed disabled:opacity-50',
+        selectableCardClass({ active, prominent: true })
+      )}
+      disabled={disabled}
+      onClick={onSelect}
+      type="button"
+    >
+      <div className="flex items-center gap-1.5">
+        <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 text-[length:var(--conversation-text-font-size)] font-medium">{title}</span>
+        {hint ? (
+          <Tip label={hint}>
+            <span
+              className="grid size-3.5 shrink-0 cursor-help place-items-center text-(--ui-text-tertiary) hover:text-(--ui-text-secondary)"
+              onClick={event => event.stopPropagation()}
+            >
+              <HelpCircle className="size-3.5" />
+            </span>
+          </Tip>
+        ) : null}
+        {active ? <Check className="ml-auto size-3.5 shrink-0 text-primary" /> : null}
+      </div>
+      <p className="mt-1.5 flex-1 text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
+        {description}
+      </p>
+    </button>
+  )
 }
 
 export function SectionHeading({ icon: Icon, title, meta }: { icon: IconComponent; title: string; meta?: string }) {

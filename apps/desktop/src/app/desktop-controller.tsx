@@ -5,6 +5,7 @@ import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 're
 
 import { BootFailureOverlay } from '@/components/boot-failure-overlay'
 import { DesktopInstallOverlay } from '@/components/desktop-install-overlay'
+import { FirstRunChoiceOverlay } from '@/components/first-run-choice-overlay'
 import { GatewayConnectingOverlay } from '@/components/gateway-connecting-overlay'
 import { DesktopOnboardingOverlay } from '@/components/onboarding'
 import { Pane, PaneMain } from '@/components/pane-shell'
@@ -21,6 +22,7 @@ import { storedSessionIdForNotification } from '../lib/session-ids'
 import { isMessagingSource } from '../lib/session-source'
 import { latestSessionTodos } from '../lib/todos'
 import { setCronFocusJobId } from '../store/cron'
+import { initFirstRunStore } from '../store/first-run'
 import {
   $fileBrowserOpen,
   $panesFlipped,
@@ -268,6 +270,16 @@ export function DesktopController() {
       unsubscribe?.()
       stopUpdatePoller()
     }
+  }, [])
+
+  // Seed + subscribe the first-run gate state from main (primary window only;
+  // secondary windows never own the install/first-run flow).
+  useEffect(() => {
+    if (isSecondaryWindow()) {
+      return
+    }
+
+    return initFirstRunStore()
   }, [])
 
   // Remember the open chat so a relaunch reopens it instead of an empty new-chat.
@@ -1047,6 +1059,7 @@ export function DesktopController() {
     <>
       <RemoteDisplayBanner />
       {!isSecondaryWindow() && <DesktopInstallOverlay />}
+      {!isSecondaryWindow() && <FirstRunChoiceOverlay />}
       {!isSecondaryWindow() && (
         <DesktopOnboardingOverlay
           enabled={gatewayState === 'open'}
