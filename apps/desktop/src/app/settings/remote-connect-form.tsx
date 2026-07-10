@@ -99,23 +99,37 @@ export function RemoteConnectForm({ className, form }: { className?: string; for
 
       {/* Session-token gateways: keep the existing token entry box. */}
       {authResolved && authMode === 'token' ? (
-        <ListRow
-          action={
-            <Input
-              autoComplete="off"
-              className={cn('h-8 font-mono', CONTROL_TEXT)}
-              disabled={state.envOverride}
-              onChange={event => setRemoteToken(event.target.value)}
-              placeholder={
-                state.remoteTokenSet ? g.existingToken(state.remoteTokenPreview ?? g.savedToken) : g.pasteSessionToken
-              }
-              type="password"
-              value={remoteToken}
-            />
-          }
-          description={g.tokenDesc}
-          title={g.tokenTitle}
-        />
+        <>
+          <ListRow
+            action={
+              <Input
+                autoComplete="off"
+                className={cn('h-8 font-mono', CONTROL_TEXT)}
+                disabled={state.envOverride}
+                onChange={event => setRemoteToken(event.target.value)}
+                placeholder={
+                  state.remoteTokenSet ? g.existingToken(state.remoteTokenPreview ?? g.savedToken) : g.pasteSessionToken
+                }
+                type="password"
+                value={remoteToken}
+              />
+            }
+            description={g.tokenDesc}
+            title={g.tokenTitle}
+          />
+
+          {/* The saved token is on disk in plain text (no OS keyring). Same
+              banner idiom as envOverride so it reads as a real warning. */}
+          {state.remoteTokenPlainText ? (
+            <div className="mt-2 flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-[length:var(--conversation-caption-font-size)] text-destructive">
+              <AlertCircle className="mt-0.5 size-4 shrink-0" />
+              <div>
+                <div className="font-medium">{g.plainTextStoredTitle}</div>
+                <div className="mt-1 leading-5">{g.plainTextStoredDesc}</div>
+              </div>
+            </div>
+          ) : null}
+        </>
       ) : null}
     </div>
   )

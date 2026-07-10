@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import type { DesktopCloudAgent, DesktopCloudOrg } from '@/global'
 import { useI18n } from '@/i18n'
 import { ExternalLink } from '@/lib/external-link'
@@ -39,6 +40,10 @@ export function GatewaySettings() {
   const { t } = useI18n()
   const g = t.settings.gateway
   const [previewingSwitch, setPreviewingSwitch] = useState(false)
+  // When set, the plain-text opt-in dialog is open; `apply` remembers whether
+  // the gated action was Save-for-restart (false) or Save-and-reconnect (true)
+  // so confirm resumes the right one.
+  const [plainTextConfirm, setPlainTextConfirm] = useState<null | { apply: boolean }>(null)
 
   // --- Hermes Cloud (cloud mode) state ---
   // One portal session powers discovery + the silent per-agent cascade. These
@@ -77,6 +82,21 @@ export function GatewaySettings() {
   // by the mode cards + cloud panel below.
   const form = useRemoteConnectionForm({ scope })
   const { state, setState, loading, saving, testing, canUseRemote, lastTest, save, testRemote } = form
+  const { wouldPersistPlainTextToken } = form
+
+  // Save/Apply entrypoint for the bottom-row buttons. When persisting the typed
+  // token would write it to disk in plain text (keyring-less machine), defer to
+  // the opt-in dialog; confirm resumes the remembered save/apply with the
+  // allowPlainTextToken flag. Otherwise save straight through.
+  const requestSave = (apply: boolean) => {
+    if (wouldPersistPlainTextToken) {
+      setPlainTextConfirm({ apply })
+
+      return
+    }
+
+    void save(apply)
+  }
 
   useEffect(() => {
     void refreshActiveProfile()
@@ -583,13 +603,13 @@ export function GatewaySettings() {
           ) : null}
           <Button
             disabled={state.envOverride || saving}
-            onClick={() => void save(false)}
+            onClick={() => requestSave(false)}
             size="sm"
             variant="textStrong"
           >
             {g.saveForRestart}
           </Button>
-          <Button disabled={state.envOverride || saving} onClick={() => void save(true)} size="sm">
+          <Button disabled={state.envOverride || saving} onClick={() => requestSave(true)} size="sm">
             {saving ? <Loader2 className="animate-spin" /> : null}
             {g.saveAndReconnect}
           </Button>
@@ -628,6 +648,24 @@ export function GatewaySettings() {
           />
         ) : null}
       </div>
+
+      {/* Plain-text token opt-in: gated when secure storage is unavailable and a
+          new token would be persisted. Confirm resumes the remembered save/apply. */}
+      <ConfirmDialog
+        confirmLabel={g.plainTextConfirmAction}
+        description={g.plainTextConfirmDesc}
+        destructive
+        onClose={() => setPlainTextConfirm(null)}
+        onConfirm={async () => {
+          if (!plainTextConfirm) {
+            return
+          }
+
+          await save(plainTextConfirm.apply, { allowPlainTextToken: true })
+        }}
+        open={plainTextConfirm !== null}
+        title={g.plainTextConfirmTitle}
+      />
     </SettingsContent>
   )
 }

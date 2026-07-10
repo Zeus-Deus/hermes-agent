@@ -2,7 +2,7 @@ import { type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useStat
 
 import type { DesktopAuthProvider, DesktopConnectionConfig, DesktopConnectionProbeResult } from '@/global'
 import { useI18n } from '@/i18n'
-import { notify, notifyError } from '@/store/notifications'
+import { notify, notifyError, readableError } from '@/store/notifications'
 
 type Mode = 'local' | 'remote' | 'cloud'
 type AuthMode = 'oauth' | 'token'
@@ -19,6 +19,10 @@ const EMPTY_STATE: GatewaySettingsState = {
   remoteOauthConnected: false,
   remoteTokenPreview: null,
   remoteTokenSet: false,
+  // Assume secure storage until the loaded config tells us otherwise, so we
+  // never flash the plain-text opt-in on a value we haven't hydrated yet.
+  secureTokenStorage: true,
+  remoteTokenPlainText: false,
   remoteUrl: '',
   cloudOrg: ''
 }
@@ -246,15 +250,34 @@ export function useRemoteConnectionForm({ scope, lockedMode }: UseRemoteConnecti
     return Boolean(remoteToken.trim()) || state.remoteTokenSet
   }, [authMode, oauthConnected, remoteToken, state.remoteTokenSet, trimmedUrl])
 
-  const payload = () => ({
+  const payload = (allowPlainTextToken?: boolean) => ({
     mode: state.mode,
     profile: scope ?? undefined,
     remoteAuthMode: authMode,
     remoteToken: authMode === 'token' ? remoteToken.trim() || undefined : undefined,
-    remoteUrl: trimmedUrl
+    remoteUrl: trimmedUrl,
+    ...(allowPlainTextToken ? { allowPlainTextToken: true } : {})
   })
 
-  const save = async (apply: boolean) => {
+  // A pending Save/Apply would write a NEW token to disk in plain text when
+  // we're on a remote-like connection using token auth, the user typed a token,
+  // and this machine has no OS keyring (safeStorage unavailable). Consumers
+  // (Settings, first-run overlay) use this to gate the save behind an explicit
+  // opt-in dialog before persisting.
+  const wouldPersistPlainTextToken =
+    (state.mode === 'remote' || state.mode === 'cloud') &&
+    authMode !== 'oauth' &&
+    Boolean(remoteToken.trim()) &&
+    state.secureTokenStorage === false
+
+  // `allowPlainTextToken` threads the keyring-less opt-in through to main. When
+  // it's set the caller is the ConfirmDialog's onConfirm, which surfaces a
+  // thrown error inline and keeps itself open — so on that path we rethrow a
+  // readable message instead of firing the toast + inline error, so a failed
+  // save can't play the success beat under the dialog.
+  const save = async (apply: boolean, options: { allowPlainTextToken?: boolean } = {}) => {
+    const allowPlainTextToken = options.allowPlainTextToken === true
+
     if (state.mode === 'remote' && !canUseRemote) {
       notify({
         kind: 'warning',
@@ -270,8 +293,8 @@ export function useRemoteConnectionForm({ scope, lockedMode }: UseRemoteConnecti
 
     try {
       const next = apply
-        ? await window.hermesDesktop.applyConnectionConfig(payload())
-        : await window.hermesDesktop.saveConnectionConfig(payload())
+        ? await window.hermesDesktop.applyConnectionConfig(payload(allowPlainTextToken))
+        : await window.hermesDesktop.saveConnectionConfig(payload(allowPlainTextToken))
 
       setState(next)
       setRemoteToken('')
@@ -287,6 +310,10 @@ export function useRemoteConnectionForm({ scope, lockedMode }: UseRemoteConnecti
         })
       }
     } catch (err) {
+      if (allowPlainTextToken) {
+        throw new Error(readableError(err, apply ? g.applyFailed : g.saveFailed).message)
+      }
+
       notifyError(err, apply ? g.applyFailed : g.saveFailed)
       setLastError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -409,6 +436,7 @@ export function useRemoteConnectionForm({ scope, lockedMode }: UseRemoteConnecti
     isPasswordProvider,
     oauthConnected,
     canUseRemote,
+    wouldPersistPlainTextToken,
     save,
     signIn,
     signOut,

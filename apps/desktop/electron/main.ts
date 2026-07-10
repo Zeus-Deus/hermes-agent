@@ -5782,8 +5782,8 @@ async function cloudAgentSilentSignIn(dashboardUrl) {
   return { baseUrl, connected: await hasOauthSessionCookie(baseUrl) }
 }
 
-function encryptDesktopSecret(value) {
-  return encryptDesktopSecretStrict(value, safeStorage)
+function encryptDesktopSecret(value, options) {
+  return encryptDesktopSecretStrict(value, safeStorage, options)
 }
 
 function decryptDesktopSecret(secret) {
@@ -5990,6 +5990,23 @@ async function sanitizeDesktopConnectionConfig(config = readDesktopConnectionCon
   const savedMode = key ? scoped?.mode : config.mode
   const mode = envOverride ? 'remote' : modeIsRemoteLike(savedMode) ? savedMode : 'local'
 
+  // Whether the OS keyring (safeStorage) can encrypt the saved token. When
+  // false the renderer knows to offer the plain-text opt-in in Settings →
+  // Gateway. safeStorage.isEncryptionAvailable can throw on some platforms, so
+  // treat any failure as "not available".
+  let secureTokenStorage = false
+
+  try {
+    secureTokenStorage = Boolean(safeStorage.isEncryptionAvailable())
+  } catch {
+    secureTokenStorage = false
+  }
+
+  // Whether the currently saved token is stored in plain text (the keyring-less
+  // opt-in path). The env override supplies its token from the environment, not
+  // the saved block, so it never reports as plain text here.
+  const remoteTokenPlainText = !envOverride && block.token?.encoding === 'plain'
+
   let remoteOauthConnected = false
 
   if (authMode === 'oauth' && remoteUrl) {
@@ -6016,6 +6033,11 @@ async function sanitizeDesktopConnectionConfig(config = readDesktopConnectionCon
     cloudOrg: mode === 'cloud' ? String(block.org || '') : '',
     remoteTokenPreview: tokenPreview(remoteToken),
     remoteTokenSet: Boolean(remoteToken),
+    // Whether the OS keyring can encrypt a token; drives the plain-text opt-in
+    // affordance in Settings → Gateway on keyring-less Linux.
+    secureTokenStorage,
+    // Whether the saved token is currently persisted in plain text.
+    remoteTokenPlainText,
     // The env override only forces the global/primary connection; a per-profile
     // scope is never overridden by HERMES_DESKTOP_REMOTE_URL.
     envOverride
@@ -6078,7 +6100,7 @@ function coerceDesktopConnectionConfig(input: any = {}, existing = readDesktopCo
 
   const nextToken = incomingToken
     ? persistToken
-      ? encryptDesktopSecret(incomingToken)
+      ? encryptDesktopSecret(incomingToken, { allowPlainText: input.allowPlainTextToken === true })
       : { encoding: 'plain', value: incomingToken }
     : existingBlock.token
 
@@ -9156,6 +9178,22 @@ app.on('open-url', (event, url) => {
 })
 
 app.whenReady().then(() => {
+  // Keyring-less Linux (e.g. Hyprland/Sway with no GNOME Keyring or KWallet):
+  // `--password-store=basic` selects Electron's built-in "basic" backend, but
+  // Electron only counts it as available once setUsePlainTextEncryption(true)
+  // is called. Do this before createWindow() and anything that could touch
+  // safeStorage. Older/mocked safeStorage may lack the method, so guard + wrap.
+  if (process.platform === 'linux' && app.commandLine.getSwitchValue('password-store') === 'basic') {
+    try {
+      if (typeof safeStorage.setUsePlainTextEncryption === 'function') {
+        safeStorage.setUsePlainTextEncryption(true)
+      }
+    } catch {
+      // Non-fatal: encryption simply stays unavailable and the user can fall
+      // back to the plain-text opt-in or the HERMES_DESKTOP_REMOTE_* env vars.
+    }
+  }
+
   if (IS_MAC) {
     Menu.setApplicationMenu(buildApplicationMenu())
   } else {

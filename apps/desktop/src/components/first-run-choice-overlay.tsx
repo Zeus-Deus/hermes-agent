@@ -6,6 +6,7 @@ import { RemoteConnectForm } from '@/app/settings/remote-connect-form'
 import { useRemoteConnectionForm } from '@/app/settings/use-remote-connection-form'
 import { BrandMark } from '@/components/brand-mark'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { useI18n } from '@/i18n'
 import { Globe, Loader2, Monitor } from '@/lib/icons'
 import { $firstRun, chooseInstall } from '@/store/first-run'
@@ -115,7 +116,11 @@ function FirstRunChoiceCard() {
 // saved config is 'local', which would otherwise disable the probe/save flow).
 function ConnectSection() {
   const { t } = useI18n()
+  const g = t.settings.gateway
   const form = useRemoteConnectionForm({ scope: null, lockedMode: 'remote' })
+  // Open state for the keyring-less plain-text opt-in dialog. First-run Connect
+  // is always an apply (reconnect), so a boolean is enough.
+  const [plainTextConfirm, setPlainTextConfirm] = useState(false)
 
   // Unlike Settings (which gates the whole page on a LoadingState), the overlay
   // mounts the form immediately — hold it behind the spinner until the config
@@ -128,16 +133,44 @@ function ConnectSection() {
     )
   }
 
+  // Connecting would write the typed token to disk in plain text (no OS keyring
+  // on this machine) — the exact first-run case this branch exists for. Get the
+  // same explicit opt-in as Settings before persisting; otherwise connect straight.
+  const connect = () => {
+    if (form.wouldPersistPlainTextToken) {
+      setPlainTextConfirm(true)
+
+      return
+    }
+
+    void form.save(true)
+  }
+
   return (
     <>
       <RemoteConnectForm className="mt-5" form={form} />
       {form.lastError ? <OverlayError message={form.lastError} /> : null}
       <div className="mt-6 flex justify-end">
-        <Button disabled={form.saving || !form.canUseRemote} onClick={() => void form.save(true)} size="sm">
+        <Button disabled={form.saving || !form.canUseRemote} onClick={() => connect()} size="sm">
           {form.saving ? <Loader2 className="animate-spin" /> : null}
           {t.common.connect}
         </Button>
       </div>
+
+      {/* Plain-text token opt-in, reusing the Settings → Gateway copy/keys.
+          Confirm resumes the connect with the allowPlainTextToken flag; a thrown
+          error surfaces inline in the dialog and keeps it open. */}
+      <ConfirmDialog
+        confirmLabel={g.plainTextConfirmAction}
+        description={g.plainTextConfirmDesc}
+        destructive
+        onClose={() => setPlainTextConfirm(false)}
+        onConfirm={async () => {
+          await form.save(true, { allowPlainTextToken: true })
+        }}
+        open={plainTextConfirm}
+        title={g.plainTextConfirmTitle}
+      />
     </>
   )
 }
