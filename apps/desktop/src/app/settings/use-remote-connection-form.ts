@@ -2,7 +2,7 @@ import { type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useStat
 
 import type { DesktopAuthProvider, DesktopConnectionConfig, DesktopConnectionProbeResult } from '@/global'
 import { useI18n } from '@/i18n'
-import { notify, notifyError } from '@/store/notifications'
+import { notify, notifyError, readableError } from '@/store/notifications'
 
 type Mode = 'local' | 'remote' | 'cloud' | 'ssh'
 type AuthMode = 'oauth' | 'token'
@@ -19,6 +19,8 @@ const EMPTY_STATE: GatewaySettingsState = {
   remoteOauthConnected: false,
   remoteTokenPreview: null,
   remoteTokenSet: false,
+  secureTokenStorage: true,
+  remoteTokenPlainText: false,
   remoteUrl: '',
   cloudOrg: '',
   sshHost: '',
@@ -67,6 +69,10 @@ export function useRemoteConnectionForm({ scope, lockedMode }: UseRemoteConnecti
   // backdrop paints over the global toast region). Set alongside the existing
   // notifyError calls; cleared on a fresh attempt or a URL/token edit.
   const [lastError, setLastError] = useState<null | string>(null)
+  // Saving a new token without safeStorage requires a deliberate user opt-in.
+  // Settings presents this as a dialog; the first-run overlay renders it inline
+  // because that overlay intentionally sits above the global dialog layer.
+  const [plainTextConfirm, setPlainTextConfirm] = useState<null | { apply: boolean }>(null)
 
   // Auth-mode probe: as the user types a remote URL we ask the gateway (via
   // its public /api/status) whether it gates with OAuth or a static session
@@ -265,7 +271,7 @@ export function useRemoteConnectionForm({ scope, lockedMode }: UseRemoteConnecti
     return Boolean(remoteToken.trim()) || state.remoteTokenSet
   }, [authMode, oauthConnected, remoteToken, state.remoteTokenSet, trimmedUrl])
 
-  const payload = () => ({
+  const payload = (allowPlainTextToken = false) => ({
     mode: state.mode,
     profile: scope ?? undefined,
     remoteAuthMode: authMode,
@@ -275,10 +281,17 @@ export function useRemoteConnectionForm({ scope, lockedMode }: UseRemoteConnecti
     sshUser: state.sshUser.trim() || undefined,
     sshPort: state.sshPort,
     sshKeyPath: state.sshKeyPath.trim() || undefined,
-    sshRemoteHermesPath: state.sshRemoteHermesPath.trim()
+    sshRemoteHermesPath: state.sshRemoteHermesPath.trim(),
+    ...(allowPlainTextToken ? { allowPlainTextToken: true } : {})
   })
 
-  const save = async (apply: boolean) => {
+  const wouldPersistPlainTextToken =
+    (state.mode === 'remote' || state.mode === 'cloud') &&
+    authMode !== 'oauth' &&
+    Boolean(remoteToken.trim()) &&
+    state.secureTokenStorage === false
+
+  const performSave = async (apply: boolean, allowPlainTextToken: boolean): Promise<string | null> => {
     const seq = ++saveSeq.current
 
     if (state.mode === 'remote' && !canUseRemote) {
@@ -288,7 +301,7 @@ export function useRemoteConnectionForm({ scope, lockedMode }: UseRemoteConnecti
         message: authMode === 'oauth' ? g.incompleteSignIn : g.incompleteToken
       })
 
-      return
+      return g.incompleteToken
     }
 
     setSaving(true)
@@ -296,11 +309,11 @@ export function useRemoteConnectionForm({ scope, lockedMode }: UseRemoteConnecti
 
     try {
       const next = apply
-        ? await window.hermesDesktop.applyConnectionConfig(payload())
-        : await window.hermesDesktop.saveConnectionConfig(payload())
+        ? await window.hermesDesktop.applyConnectionConfig(payload(allowPlainTextToken))
+        : await window.hermesDesktop.saveConnectionConfig(payload(allowPlainTextToken))
 
       if (seq !== saveSeq.current) {
-        return
+        return null
       }
 
       setState(next)
@@ -316,9 +329,20 @@ export function useRemoteConnectionForm({ scope, lockedMode }: UseRemoteConnecti
           message: apply ? g.restartingMessage : g.savedMessage
         })
       }
+
+      return null
     } catch (err) {
       if (seq !== saveSeq.current) {
-        return
+        return null
+      }
+
+      const readable = readableError(err, apply ? g.applyFailed : g.saveFailed).message
+      setLastError(readable)
+
+      // The caller owns the inline/dialog presentation for explicit plain-text
+      // consent. Do not also emit a hidden toast underneath the first-run overlay.
+      if (allowPlainTextToken) {
+        return readable
       }
 
       const sshError = err && typeof err === 'object' && 'sshError' in err ? String(err.sshError) : ''
@@ -339,13 +363,40 @@ export function useRemoteConnectionForm({ scope, lockedMode }: UseRemoteConnecti
         setLastError(message)
       } else {
         notifyError(err, apply ? g.applyFailed : g.saveFailed)
-        setLastError(err instanceof Error ? err.message : String(err))
       }
+
+      return readable
     } finally {
       if (seq === saveSeq.current) {
         setSaving(false)
       }
     }
+  }
+
+  const save = async (apply: boolean) => {
+    if (wouldPersistPlainTextToken) {
+      setPlainTextConfirm({ apply })
+
+      return
+    }
+
+    await performSave(apply, false)
+  }
+
+  const cancelPlainTextSave = () => setPlainTextConfirm(null)
+
+  const confirmPlainTextSave = async (): Promise<string | null> => {
+    if (!plainTextConfirm) {
+      return null
+    }
+
+    const error = await performSave(plainTextConfirm.apply, true)
+
+    if (!error) {
+      setPlainTextConfirm(null)
+    }
+
+    return error
   }
 
   // OAuth sign-in: persist the URL + oauth mode first (so the saved config has
@@ -547,6 +598,9 @@ export function useRemoteConnectionForm({ scope, lockedMode }: UseRemoteConnecti
     isPasswordProvider,
     oauthConnected,
     canUseRemote,
+    plainTextConfirm,
+    cancelPlainTextSave,
+    confirmPlainTextSave,
     save,
     signIn,
     signOut,

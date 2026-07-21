@@ -29,6 +29,11 @@ export function RemoteConnectForm({ className, form }: { className?: string; for
     providerLabel,
     isPasswordProvider,
     oauthConnected,
+    saving,
+    lastError,
+    plainTextConfirm,
+    cancelPlainTextSave,
+    confirmPlainTextSave,
     signIn,
     signOut
   } = form
@@ -99,23 +104,59 @@ export function RemoteConnectForm({ className, form }: { className?: string; for
 
       {/* Session-token gateways: keep the existing token entry box. */}
       {authResolved && authMode === 'token' ? (
-        <ListRow
-          action={
-            <Input
-              autoComplete="off"
-              className={cn('h-8 font-mono', CONTROL_TEXT)}
-              disabled={state.envOverride}
-              onChange={event => setRemoteToken(event.target.value)}
-              placeholder={
-                state.remoteTokenSet ? g.existingToken(state.remoteTokenPreview ?? g.savedToken) : g.pasteSessionToken
-              }
-              type="password"
-              value={remoteToken}
-            />
-          }
-          description={g.tokenDesc}
-          title={g.tokenTitle}
-        />
+        <>
+          <ListRow
+            action={
+              <Input
+                autoComplete="off"
+                className={cn('h-8 font-mono', CONTROL_TEXT)}
+                disabled={state.envOverride}
+                onChange={event => setRemoteToken(event.target.value)}
+                placeholder={
+                  state.remoteTokenSet
+                    ? g.existingToken(state.remoteTokenPreview ?? g.savedToken)
+                    : g.pasteSessionToken
+                }
+                type="password"
+                value={remoteToken}
+              />
+            }
+            description={g.tokenDesc}
+            title={g.tokenTitle}
+          />
+
+          {state.remoteTokenPlainText ? (
+            <div className="mt-2 flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-[length:var(--conversation-caption-font-size)] text-destructive">
+              <AlertCircle className="mt-0.5 size-4 shrink-0" />
+              <div>
+                <div className="font-medium">{g.plainTextStoredTitle}</div>
+                <div className="mt-1 leading-5">{g.plainTextStoredDesc}</div>
+              </div>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+
+      {plainTextConfirm ? (
+        <div className="mt-3 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-3 text-[length:var(--conversation-caption-font-size)] text-destructive">
+          <div className="font-medium">{g.plainTextConfirmTitle}</div>
+          <div className="mt-1 leading-5">{g.plainTextConfirmDesc}</div>
+          {lastError ? <div className="mt-2 rounded-md bg-destructive/10 px-2 py-1.5">{lastError}</div> : null}
+          <div className="mt-3 flex justify-end gap-2">
+            <Button disabled={saving} onClick={cancelPlainTextSave} size="sm" variant="ghost">
+              {t.common.cancel}
+            </Button>
+            <Button
+              disabled={saving}
+              onClick={() => void confirmPlainTextSave()}
+              size="sm"
+              variant="destructive"
+            >
+              {saving ? <Loader2 className="animate-spin" /> : null}
+              {g.plainTextConfirmAction}
+            </Button>
+          </div>
+        </div>
       ) : null}
     </div>
   )
