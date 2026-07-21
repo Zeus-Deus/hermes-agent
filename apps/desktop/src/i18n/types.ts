@@ -1692,6 +1692,18 @@ export interface Translations {
     reloadRetry: string
   }
 
+  firstRun: {
+    title: string
+    subtitle: string
+    installTitle: string
+    installDesc: string
+    installHint: string
+    connectTitle: string
+    connectDesc: string
+    install: string
+    installFailed: string
+  }
+
   onboarding: {
     headerTitle: string
     headerDesc: string
