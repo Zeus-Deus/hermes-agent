@@ -5,7 +5,7 @@
 // partial locales should use `defineLocale()` so missing desktop-only strings
 // fall back to English while new keys remain type-checked.
 
-export type Locale = 'en' | 'zh' | 'zh-hant' | 'ja'
+export type Locale = 'en' | 'zh' | 'zh-hant' | 'ja' | 'ar'
 
 export type ToolTitleKey =
   | 'browser_click'
@@ -173,6 +173,7 @@ export interface Translations {
     errors: {
       elevenLabsNeedsKey: string
       elevenLabsRejectedKey: string
+      gatewayAuthFailed: string
       methodNotAllowed: string
       microphonePermission: string
       openaiRejectedApiKey: string
@@ -211,11 +212,21 @@ export interface Translations {
       turnErrorTitle: string
       backgroundDoneTitle: string
       backgroundFailedTitle: string
+      creditsTitle: string
     }
   }
 
   remoteDisplayBanner: {
     message: (reason: string) => string
+  }
+
+  billingBlock: {
+    titleNous: string
+    titleProvider: (provider: string) => string
+    fallbackMessage: string
+    openBilling: string
+    addCredits: string
+    dismiss: string
   }
 
   titlebar: {
@@ -305,7 +316,7 @@ export interface Translations {
       enableAllDesc: string
       focusedHint: string
       kinds: Record<
-        'approval' | 'backgroundDone' | 'input' | 'turnDone' | 'turnError',
+        'approval' | 'backgroundDone' | 'credits' | 'input' | 'turnDone' | 'turnError',
         { label: string; description: string }
       >
       test: string
@@ -717,6 +728,11 @@ export interface Translations {
       messages: (count: number) => string
       restored: string
       deleteConfirm: (title: string) => string
+      autoArchiveTitle: string
+      autoArchiveDesc: string
+      autoArchiveDaysLabel: string
+      autoArchiveDaysUnit: string
+      autoArchiveFailed: string
       defaultDirTitle: string
       defaultDirDesc: string
       defaultDirUpdated: string
@@ -954,6 +970,7 @@ export interface Translations {
     ageSeconds: (seconds: number) => string
     ageMinutes: (minutes: number) => string
     ageHours: (hours: number) => string
+    ageDays: (days: number) => string
     durationSeconds: (seconds: string) => string
     durationMinutes: (minutes: number, seconds: number) => string
     tokens: (value: number | string) => string
@@ -1169,6 +1186,64 @@ export interface Translations {
     platformIntro: Record<string, string>
   }
 
+  webhooks: {
+    search: string
+    loading: string
+    loadFailed: string
+    subscriptions: (count: number) => string
+    hint: string
+    empty: string
+    disabledTitle: string
+    disabledBody: string
+    enable: string
+    enabling: string
+    enabled: (name: string) => string
+    disabled: (name: string) => string
+    enableRow: string
+    disableRow: string
+    delete: string
+    deleting: string
+    deleted: string
+    deleteTitle: string
+    deleteDescPrefix: string
+    deleteDescSuffix: string
+    deleteFailed: (name: string) => string
+    toggleFailed: (name: string) => string
+    newSubscription: string
+    restarting: string
+    restartNeeded: string
+    restartGateway: string
+    restartingGateway: string
+    restartFailed: (detail: string) => string
+    enabledRestarting: string
+    all: string
+    deliverOnly: string
+    createdTitle: string
+    createdSecretHint: string
+    webhookUrl: string
+    secretOnce: string
+    done: string
+    fieldName: string
+    fieldNamePlaceholder: string
+    fieldDescription: string
+    fieldDescriptionPlaceholder: string
+    fieldEvents: string
+    fieldEventsPlaceholder: string
+    fieldSkills: string
+    fieldSkillsPlaceholder: string
+    fieldDeliver: string
+    fieldDeliverOnly: string
+    fieldPrompt: string
+    fieldPromptPlaceholder: string
+    nameRequired: string
+    create: string
+    creating: string
+    created: string
+    createFailed: (detail: string) => string
+    copy: string
+    deliverOptions: Record<string, string>
+  }
+
   profiles: {
     close: string
     nameHint: string
@@ -1310,6 +1385,7 @@ export interface Translations {
     promptPlaceholder: string
     frequencyLabel: string
     deliverLabel: string
+    deliverNeedsHomeChannel: string
     modelLabel: string
     modelDefault: string
     customScheduleLabel: string
@@ -1322,6 +1398,22 @@ export interface Translations {
     scriptOnlyEditHint: string
     saveChanges: string
     createAction: string
+    tabs: {
+      jobs: string
+      blueprints: string
+    }
+    blueprints: {
+      tab: string
+      subtitle: string
+      dialogDesc: string
+      scheduleIt: string
+      scheduling: string
+      scheduled: string
+      loading: string
+      failedLoad: string
+      emptyTitle: string
+      emptyDesc: string
+    }
   }
 
   artifacts: {
@@ -1478,6 +1570,13 @@ export interface Translations {
       ageDay: string
       ageHour: string
       ageMin: string
+    }
+    dateDivider: {
+      today: string
+      yesterday: string
+      thisWeek: string
+      lastWeek: string
+      thisMonth: string
     }
   }
 
@@ -1676,6 +1775,39 @@ export interface Translations {
     viewDocs: string
     installTo: string
     retryAfterRun: string
+    setupChoiceTitle: string
+    setupChoiceDesc: string
+    connectExistingTitle: string
+    connectExistingShort: string
+    connectExistingDesc: string
+    installLocalTitle: string
+    installLocalDesc: string
+    localStartUnavailable: string
+    remoteSetupTitle: string
+    remoteSetupDesc: string
+    remoteUrlTitle: string
+    remoteUrlDesc: string
+    remoteUrlPlaceholder: string
+    probing: string
+    probeError: string
+    identityProvider: string
+    authTitle: string
+    authNeedsOauth: (provider: string) => string
+    authSignedIn: string
+    connected: string
+    signIn: string
+    signInWith: (provider: string) => string
+    enterUrlFirst: string
+    signInIncomplete: string
+    tokenTitle: string
+    tokenDesc: string
+    pasteSessionToken: string
+    incompleteSignInTest: string
+    incompleteTokenTest: string
+    testConnection: string
+    testSucceeded: (baseUrl: string, version?: string) => string
+    applyRemote: string
+    backToSetup: string
     failedTitle: string
     settingUpTitle: string
     finishingTitle: string
@@ -1695,18 +1827,6 @@ export interface Translations {
     copiedOutput: string
     copyOutput: string
     reloadRetry: string
-  }
-
-  firstRun: {
-    title: string
-    subtitle: string
-    installTitle: string
-    installDesc: string
-    installHint: string
-    connectTitle: string
-    connectDesc: string
-    install: string
-    installFailed: string
   }
 
   onboarding: {
@@ -1778,6 +1898,7 @@ export interface Translations {
     free: string
     freeTier: string
     priceTitle: string
+    wasPrice: string
   }
 
   modelVisibility: {
@@ -1878,6 +1999,8 @@ export interface Translations {
       running: (count: number) => string
       cron: string
       openCron: string
+      webhooks: string
+      openWebhooks: string
       starmap: string
       openStarmap: string
       turnRunning: string
@@ -2054,6 +2177,7 @@ export interface Translations {
     closeOthers: string
     closeToRight: string
     closeAll: string
+    newSessionTab: string
     split: (dir: string) => string
     move: (dir: string) => string
     dirUp: string
@@ -2145,6 +2269,9 @@ export interface Translations {
       skip: string
       skipped: string
       continueLabel: string
+      lateAnswer: (question: string, choice: string) => string
+      lateAnswerTip: string
+      lateAnswerHint: string
     }
     tool: {
       code: string

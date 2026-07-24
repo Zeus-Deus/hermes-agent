@@ -250,6 +250,7 @@ import sys
 from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
 
+from gateway.authz_mixin import _coerce_allow_set
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -354,7 +355,7 @@ def _probe_voice_duration_seconds(path: str) -> Optional[int]:
             proc = subprocess.run(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                  "-of", "default=noprint_wrappers=1:nokey=1", path],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             if proc.returncode == 0:
                 return _coerce_duration_seconds(proc.stdout.strip())
@@ -1013,10 +1014,15 @@ class TelegramAdapter(BasePlatformAdapter):
         if not user_id:
             return True
 
-        # Adapter-level allow_from: when set, it is the sole authority.
-        adapter_allow_from = self.config.extra.get("allow_from")
+        # Adapter-level allow_from / group_allow_from: when set, they are the
+        # sole authority.  Group chats use group_allow_from; DMs use allow_from.
+        chat_type = source.chat_type or ""
+        if chat_type in ("group", "forum", "channel"):
+            adapter_allow_from = self.config.extra.get("group_allow_from")
+        else:
+            adapter_allow_from = self.config.extra.get("allow_from")
         if adapter_allow_from is not None:
-            allowed = {str(u).strip() for u in adapter_allow_from if str(u).strip()}
+            allowed = _coerce_allow_set(adapter_allow_from)
             return user_id in allowed or "*" in allowed
 
         # Test/custom injection only. The class method named
@@ -3428,10 +3434,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 "[%s] python-telegram-bot not installed. Run: pip install python-telegram-bot",
                 self.name,
             )
+            self._set_fatal_error("missing_dependency", "python-telegram-bot not installed", retryable=False)
             return False
         
         if not self.config.token:
             logger.error("[%s] No bot token configured", self.name)
+            self._set_fatal_error("missing_credentials", "No bot token configured", retryable=False)
             return False
         
         try:
@@ -3615,8 +3623,30 @@ class TelegramAdapter(BasePlatformAdapter):
             # fallback-IP chain can't block startup indefinitely.
             _max_connect = 8
             _init_timeout = _env_float("HERMES_TELEGRAM_INIT_TIMEOUT", 30.0)
+            # Total watchdog: ensure the entire connect loop has an upper bound
+            # even if the retry loop itself silently stalls (#67498). This is
+            # the per-attempt timeout PLUS generous margins between attempts so
+            # we never hang past the sum even when all attempts are exhausted.
+            _total_deadline = (
+                asyncio.get_running_loop().time()
+                + _init_timeout * _max_connect
+                + 120.0  # extra margin for between-attempt sleeps + overhead
+            )
             for _attempt in range(_max_connect):
+                rebuild_app = False
                 try:
+                    # Check total watchdog deadline — if we blew past it the
+                    # retry ladder must yield even if no individual attempt
+                    # has raised.
+                    if asyncio.get_running_loop().time() >= _total_deadline:
+                        raise OSError(
+                            f"Telegram initialization timed out after {_max_connect} attempts "
+                            f"({_init_timeout:.0f}s each) — total connect watchdog "
+                            f"deadline ({_init_timeout * _max_connect + 120.0:.0f}s) exceeded. "
+                            f"Check network connectivity to api.telegram.org "
+                            f"or set HERMES_TELEGRAM_HTTP_CONNECT_TIMEOUT / "
+                            f"HERMES_TELEGRAM_INIT_TIMEOUT to a lower value."
+                        )
                     logger.warning(
                         "[%s] Connecting to Telegram (attempt %d/%d)…",
                         self.name, _attempt + 1, _max_connect,
@@ -3634,6 +3664,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
                     break
                 except asyncio.TimeoutError:
+                    rebuild_app = True
                     if _attempt < _max_connect - 1:
                         wait = min(2 ** _attempt, 15)
                         logger.warning(
@@ -3648,6 +3679,7 @@ class TelegramAdapter(BasePlatformAdapter):
                             f"or set HERMES_TELEGRAM_HTTP_CONNECT_TIMEOUT to a lower value."
                         )
                 except OSError as init_err:
+                    rebuild_app = True
                     if _attempt < _max_connect - 1:
                         wait = min(2 ** _attempt, 15)
                         logger.warning(
@@ -3658,6 +3690,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     else:
                         raise
                 except Exception as init_err:
+                    rebuild_app = True
                     if not self._looks_like_network_error(init_err):
                         raise
                     if _attempt < _max_connect - 1:
@@ -3669,6 +3702,57 @@ class TelegramAdapter(BasePlatformAdapter):
                         await asyncio.sleep(wait)
                     else:
                         raise
+                except BaseException:
+                    # Catch CancelledError and other BaseException subclasses
+                    # that the existing except handlers miss. Log the event so
+                    # the operator can diagnose, then reraise so cancellation
+                    # semantics are preserved (#67498).
+                    # NOTE: placed LAST so Exception handlers above have
+                    # priority — BaseException catches everything including
+                    # Exception.
+                    logger.warning(
+                        "[%s] Connect attempt %d/%d interrupted by %s — propagating",
+                        self.name,
+                        _attempt + 1,
+                        _max_connect,
+                        "CancelledError"
+                        if isinstance(sys.exc_info()[1], asyncio.CancelledError)
+                        else type(sys.exc_info()[1]).__name__,
+                    )
+                    raise
+                finally:
+                    # After a failed attempt the app may be in a partially-
+                    # initialized state (closed transports, half-built handlers).
+                    # Rebuild from the same token/config so the next attempt
+                    # starts with a fresh Application — the old one is discarded
+                    # and will be GC'd (#67498).
+                    if rebuild_app and _attempt < _max_connect - 1:
+                        old_app = self._app
+                        self._app = builder.build()
+                        self._bot = self._app.bot
+                        # Re-register handlers on the new app
+                        self._app.add_handler(TelegramMessageHandler(
+                            filters.TEXT & ~filters.COMMAND,
+                            self._handle_text_message
+                        ))
+                        self._app.add_handler(TelegramMessageHandler(
+                            filters.COMMAND,
+                            self._handle_command
+                        ))
+                        self._app.add_handler(TelegramMessageHandler(
+                            filters.LOCATION | getattr(filters, "VENUE", filters.LOCATION),
+                            self._handle_location_message
+                        ))
+                        self._app.add_handler(TelegramMessageHandler(
+                            filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL | filters.Sticker.ALL,
+                            self._handle_media_message
+                        ))
+                        self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
+                        # Best-effort discard the old app's resources
+                        try:
+                            await _shutdown_abandoned_app(old_app)
+                        except Exception:
+                            pass
             await self._app.start()
 
             # Decide between webhook and polling mode
@@ -6917,8 +7001,13 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             # Fallback: download and upload as file (supports up to 10MB)
             try:
-                import httpx
-                async with httpx.AsyncClient(timeout=30.0) as client:
+                from gateway.platforms.base import _ssrf_redirect_guard
+                from tools.url_safety import create_ssrf_safe_async_client
+
+                async with create_ssrf_safe_async_client(
+                    timeout=30.0,
+                    event_hooks={"response": [_ssrf_redirect_guard]},
+                ) as client:
                     resp = await client.get(image_url)
                     resp.raise_for_status()
                     image_data = resp.content
@@ -7775,9 +7864,15 @@ class TelegramAdapter(BasePlatformAdapter):
         observe_prompt = self._telegram_group_observe_channel_prompt()
         channel_prompt = f"{event.channel_prompt}\n\n{observe_prompt}" if event.channel_prompt else observe_prompt
         if event.message_type == MessageType.COMMAND:
+            # Commands must retain the original source (with user_id) so
+            # slash-access control (_check_slash_access) can identify the
+            # sender.  Replacing the source with an anonymised shared source
+            # (user_id=None) causes admin-only commands like /new to be
+            # denied even when the sender is an admin, because
+            # SlashAccessPolicy.is_admin(None) is always False.
+            # Still inject channel_prompt for group context.
             return dataclasses.replace(
                 event,
-                source=shared_source,
                 channel_prompt=channel_prompt,
             )
         return dataclasses.replace(
@@ -9394,12 +9489,12 @@ def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
         if isinstance(allowed_users, list):
             allowed_users = ",".join(str(v) for v in allowed_users)
         os.environ["TELEGRAM_ALLOWED_USERS"] = str(allowed_users)
-    group_allowed_users = telegram_cfg.get("group_allow_from")
+    group_allowed_users = telegram_cfg.get("group_allow_from") or _telegram_extra.get("group_allow_from")
     if group_allowed_users is not None and not os.getenv("TELEGRAM_GROUP_ALLOWED_USERS"):
         if isinstance(group_allowed_users, list):
             group_allowed_users = ",".join(str(v) for v in group_allowed_users)
         os.environ["TELEGRAM_GROUP_ALLOWED_USERS"] = str(group_allowed_users)
-    group_allowed_chats = telegram_cfg.get("group_allowed_chats")
+    group_allowed_chats = telegram_cfg.get("group_allowed_chats") or _telegram_extra.get("group_allowed_chats")
     if group_allowed_chats is not None and not os.getenv("TELEGRAM_GROUP_ALLOWED_CHATS"):
         if isinstance(group_allowed_chats, list):
             group_allowed_chats = ",".join(str(v) for v in group_allowed_chats)
@@ -9435,7 +9530,7 @@ def register(ctx) -> None:
         check_fn=check_telegram_requirements,
         is_connected=_is_connected,
         required_env=["TELEGRAM_BOT_TOKEN"],
-        install_hint="pip install 'hermes-agent[telegram]'",
+        install_hint="Run `hermes setup` to install Telegram support.",
         setup_fn=interactive_setup,
         apply_yaml_config_fn=_apply_yaml_config,
         allowed_users_env="TELEGRAM_ALLOWED_USERS",

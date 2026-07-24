@@ -211,20 +211,11 @@ declare global {
       onPowerResume?: (callback: () => void) => () => void
       onBootProgress: (callback: (payload: DesktopBootProgress) => void) => () => void
       getBootstrapState: () => Promise<DesktopBootstrapState>
+      continueBootstrapLocal: () => Promise<{ ok: boolean }>
       resetBootstrap: () => Promise<{ ok: boolean }>
       repairBootstrap: () => Promise<{ ok: boolean }>
       cancelBootstrap: () => Promise<{ ok: boolean; cancelled: boolean }>
       onBootstrapEvent: (callback: (payload: DesktopBootstrapEvent) => void) => () => void
-      // First-run choice gate: on a fresh machine main waits (before any local
-      // install) for the user to pick install-vs-connect. `get` seeds a
-      // late-mounting renderer; `onChanged` tracks the waiting state;
-      // `choose('install')` releases the wait. The remote path goes through the
-      // existing applyConnectionConfig, not `choose`.
-      firstRun: {
-        get: () => Promise<DesktopFirstRunState>
-        choose: (choice: 'install') => Promise<DesktopFirstRunState>
-        onChanged: (cb: (state: DesktopFirstRunState) => void) => () => void
-      }
       getVersion: () => Promise<DesktopVersionInfo>
       getRemoteDisplayReason?: () => Promise<string | null>
       updates: {
@@ -611,13 +602,6 @@ export interface DesktopCloudAgentSignInResult {
   connected: boolean
 }
 
-// First-run choice gate state. `required` is true while main is parked waiting
-// for the user to choose "install on this computer" vs "connect to an existing
-// server" (the fresh-machine bootstrap-needed path). See electron/first-run-gate.ts.
-export interface DesktopFirstRunState {
-  required: boolean
-}
-
 export interface DesktopBootProgress {
   error: string | null
   fakeMode: boolean
@@ -656,6 +640,11 @@ export interface DesktopBootstrapUnsupportedPlatform {
   docsUrl: string
 }
 
+export interface DesktopBootstrapSetupChoice {
+  platform: string
+  activeRoot: string
+}
+
 export interface DesktopBootstrapState {
   active: boolean
   manifest: { type: 'manifest'; stages: DesktopBootstrapStageDescriptor[]; protocolVersion: number | null } | null
@@ -664,10 +653,18 @@ export interface DesktopBootstrapState {
   log: Array<{ ts: number; stage: string | null; line: string; stream?: 'stdout' | 'stderr' }>
   startedAt: number | null
   completedAt: number | null
+  setupChoice: DesktopBootstrapSetupChoice | null
   unsupportedPlatform: DesktopBootstrapUnsupportedPlatform | null
 }
 
 export type DesktopBootstrapEvent =
+  | { type: 'dismissed' }
+  | {
+      type: 'setup-choice'
+      active: boolean
+      platform?: string
+      activeRoot?: string
+    }
   | { type: 'manifest'; stages: DesktopBootstrapStageDescriptor[]; protocolVersion: number | null }
   | {
       type: 'stage'

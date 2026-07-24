@@ -34,7 +34,7 @@ import { stopBackendChild as stopBackendChildImpl } from './backend-child'
 import { dashboardFallbackArgs, sourceDeclaresServe } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
 import { buildDesktopBackendEnv, normalizeHermesHomeRoot } from './backend-env'
-import { canImportHermesCli, verifyHermesCli } from './backend-probes'
+import { canImportHermesCli, shouldTrustHermesOverride, verifyHermesCli } from './backend-probes'
 import { waitForDashboardPortAnnouncement } from './backend-ready'
 import { shouldLatchBackendStartFailure } from './backend-start-failure'
 import { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } from './bootstrap-platform'
@@ -78,13 +78,8 @@ import {
 } from './desktop-uninstall'
 import { installEmbedReferer } from './embed-referer'
 import { createEventDeduper } from './event-dedupe'
-import {
-  applyFirstRunChoice,
-  guardFirstRunBootstrap,
-  isFirstRunAborted,
-  readFirstRunInstallChoice
-} from './first-run-flow'
-import { createFirstRunGate } from './first-run-gate'
+import { findGitBash as _findGitBash } from './find-git-bash'
+import { createFirstRunSetupGate } from './first-run-setup-gate'
 import { readDirForIpc } from './fs-read-dir'
 import { applyGatewayWsOrigin } from './gateway-ws-origin'
 import { probeGatewayWebSocket } from './gateway-ws-probe'
@@ -126,8 +121,19 @@ import {
 } from './hardening'
 import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } from './link-title-window'
 import { ensureMainWindow } from './main-window-lifecycle'
+import { oauthSessionIsLive, resolveJsonBody, resolveOauthRestAuth } from './native-auth-decisions'
+import {
+  nativeRefreshUrl,
+  type NativeTokenSet,
+  parseTokenResponse,
+  resolveLoginStrategy,
+  tokenNeedsRefresh
+} from './native-oauth'
+import { runNativeLogin } from './native-oauth-login'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import { createKeepAwake } from './power-save'
+import { FirstRunSetupResetError, runPrimaryBackendStartup } from './primary-backend-startup'
+import { rehomePrimaryConnection } from './primary-connection-rehome'
 import { decideProfileDeleteAction, profileNameFromDeleteRequest, resolveRouteProfile } from './profile-delete-routing'
 import * as remoteLifecycle from './remote-lifecycle'
 import { RemoteLivenessTracker, RemoteRevalidationCoordinator, revalidateRemoteConnection } from './remote-liveness'
@@ -215,10 +221,6 @@ if (USER_DATA_OVERRIDE) {
 
 const DEV_SERVER = process.env.HERMES_DESKTOP_DEV_SERVER
 const IS_PACKAGED = app.isPackaged || Boolean(process.env.HERMES_DESKTOP_IS_PACKAGED)
-// dev/testing: ignore every non-owned runtime source (dev checkout, PATH hermes,
-// system python) so a sandboxed HERMES_HOME reaches the first-run/bootstrap path.
-// Gated on !IS_PACKAGED so a packaged app never loses its system-python fallback.
-const FORCE_BOOTSTRAP = !IS_PACKAGED && process.env.HERMES_DESKTOP_FORCE_BOOTSTRAP === '1'
 const IS_MAC = process.platform === 'darwin'
 const IS_WINDOWS = process.platform === 'win32'
 const IS_WSL = isWslEnvironment()
@@ -545,12 +547,6 @@ const BOOTSTRAP_COMPLETE_MARKER = path.join(ACTIVE_HERMES_ROOT, '.hermes-bootstr
 const BOOTSTRAP_MARKER_SCHEMA_VERSION = 1
 
 const DESKTOP_CONNECTION_CONFIG_PATH = path.join(app.getPath('userData'), 'connection.json')
-// first-run.json records that the user already picked "install on this computer"
-// at the first-run gate, so an interrupted install (or an unattended relaunch)
-// resumes the bootstrap directly instead of re-asking install-vs-connect. The
-// remote path needs no marker — it writes mode:'remote' to connection.json,
-// which stops the boot flow ever reaching bootstrap-needed again.
-const DESKTOP_FIRST_RUN_CONFIG_PATH = path.join(app.getPath('userData'), 'first-run.json')
 const DESKTOP_INSTALLATION_PATH = path.join(app.getPath('userData'), 'desktop-installation.json')
 const DESKTOP_UPDATE_CONFIG_PATH = path.join(app.getPath('userData'), 'updates.json')
 const DESKTOP_WINDOW_STATE_PATH = path.join(app.getPath('userData'), 'window-state.json')
@@ -1409,13 +1405,17 @@ let bootstrapState = {
   log: [],
   startedAt: null,
   completedAt: null,
+  setupChoice: null,
   unsupportedPlatform: null
 }
+
+let firstRunSetupGate = null
 
 function broadcastBootstrapEvent(ev) {
   if (ev.type === 'manifest') {
     bootstrapState.manifest = ev
     bootstrapState.active = true
+    bootstrapState.setupChoice = null
     bootstrapState.startedAt = bootstrapState.startedAt || Date.now()
     bootstrapState.stages = {}
 
@@ -1443,14 +1443,30 @@ function broadcastBootstrapEvent(ev) {
   } else if (ev.type === 'failed') {
     bootstrapState.active = false
     bootstrapState.error = ev.error || 'unknown error'
+    bootstrapState.setupChoice = null
   } else if (ev.type === 'unsupported-platform') {
     bootstrapState.active = false
+    bootstrapState.setupChoice = null
     bootstrapState.unsupportedPlatform = {
       platform: ev.platform,
       activeRoot: ev.activeRoot,
       installCommand: ev.installCommand,
       docsUrl: ev.docsUrl
     }
+  } else if (ev.type === 'setup-choice') {
+    bootstrapState.active = false
+    bootstrapState.error = null
+    bootstrapState.manifest = null
+    bootstrapState.stages = {}
+    bootstrapState.setupChoice = ev.active
+      ? {
+          platform: ev.platform,
+          activeRoot: ev.activeRoot
+        }
+      : null
+    bootstrapState.unsupportedPlatform = null
+  } else if (ev.type === 'dismissed') {
+    resetBootstrapSnapshot()
   }
 
   if (!mainWindow || mainWindow.isDestroyed()) {
@@ -1470,26 +1486,99 @@ function getBootstrapState() {
   return bootstrapState
 }
 
-// First-run choice gate. On a totally fresh machine ensureRuntime()'s
-// 'bootstrap-needed' branch parks on this before any install starts so the user
-// can pick "install on this computer" vs "connect to an existing server". The
-// gate is electron-free (unit-tested in first-run-gate.test.ts); its onChanged
-// bridges into the renderer via the hermes:first-run:changed broadcast.
-function broadcastFirstRunState(state?: { required: boolean }) {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    return
+function resetBootstrapSnapshot() {
+  bootstrapState = {
+    active: false,
+    manifest: null,
+    stages: {},
+    error: null,
+    log: [],
+    startedAt: null,
+    completedAt: null,
+    setupChoice: null,
+    unsupportedPlatform: null
   }
-
-  const { webContents } = mainWindow
-
-  if (!webContents || webContents.isDestroyed()) {
-    return
-  }
-
-  webContents.send('hermes:first-run:changed', state ?? firstRunGate.state())
 }
 
-const firstRunGate = createFirstRunGate(broadcastFirstRunState)
+function promptFirstRunSetupChoice(backend) {
+  broadcastBootstrapEvent({
+    type: 'setup-choice',
+    active: true,
+    platform: backend.platform || process.platform,
+    activeRoot: backend.activeRoot || ACTIVE_HERMES_ROOT
+  })
+}
+
+function hideFirstRunSetupChoice() {
+  if (bootstrapState.setupChoice) {
+    broadcastBootstrapEvent({ type: 'setup-choice', active: false })
+  }
+}
+
+function getFirstRunSetupGate() {
+  if (!firstRunSetupGate) {
+    firstRunSetupGate = createFirstRunSetupGate({
+      hideChoice: hideFirstRunSetupChoice,
+      log: rememberLog,
+      onStuck: (_backend, stuckAfterMs) => {
+        updateBootProgress(
+          {
+            error: null,
+            message: `Still waiting for first-run setup choice after ${Math.round(stuckAfterMs / 1000)} seconds`,
+            phase: 'bootstrap.choice',
+            progress: 12,
+            running: true
+          },
+          { allowDecrease: true }
+        )
+      },
+      promptChoice: promptFirstRunSetupChoice
+    })
+  }
+
+  return firstRunSetupGate
+}
+
+async function waitForFirstRunSetupChoice(backend) {
+  const gate = getFirstRunSetupGate()
+
+  if (!gate.shouldGate(backend)) {
+    return 'continue-local'
+  }
+
+  updateBootProgress(
+    {
+      error: null,
+      message: 'Waiting for first-run setup choice',
+      phase: 'bootstrap.choice',
+      progress: 12,
+      running: true
+    },
+    { allowDecrease: true }
+  )
+
+  return gate.wait(backend)
+}
+
+function continueFirstRunLocalBootstrap() {
+  getFirstRunSetupGate().continueLocal()
+}
+
+function abandonFirstRunSetupChoiceForRemoteApply() {
+  const gate = getFirstRunSetupGate()
+
+  if (!gate.hasWaiter()) {
+    return false
+  }
+
+  const resumedGatedConnection = gate.abandonForRemoteApply()
+
+  if (resumedGatedConnection) {
+    broadcastBootstrapEvent({ type: 'dismissed' })
+  }
+
+  return resumedGatedConnection
+}
 
 function updateBootProgress(update, options: { allowDecrease?: boolean } = {}) {
   const nextProgressRaw =
@@ -1947,48 +2036,16 @@ function findSystemPython() {
   return null
 }
 
-// findGitBash — locate bash.exe on Windows. Hermes' terminal tool requires
-// bash (POSIX shell), and on Windows that's almost always Git for Windows'
-// bundled Git Bash. We check the same set of locations tools/environments/
-// local.py:_find_bash() checks at runtime, so a positive result here means
-// the agent will be able to start a terminal too.
-//
-// On non-Windows hosts bash is part of the OS and this just returns the
-// first bash on PATH.
+// findGitBash — locate bash.exe on Windows. Resolves HERMES_GIT_BASH_PATH
+// first (mirrors tools/environments/local.py:_find_bash), then PortableGit,
+// standard install locations, and finally PATH.
 function findGitBash() {
-  if (!IS_WINDOWS) {
-    return findOnPath('bash')
-  }
-
-  // install.ps1 drops PortableGit at %LOCALAPPDATA%\hermes\git\... — checked
-  // first so users who installed via install.ps1 are detected before we
-  // start probing system-wide locations.
-  const localAppData = process.env.LOCALAPPDATA || ''
-  const candidates = []
-
-  if (localAppData) {
-    candidates.push(path.join(localAppData, 'hermes', 'git', 'bin', 'bash.exe'))
-    candidates.push(path.join(localAppData, 'hermes', 'git', 'usr', 'bin', 'bash.exe'))
-  }
-
-  // Standard Git for Windows install locations.
-  candidates.push(path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'Git', 'bin', 'bash.exe'))
-  candidates.push(path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git', 'bin', 'bash.exe'))
-
-  if (localAppData) {
-    candidates.push(path.join(localAppData, 'Programs', 'Git', 'bin', 'bash.exe'))
-  }
-
-  for (const candidate of candidates) {
-    if (fileExists(candidate)) {
-      return candidate
-    }
-  }
-
-  // Last resort — bash on PATH (covers WSL bash, MSYS2, custom installs).
-  // On WSL hosts findOnPath itself filters out Windows-binary paths via
-  // isWindowsBinaryPathInWsl, so we won't hand back a wsl.exe shim either.
-  return findOnPath('bash')
+  return _findGitBash({
+    isWindows: IS_WINDOWS,
+    env: process.env,
+    fileExists,
+    findOnPath
+  })
 }
 
 function getVenvPython(venvRoot) {
@@ -3532,11 +3589,7 @@ function resolveHermesBackend(backendArgs) {
   //    cloned repo at SOURCE_REPO_ROOT takes precedence over ACTIVE and any
   //    installed `hermes` on PATH so local Python edits are actually exercised.
   //    (In dev with no checkout, SOURCE_REPO_ROOT won't pass isHermesSourceRoot.)
-  //    FORCE_BOOTSTRAP (HERMES_DESKTOP_FORCE_BOOTSTRAP=1) is a dev/testing flag to
-  //    exercise the first-run/bootstrap path from a dev checkout: it skips this
-  //    dev-source step, the PATH hermes fallback (step 4), and the system-python
-  //    fallback (step 5) below.
-  if (!FORCE_BOOTSTRAP && !IS_PACKAGED && isHermesSourceRoot(SOURCE_REPO_ROOT)) {
+  if (!IS_PACKAGED && isHermesSourceRoot(SOURCE_REPO_ROOT)) {
     const backend = createPythonBackend(SOURCE_REPO_ROOT, `Hermes source at ${SOURCE_REPO_ROOT}`, backendArgs)
 
     if (backend) {
@@ -3558,9 +3611,8 @@ function resolveHermesBackend(backendArgs) {
   //    a previous tool-only setup, or pip-installed system-wide. Use it but
   //    do NOT write a bootstrap marker; the user did this themselves and we
   //    don't want to take ownership of an install we didn't perform.
-  //    HERMES_DESKTOP_IGNORE_EXISTING=1 (or FORCE_BOOTSTRAP) forces the bootstrap
-  //    path for testing.
-  if (!FORCE_BOOTSTRAP && process.env.HERMES_DESKTOP_IGNORE_EXISTING !== '1') {
+  //    HERMES_DESKTOP_IGNORE_EXISTING=1 forces the bootstrap path for testing.
+  if (process.env.HERMES_DESKTOP_IGNORE_EXISTING !== '1') {
     let hermesCommand = null
     const hermesOverride = process.env.HERMES_DESKTOP_HERMES
 
@@ -3601,7 +3653,11 @@ function resolveHermesBackend(backendArgs) {
       // and lets the resolver fall through to step 6 / bootstrap.
       const shellForProbe = isCommandScript(hermesCommand)
 
-      if (verifyHermesCli(hermesCommand, { shell: shellForProbe })) {
+      // HERMES_DESKTOP_HERMES is an explicit deployment override (used by
+      // the Nix wrapper), not a discovered PATH candidate. It must not fall
+      // through to the install-script bootstrap if the optional probe times
+      // out under load; the pinned backend is the only valid runtime there.
+      if (shouldTrustHermesOverride(hermesOverride) || verifyHermesCli(hermesCommand, { shell: shellForProbe })) {
         return (
           unwrapWindowsVenvHermesCommand(hermesCommand, backendArgs) || {
             label: `existing Hermes CLI at ${hermesCommand}`,
@@ -3623,9 +3679,8 @@ function resolveHermesBackend(backendArgs) {
 
   // 5. Last-ditch: pip-installed hermes_cli module via system Python.
   //    Same rationale as #4 -- the user installed this; we use it but don't
-  //    take ownership. FORCE_BOOTSTRAP skips this so the first-run/bootstrap
-  //    path can be exercised from a dev checkout.
-  const python = FORCE_BOOTSTRAP ? null : findSystemPython()
+  //    take ownership.
+  const python = findSystemPython()
 
   if (python) {
     // Same smoke-test rationale as step 4: a system Python in the
@@ -3677,13 +3732,7 @@ function resolveHermesBackend(backendArgs) {
   }
 }
 
-// `firstRunGate` (option) enables the fresh-machine install-vs-connect gate on
-// the bootstrap-needed branch. Only the primary boot (startHermes) passes it;
-// the pool call site (spawnPoolBackend) and the post-bootstrap re-resolution
-// leave it false so a non-primary profile bootstraps directly — a secondary
-// window never renders FirstRunChoiceOverlay, so parking it on the gate would
-// hang with no overlay and surface a raw firstRunAborted on abort.
-async function ensureRuntime(backend, { firstRunGate: firstRunGateEnabled = false } = {}) {
+async function ensureRuntime(backend) {
   if (!backend.bootstrap) {
     await advanceBootProgress('runtime.external', `Using ${backend.label}`, 32)
 
@@ -3701,24 +3750,6 @@ async function ensureRuntime(backend, { firstRunGate: firstRunGateEnabled = fals
   // to a renderer-side install overlay.
   if (backend.kind === 'bootstrap-needed') {
     rememberLog('[bootstrap] no Hermes install found; starting first-launch bootstrap')
-
-    // First-run choice, BEFORE anything installs — including BEFORE the Windows
-    // recovery handoff below. A fresh machine (any OS) must first pick
-    // install-vs-connect; the recovery handoff only matters once "install" was
-    // chosen (it heals an interrupted install), so a user picking "connect to a
-    // server" must never trigger it. If the user (via connection-config:apply)
-    // aborts to go remote, throw a non-latching firstRunAborted error so
-    // startHermes() re-dials the freshly-saved remote instead of failing boot.
-    //
-    // Only the primary boot parks here (firstRunGateEnabled). Skip the wait when
-    // the user already chose install in a prior run (persisted marker) so an
-    // interrupted install / unattended relaunch resumes bootstrap directly and
-    // the automatic Windows recovery handoff below still runs.
-    await guardFirstRunBootstrap({
-      gate: firstRunGate,
-      enabled: firstRunGateEnabled,
-      installChosen: firstRunInstallChosen
-    })
 
     if (await handOffWindowsBootstrapRecovery('bootstrap-needed')) {
       const handoffError: Error & { isBootstrapFailure?: boolean; bootstrapHandedOff?: boolean } = new Error(
@@ -3911,6 +3942,12 @@ function fetchJson(url, token, options: any = {}) {
         headers: {
           'Content-Type': contentType,
           'X-Hermes-Session-Token': token,
+          // RFC 8252 native flow authenticates the gated gateway with a bearer
+          // token instead of the loopback session-token header. When
+          // ``options.bearer`` is set we send Authorization: Bearer <token>;
+          // the gateway's OAuth gate verifies it via the provider stack with
+          // no cookie involved.
+          ...(options.bearer ? { Authorization: `Bearer ${options.bearer}` } : {}),
           ...(body ? { 'Content-Length': String(body.length) } : {})
         }
       },
@@ -5764,10 +5801,188 @@ function fetchJsonViaOauthSession(url, options: any = {}) {
   })
 }
 
+// ---------------------------------------------------------------------------
+// RFC 8252 native-app tokens (system-browser + loopback + PKCE).
+//
+// Unlike the cookie flow, the native flow hands the desktop opaque bearer
+// tokens it holds itself: the access token authenticates REST via
+// ``Authorization: Bearer`` (which the gateway gate now accepts) and mints WS
+// tickets the same way, so NO browser session cookie or embedded webview is
+// involved. Tokens are persisted encrypted at rest via Electron ``safeStorage``
+// (OS keychain) keyed by gateway base URL, and refreshed via
+// ``/auth/native/refresh`` before expiry. This is the desktop half of the
+// feature; the server half lives in hermes_cli/dashboard_auth/native_flow.py.
+// ---------------------------------------------------------------------------
+
+// In-memory cache of decrypted native tokens, keyed by normalized base URL.
+// Backed by the encrypted on-disk store so it survives restarts.
+const _nativeTokens = new Map<string, NativeTokenSet>()
+
+function _nativeTokenStorePath() {
+  // Co-located with the connection config under userData; one JSON file mapping
+  // baseUrl → { encoding, value } safeStorage payloads.
+  return path.join(app.getPath('userData'), 'native-oauth-tokens.json')
+}
+
+function _readNativeTokenStore(): Record<string, any> {
+  try {
+    const raw = fs.readFileSync(_nativeTokenStorePath(), 'utf8')
+    const parsed = JSON.parse(raw)
+
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function _persistNativeTokens(baseUrl: string, tokens: NativeTokenSet | null) {
+  const store = _readNativeTokenStore()
+
+  if (tokens) {
+    // Encrypt the whole token set as one blob so the refresh token never
+    // lands in plaintext on disk. Reuse the hardened encrypt helper.
+    const secret = encryptDesktopSecret(JSON.stringify(tokens))
+    store[baseUrl] = secret
+  } else {
+    delete store[baseUrl]
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(_nativeTokenStorePath()), { recursive: true })
+    fs.writeFileSync(_nativeTokenStorePath(), JSON.stringify(store), { mode: 0o600 })
+  } catch (error) {
+    rememberLog(`[native-oauth] failed to persist tokens: ${(error as Error).message}`)
+  }
+}
+
+function _loadNativeTokens(baseUrl: string): NativeTokenSet | null {
+  const cached = _nativeTokens.get(baseUrl)
+
+  if (cached) {
+    return cached
+  }
+
+  const store = _readNativeTokenStore()
+  const secret = store[baseUrl]
+
+  if (!secret) {
+    return null
+  }
+
+  try {
+    const plaintext = decryptDesktopSecret(secret)
+
+    if (!plaintext) {
+      return null
+    }
+
+    const tokens = parseTokenResponse(JSON.parse(plaintext))
+    _nativeTokens.set(baseUrl, tokens)
+
+    return tokens
+  } catch {
+    return null
+  }
+}
+
+function _storeNativeTokens(baseUrl: string, tokens: NativeTokenSet) {
+  _nativeTokens.set(baseUrl, tokens)
+  _persistNativeTokens(baseUrl, tokens)
+}
+
+function _clearNativeTokens(baseUrl: string) {
+  _nativeTokens.delete(baseUrl)
+  _persistNativeTokens(baseUrl, null)
+}
+
+// True when we hold native bearer tokens for this gateway (the native-flow
+// analogue of hasLiveOauthSession's cookie check).
+function hasNativeSession(baseUrl: string): boolean {
+  return _loadNativeTokens(baseUrl) !== null
+}
+
+// POST JSON WITHOUT the OAuth cookie partition — used for the native token +
+// refresh exchanges, which are cookieless by design. Thin wrapper over
+// fetchJson (no token) so it shares timeout/JSON handling.
+function postJsonNoAuth(url: string, body: unknown, opts: any = {}) {
+  // resolveJsonBody passes the object through UNCHANGED — fetchJson owns
+  // JSON.stringify. Pre-stringifying here double-encodes the body (a JSON
+  // string inside a JSON string), which the gateway's Pydantic model rejects
+  // with a 422 "Input should be a valid dictionary" (the native
+  // /auth/native/token + /auth/native/refresh legs both go through here).
+  return fetchJson(url, null, { method: 'POST', body: resolveJsonBody(body), ...opts })
+}
+
+// Return a valid native access token for baseUrl, refreshing via
+// /auth/native/refresh if the stored one is at/near expiry. Returns null when
+// there are no tokens or the refresh is terminally rejected (caller re-logins).
+async function ensureNativeAccessToken(baseUrl: string): Promise<string | null> {
+  const tokens = _loadNativeTokens(baseUrl)
+
+  if (!tokens) {
+    return null
+  }
+
+  if (!tokenNeedsRefresh(tokens, Math.floor(Date.now() / 1000))) {
+    return tokens.accessToken
+  }
+
+  if (!tokens.refreshToken) {
+    // Access token expired and no RT to rotate — force re-login.
+    _clearNativeTokens(baseUrl)
+
+    return null
+  }
+
+  try {
+    const body = await postJsonNoAuth(
+      nativeRefreshUrl(baseUrl),
+      { refresh_token: tokens.refreshToken, provider: tokens.provider },
+      { timeoutMs: 10_000 }
+    )
+
+    const rotated = parseTokenResponse(body)
+    _storeNativeTokens(baseUrl, rotated)
+
+    return rotated.accessToken
+  } catch (error: any) {
+    // A 401 means the RT is dead (session_expired) — drop tokens so the UI
+    // prompts a fresh native login. A 503/transient keeps them for a retry.
+    if (error && error.statusCode === 401) {
+      _clearNativeTokens(baseUrl)
+
+      return null
+    }
+
+    throw error
+  }
+}
+
 // Mint a single-use WS ticket for a gated gateway. Returns the ticket string.
+// Prefers a native bearer token (cookieless RFC 8252 flow) when present,
+// falling back to the OAuth cookie partition otherwise.
 // Throws (with statusCode 401) if the session cookie is missing/expired —
 // callers treat that as "needs re-login".
 async function mintGatewayWsTicket(baseUrl) {
+  // Native flow: mint the ticket with the bearer token, no cookie involved.
+  const nativeAt = await ensureNativeAccessToken(baseUrl).catch(() => null)
+
+  if (nativeAt) {
+    const body = (await fetchJson(`${baseUrl}/api/auth/ws-ticket`, null, {
+      method: 'POST',
+      timeoutMs: 8_000,
+      bearer: nativeAt
+    })) as any
+
+    const ticket = body?.ticket
+
+    if (!ticket || typeof ticket !== 'string') {
+      throw new Error('Gateway did not return a WS ticket.')
+    }
+
+    return ticket
+  }
+
   const body = (await fetchJsonViaOauthSession(`${baseUrl}/api/auth/ws-ticket`, {
     method: 'POST',
     timeoutMs: 8_000
@@ -6273,20 +6488,6 @@ function writeDesktopConnectionConfig(config) {
   connectionConfigCacheMtime = fs.statSync(DESKTOP_CONNECTION_CONFIG_PATH).mtimeMs
 }
 
-// Whether the user already chose "install on this computer" at the first-run
-// gate. Read tolerantly (same style as readDesktopConnectionConfig, but
-// uncached — this runs at most once per boot). A recorded install lets the
-// gated ensureRuntime branch skip re-asking after an interrupted install.
-function firstRunInstallChosen() {
-  // Tolerant marker parse lives in first-run-flow.ts; inject the (uncached) read.
-  return readFirstRunInstallChoice(() => fs.readFileSync(DESKTOP_FIRST_RUN_CONFIG_PATH, 'utf8'))
-}
-
-function writeFirstRunInstallChoice() {
-  fs.mkdirSync(path.dirname(DESKTOP_FIRST_RUN_CONFIG_PATH), { recursive: true })
-  writeFileAtomic(DESKTOP_FIRST_RUN_CONFIG_PATH, JSON.stringify({ choice: 'install' }, null, 2))
-}
-
 // Returns the desktop's chosen profile name, or null when unset. "default" is
 // a valid stored value (pins the root HERMES_HOME explicitly); null means "no
 // preference" and preserves the legacy launch (no --profile flag).
@@ -6362,9 +6563,11 @@ async function sanitizeDesktopConnectionConfig(config = readDesktopConnectionCon
     try {
       // Display signal: treat a live RT cookie as "connected" even if the AT
       // cookie has lapsed — the gateway refreshes the AT on the next request,
-      // so the session is still usable. The authoritative liveness check is
-      // the ws-ticket mint in resolveRemoteBackend at actual connect time.
-      remoteOauthConnected = await hasLiveOauthSession(remoteUrl)
+      // so the session is still usable. A stored native bearer token (cookieless
+      // RFC 8252 flow) counts as connected too — otherwise a completed native
+      // sign-in shows "not connected" in Settings. The authoritative liveness
+      // check is the ws-ticket mint in resolveRemoteBackend at actual connect time.
+      remoteOauthConnected = oauthSessionIsLive(hasNativeSession(remoteUrl), await hasLiveOauthSession(remoteUrl))
     } catch {
       remoteOauthConnected = false
     }
@@ -6568,15 +6771,22 @@ async function buildRemoteConnection(
   const host = remoteHost || hostLabelFromBaseUrl(baseUrl)
 
   if (authMode === 'oauth') {
-    // OAuth gateway: auth comes from the session cookies in the OAuth
-    // partition. Liveness is NOT "is the access-token cookie present?" —
-    // Portal issues a 24h rotating refresh token (hermes #37247), and the
-    // gateway middleware transparently rotates a fresh ~15-min access token
-    // from it on the next authenticated request. So a session with an expired
-    // AT cookie but a live RT cookie is still perfectly connectable. We
-    // early-out only when neither cookie is present, then mint a ws-ticket as
-    // the authoritative liveness check.
-    if (!(await hasLiveOauthSession(baseUrl))) {
+    // OAuth gateway: auth comes from EITHER a native bearer token (cookieless
+    // RFC 8252 flow) OR the session cookies in the OAuth partition. Liveness is
+    // NOT "is the access-token cookie present?" — Portal issues a 24h rotating
+    // refresh token (hermes #37247), and the gateway middleware transparently
+    // rotates a fresh ~15-min access token from it on the next authenticated
+    // request. So a session with an expired AT cookie but a live RT cookie is
+    // still perfectly connectable. We early-out only when NEITHER a native
+    // token NOR any cookie is present, then mint a ws-ticket (which itself
+    // prefers the native bearer) as the authoritative liveness check.
+    //
+    // The native-token check is essential: the native login stores bearer
+    // tokens (no cookie is ever set), so gating solely on hasLiveOauthSession
+    // here would reject a freshly-completed native sign-in and loop the UI back
+    // into "not signed in" even though mintGatewayWsTicket would succeed with
+    // the stored bearer.
+    if (!oauthSessionIsLive(hasNativeSession(baseUrl), await hasLiveOauthSession(baseUrl))) {
       const err = new Error(
         'Remote Hermes gateway uses OAuth, but you are not signed in. ' +
           'Open Settings → Gateway and click "Sign in", or switch back to Local.'
@@ -7037,7 +7247,19 @@ async function requestJsonForProfile(profile: string, path: string, method: stri
   const url = `${conn.baseUrl}${path}`
   const opts = { method, body, timeoutMs: DEFAULT_FETCH_TIMEOUT_MS }
 
-  return conn.authMode === 'oauth' ? fetchJsonViaOauthSession(url, opts) : fetchJson(url, conn.token, opts)
+  if (conn.authMode === 'oauth') {
+    // Native RFC 8252 flow: authenticate with the bearer token (cookieless)
+    // when we hold one for this gateway; otherwise use the cookie partition.
+    const nativeAt = await ensureNativeAccessToken(conn.baseUrl).catch(() => null)
+
+    if (nativeAt) {
+      return fetchJson(url, null, { ...opts, bearer: nativeAt })
+    }
+
+    return fetchJsonViaOauthSession(url, opts)
+  }
+
+  return fetchJson(url, conn.token, opts)
 }
 
 async function probeRemoteAuthMode(rawUrl) {
@@ -7292,14 +7514,6 @@ function resetHermesConnection({ soft = false } = {}) {
 // startHermes() spawns fresh instead of racing the dying one. Shared by the
 // connection-config and profile switch flows.
 async function teardownPrimaryBackendAndWait({ soft = false } = {}) {
-  // Settle any parked first-run gate before tearing the primary backend down.
-  // Every primary teardown (config apply, profile switch, bootstrap reset/repair,
-  // primary-profile delete) must do this: an orphaned parked run would be re-
-  // joined by the next boot's waitForDecision(), and a single Install click would
-  // then resume BOTH runs → two concurrent runBootstrap() installers. Safe no-op
-  // when nothing is waiting.
-  firstRunGate.abort()
-
   // Capture the reference before resetHermesConnection() invalidates it.
   const hermesProcess = backendConnectionState.getProcess()
   const dying = hermesProcess && !hermesProcess.killed ? hermesProcess : null
@@ -7702,14 +7916,7 @@ async function startHermes() {
   let attemptedRemote = primaryBackendIsRemote()
 
   const connectionPromise = (async () => {
-    await advanceBootProgress('backend.resolve', 'Resolving Hermes backend', 8)
-    // Resolve for the desktop's primary profile so a per-profile remote
-    // override on the active profile is honored (falls back to env / global).
-    // Re-read once resolved so the classification tracks the value actually used.
-    attemptedRemote = primaryBackendIsRemote()
-    const remote = await resolveRemoteBackend(primaryProfileKey())
-
-    if (remote) {
+    const connectRemote = async remote => {
       await advanceBootProgress('backend.remote', `Connecting to remote Hermes backend at ${remote.baseUrl}`, 24)
       await waitForHermes(remote.baseUrl, remote.token)
       updateBootProgress({
@@ -7735,14 +7942,9 @@ async function startHermes() {
       }
     }
 
-    // Mutual exclusion with an in-app update (#50238). If this instance was
-    // relaunched while the Tauri updater is still applying an update, spawning
-    // a local backend now re-locks the venv shim and gets killed by the
-    // updater's straggler cleanup — looping. Park until the update finishes (or
-    // is detected stale), THEN start the backend. Local backends only; remote
-    // connections returned above and never touch the install tree.
-    await waitForUpdateToFinish()
-
+    await advanceBootProgress('backend.resolve', 'Resolving Hermes backend', 8)
+    // Resolve for the desktop's primary profile so a per-profile remote
+    // override on the active profile is honored (falls back to env / global).
     const token = crypto.randomBytes(32).toString('base64url')
     // --port 0: the OS assigns an ephemeral port; the child announces it on stdout.
     const backendArgs = ['serve', '--host', '127.0.0.1', '--port', '0']
@@ -7757,10 +7959,32 @@ async function startHermes() {
       backendArgs.unshift('--profile', activeProfile)
     }
 
-    await advanceBootProgress('backend.runtime', 'Resolving Hermes runtime', 28)
-    // Primary boot: enable the first-run install-vs-connect gate on the
-    // bootstrap-needed branch (the pool call site never does — see ensureRuntime).
-    const backend = await ensureRuntime(resolveHermesBackend(backendArgs), { firstRunGate: true })
+    const setup = await runPrimaryBackendStartup({
+      connectRemote,
+      ensureLocalRuntime: ensureRuntime,
+      prepareLocalBackend: async () => {
+        await advanceBootProgress('backend.runtime', 'Resolving Hermes runtime', 28)
+
+        return resolveHermesBackend(backendArgs)
+      },
+      resolveRemote: () => {
+        // Classify immediately before each throwing resolve. This callback runs
+        // both for an already-saved remote and after first-run remote Apply.
+        attemptedRemote = primaryBackendIsRemote()
+
+        return resolveRemoteBackend(primaryProfileKey())
+      },
+      waitForDecision: waitForFirstRunSetupChoice,
+      // Mutual exclusion with an in-app update (#50238). Remote connections
+      // return before this waiter; local starts park until the updater exits.
+      waitForLocalStart: waitForUpdateToFinish
+    })
+
+    if (setup.kind === 'remote') {
+      return setup.connection
+    }
+
+    const backend = setup.backend
     // Route old runtimes (no `serve`) through the legacy `dashboard --no-open`.
     backend.args = getBackendArgsForRuntime(backend)
     const hermesCwd = resolveHermesCwd()
@@ -7912,24 +8136,11 @@ async function startHermes() {
       ...getWindowState()
     }
   })().catch(error => {
-    // First-run gate abort: a primary teardown settled the parked gate. Do NOT
-    // latch this as a boot failure — null the cache and re-run startHermes() so
-    // the original awaiting callers resolve against the newly-resolved backend.
-    // Usually the abort came from connection-config:apply (mode:'remote' already
-    // written), so resolveRemoteBackend() wins on the re-run and the
-    // bootstrap-needed branch (the only firstRunAborted source) isn't reached —
-    // bounded to one effective retry. If instead the applied/new config is NOT
-    // remote (e.g. a primary-profile teardown that didn't write a remote), the
-    // re-run legitimately re-parks the gate and the overlay re-appears: correct,
-    // the user must still choose. A genuine remote failure takes the latching
-    // path below.
-    if (isFirstRunAborted(error)) {
-      backendConnectionState.clearPromiseForAttempt(connectionAttempt)
-
-      return startHermes()
+    if (!backendConnectionState.clearPromiseForAttempt(connectionAttempt)) {
+      throw error
     }
 
-    if (!backendConnectionState.clearPromiseForAttempt(connectionAttempt)) {
+    if (error instanceof FirstRunSetupResetError) {
       throw error
     }
 
@@ -8747,16 +8958,8 @@ ipcMain.handle('hermes:bootstrap:reset', async () => {
   await teardownPrimaryBackendAndWait()
   bootstrapFailure = null
   backendStartFailure = null
-  bootstrapState = {
-    active: false,
-    manifest: null,
-    stages: {},
-    error: null,
-    log: [],
-    startedAt: null,
-    completedAt: null,
-    unsupportedPlatform: null
-  }
+  getFirstRunSetupGate().resetForRetry()
+  resetBootstrapSnapshot()
 
   return { ok: true }
 })
@@ -8777,7 +8980,14 @@ ipcMain.handle('hermes:bootstrap:repair', async () => {
 
   bootstrapFailure = null
   backendStartFailure = null
+  getFirstRunSetupGate().resetForRepair()
   resetHermesConnection()
+
+  return { ok: true }
+})
+ipcMain.handle('hermes:bootstrap:continue-local', async () => {
+  rememberLog('[bootstrap] local install selected by renderer; continuing first-launch bootstrap')
+  continueFirstRunLocalBootstrap()
 
   return { ok: true }
 })
@@ -8849,11 +9059,50 @@ ipcMain.handle('hermes:ssh-config:resolve', async (_event, host) => {
 ipcMain.handle('hermes:connection-config:test', async (_event, payload) => testDesktopConnectionConfig(payload))
 ipcMain.handle('hermes:connection-config:probe', async (_event, rawUrl) => probeRemoteAuthMode(rawUrl))
 ipcMain.handle('hermes:connection-config:oauth-login', async (_event, rawUrl) => {
-  // Open the gateway's OAuth login window and wait for the session cookie to
-  // land in the OAuth partition. The caller (settings UI) typically saves the
-  // remote config with authMode='oauth' first, then calls this. We normalize
-  // the URL defensively so a login can be driven from a raw URL too.
+  // Capability-gated login (RFC 8252). Probe the gateway's public /api/status:
+  //   - advertises "native_pkce" in auth_flows → run the system-browser +
+  //     loopback + PKCE flow. No embedded webview, tokens held by the app
+  //     (encrypted keychain), REST/WS authenticated by bearer — no cookies.
+  //   - older gateway without native_pkce → fall back to the legacy embedded
+  //     BrowserWindow cookie flow, preserving compatibility.
+  // This is the "observable ladder + compatibility fallback tied to an
+  // identified older runtime" the desktop guide requires.
   const baseUrl = normalizeRemoteBaseUrl(rawUrl)
+
+  let statusBody: any = null
+
+  try {
+    statusBody = await fetchPublicJson(`${baseUrl}/api/status`, { timeoutMs: 8_000 })
+  } catch {
+    // Can't read status — fall through to the embedded flow, which has its
+    // own error handling and works against any gated gateway.
+  }
+
+  const strategy = resolveLoginStrategy(statusBody)
+
+  if (strategy === 'native') {
+    try {
+      const tokens = await runNativeLogin(baseUrl, {
+        openExternal: url => shell.openExternal(url),
+        postJson: (url, body, opts) => postJsonNoAuth(url, body, opts),
+        rememberLog
+      })
+
+      _storeNativeTokens(baseUrl, tokens)
+
+      return { ok: true, baseUrl, connected: true }
+    } catch (error) {
+      rememberLog(
+        `[native-oauth] native login failed (${
+          error instanceof Error ? error.message : String(error)
+        }); falling back to embedded flow`
+      )
+      // Fall through to the embedded flow so a native-flow hiccup (blocked
+      // loopback, user closed the browser) still lets the user sign in.
+    }
+  }
+
+  // Legacy embedded-webview cookie flow.
   await openOauthLoginWindow(baseUrl)
 
   return { ok: true, baseUrl, connected: await hasOauthSessionCookie(baseUrl) }
@@ -8862,10 +9111,18 @@ ipcMain.handle('hermes:connection-config:oauth-logout', async (_event, rawUrl) =
   const baseUrl = rawUrl ? normalizeRemoteBaseUrl(rawUrl) : ''
   await clearOauthSession(baseUrl || undefined)
 
+  // Also drop any native (RFC 8252) bearer tokens for this gateway so a
+  // logout clears BOTH auth shapes.
+  if (baseUrl) {
+    _clearNativeTokens(baseUrl)
+  }
+
   // Report against the SAME liveness notion the Settings indicator uses
-  // (AT-or-RT) so a logout that left any session cookie behind is reflected
-  // as still-connected rather than silently signed-out.
-  return { ok: true, connected: baseUrl ? await hasLiveOauthSession(baseUrl) : false }
+  // (AT-or-RT cookie, or a native token) so a logout that left any session
+  // behind is reflected as still-connected rather than silently signed-out.
+  const connected = baseUrl ? (await hasLiveOauthSession(baseUrl)) || hasNativeSession(baseUrl) : false
+
+  return { ok: true, connected }
 })
 
 // --- Hermes Cloud (cloud-auto-discovery Phase 3) ---
@@ -8912,6 +9169,18 @@ ipcMain.handle('hermes:connection-config:apply', async (_event, payload) => {
   await applyConnectionChange({
     cancelAndWait: value => sshBootstrapCoordinator.cancelAndWait(value),
     isPrimary: !key || key === primaryProfileKey(),
+    rehomePrimary: () =>
+      rehomePrimaryConnection({
+        clearLocalBootstrapFailure: () => {
+          // A remote connection bypasses local runtime/bootstrap failures. Clear
+          // the local-install latch so unsupported/failure escape paths can re-home.
+          bootstrapFailure = null
+        },
+        mode: config.mode,
+        notifyConnectionApplied: sendConnectionApplied,
+        resumeFirstRunRemote: abandonFirstRunSetupChoiceForRemoteApply,
+        teardownPrimaryBackend: teardownPrimaryBackendAndWait
+      }),
     scope,
     sendApplied: sendConnectionApplied,
     stopPool: stopPoolBackend,
@@ -8921,23 +9190,6 @@ ipcMain.handle('hermes:connection-config:apply', async (_event, payload) => {
 
   return sanitizeDesktopConnectionConfig(config, payload?.profile)
 })
-
-// First-run choice gate. `get` seeds a late-mounting renderer (it must not miss
-// the changed broadcast); `choose('install')` releases the wait so the existing
-// bootstrap proceeds. The remote path does NOT go through here — it flows through
-// connection-config:apply, which calls firstRunGate.abort().
-ipcMain.handle('hermes:first-run:get', async () => firstRunGate.state())
-ipcMain.handle('hermes:first-run:choose', async (_event, choice) =>
-  // Handler body lives in first-run-flow.ts; wire the electron-coupled collaborators.
-  applyFirstRunChoice({
-    choice,
-    gate: firstRunGate,
-    readConnectionConfig: readDesktopConnectionConfig,
-    writeConnectionConfig: writeDesktopConnectionConfig,
-    writeInstallChoice: writeFirstRunInstallChoice,
-    modeIsRemoteLike
-  })
-)
 
 ipcMain.handle('hermes:profile:get', async () => ({ profile: readActiveDesktopProfile() }))
 ipcMain.handle('hermes:profile:set', async (_event, name) => {
@@ -9239,15 +9491,34 @@ ipcMain.handle('hermes:api', async (_event, request) => {
 
   const url = `${connection.baseUrl}${requestPath}`
 
-  // OAuth gateways authenticate REST via the HttpOnly session cookie held in
-  // the OAuth partition — route through Electron's net stack bound to that
-  // session so the cookie attaches automatically. Token/local modes keep using
-  // the static session-token header.
+  // OAuth gateways authenticate REST via EITHER a native bearer token
+  // (cookieless RFC 8252 flow) OR the HttpOnly session cookie held in the OAuth
+  // partition. Prefer the native bearer when present (mirroring
+  // mintGatewayWsTicket): the native flow never sets a cookie, so routing an
+  // oauth-mode REST call through the cookie-only path returns 401 no_cookie even
+  // though a valid bearer is held. Cookie mode rides Electron's net stack bound
+  // to the OAuth partition so the cookie attaches automatically. Token/local
+  // modes keep using the static session-token header.
   if (connection.authMode === 'oauth') {
     // The OAuth path rides electron.net with JSON headers; multipart isn't
     // wired there. Fail loudly rather than corrupting the upload.
     if (request?.upload) {
       throw new Error('File uploads are not supported against OAuth-gated remote backends yet.')
+    }
+
+    // Native bearer first (cookieless). ensureNativeAccessToken transparently
+    // refreshes a near-expiry AT via /auth/native/refresh; a null return means
+    // no native session (resolveOauthRestAuth then selects the cookie path).
+    const nativeAt = await ensureNativeAccessToken(connection.baseUrl).catch(() => null)
+    const restAuth = resolveOauthRestAuth(nativeAt)
+
+    if (restAuth.kind === 'bearer') {
+      return fetchJson(url, null, {
+        method: request?.method,
+        body: request?.body,
+        timeoutMs,
+        bearer: restAuth.token
+      })
     }
 
     return fetchJsonViaOauthSession(url, {
