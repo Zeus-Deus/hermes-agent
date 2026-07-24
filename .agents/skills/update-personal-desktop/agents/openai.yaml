@@ -1,0 +1,4 @@
+interface:
+  display_name: "Update Personal Hermes Desktop"
+  short_description: "Merge upstream and rebuild the personal app"
+  default_prompt: "Use $update-personal-desktop to update my personal Hermes fork from upstream and rebuild the local Desktop app."
