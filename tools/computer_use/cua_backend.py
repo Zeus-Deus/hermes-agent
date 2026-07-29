@@ -48,8 +48,10 @@ import subprocess
 import sys
 import threading
 import uuid
+from pathlib import PureWindowsPath
 from typing import Any, Dict, List, Optional, Tuple
 
+from hermes_cli._subprocess_compat import windows_hide_flags
 from tools.computer_use.backend import (
     ActionResult,
     CaptureResult,
@@ -350,6 +352,30 @@ def _select_capture_target(
     return windows[0]
 
 
+def _wsl_windows_path_to_posix(path: str) -> str:
+    """Translate a Windows absolute manifest command when Hermes runs in WSL.
+
+    Windows cua-driver manifests can report ``C:\\Users\\...\\cua-driver.exe``
+    even though the Hermes process uses POSIX subprocess spawning inside WSL.
+    The same file is reachable through DrvFS as ``/mnt/c/Users/...``.
+    Non-Windows paths and non-WSL hosts are returned unchanged.
+    """
+    if not re.match(r"^[A-Za-z]:[\\/]", path):
+        return path
+    try:
+        from hermes_constants import is_wsl
+
+        if not is_wsl():
+            return path
+    except Exception:
+        return path
+    win = PureWindowsPath(path)
+    drive = (win.drive or "").rstrip(":").lower()
+    if not drive:
+        return path
+    return os.path.join("/mnt", drive, *(str(part) for part in win.parts[1:]))
+
+
 def _resolve_mcp_invocation(
     driver_cmd: str,
     *,
@@ -381,6 +407,7 @@ def _resolve_mcp_invocation(
             [driver_cmd, "manifest"],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
             stdin=subprocess.DEVNULL,
+            creationflags=windows_hide_flags(),
             # cua-driver is a third-party binary — never hand it provider
             # API keys via inherited env (same policy as the MCP and CLI
             # fallback spawns below; #53503/#55709/#58889 lineage).
@@ -408,6 +435,11 @@ def _resolve_mcp_invocation(
         # The driver knows the subcommand but didn't surface its own path.
         # Keep our resolved driver_cmd; the args are still authoritative.
         return driver_cmd, _mcp_args_with_overlay_flag(args, driver_cmd=driver_cmd)
+    # A Windows-installed cua-driver can hand a WSL-hosted Hermes an absolute
+    # ``C:\...`` command; translate it to its DrvFS ``/mnt/<drive>/...`` form
+    # BEFORE the path-separator check (backslash is not a separator on POSIX,
+    # so the raw Windows string would otherwise be discarded here).
+    command = _wsl_windows_path_to_posix(command)
     if not _has_path_separator(command):
         # A manifest may legitimately retain the generic ``cua-driver`` name.
         # Under a GUI's thin PATH that would lose the resolved user-local path
@@ -447,6 +479,7 @@ def _cua_driver_supports_no_overlay(driver_cmd: str) -> bool:
             [driver_cmd, "--help"],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.0,
             stdin=subprocess.DEVNULL,
+            creationflags=windows_hide_flags(),
             env=_sanitize_subprocess_env(cua_driver_child_env()),
         )
         help_text = (proc.stdout or "") + (proc.stderr or "")
@@ -589,6 +622,7 @@ def cua_driver_update_check(*, timeout: Optional[float] = None) -> Optional[Dict
             # stdin-reading mode rather than erroring — DEVNULL gives them EOF
             # so they exit fast instead of blocking until the timeout.
             stdin=subprocess.DEVNULL,
+            creationflags=windows_hide_flags(),
             # Sanitized like every other cua-driver spawn: third-party
             # binary, no inherited provider keys (#53503/#55709/#58889).
             env=_sanitize_subprocess_env(cua_driver_child_env()),
@@ -909,6 +943,10 @@ class _CuaDriverSession:
         self._shutdown_event: Optional[asyncio.Event] = None  # created on bridge loop
         self._lifecycle_future = None  # concurrent.futures.Future
         self._setup_error: Optional[BaseException] = None
+        # Stable driver-side identity declared through start_session.
+        # Used to revive a logical ended-session rejection without
+        # recursive call_tool re-entry or backend-owned state (#71166).
+        self._declared_session_id: Optional[str] = None
 
     def _require_started(self) -> None:
         if not self._started:
@@ -1170,6 +1208,67 @@ class _CuaDriverSession:
         return self._capability_version
 
     @staticmethod
+    def _logical_error_text(result: Dict[str, Any]) -> str:
+        """Flatten a logical MCP error into text for narrow classification."""
+        chunks: List[str] = []
+        for value in (result.get("data"), result.get("structuredContent")):
+            if isinstance(value, str):
+                chunks.append(value)
+            elif value is not None:
+                try:
+                    chunks.append(json.dumps(value, sort_keys=True))
+                except (TypeError, ValueError):
+                    chunks.append(str(value))
+        return "\n".join(chunks)
+
+    @classmethod
+    def _is_ended_session_result(cls, result: Any) -> bool:
+        """Recognise cua-driver's explicit recoverable ended-session result."""
+        if not isinstance(result, dict) or result.get("isError") is not True:
+            return False
+        message = cls._logical_error_text(result).lower()
+        return (
+            "session" in message
+            and ("has ended" in message or "session ended" in message)
+            and "start_session" in message
+        )
+
+    def _revive_declared_session_once(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        first_result: Dict[str, Any],
+        timeout: float,
+    ) -> Dict[str, Any]:
+        """Revive the stable session and replay one rejected tool call once."""
+        session_id = self._declared_session_id
+        if not session_id or name in self._LIFECYCLE_CALLS:
+            return first_result
+
+        logger.warning(
+            "cua-driver session %s ended during %s; reviving and retrying once",
+            session_id,
+            name,
+        )
+        revive_result = self._bridge.run(
+            self._call_tool_async("start_session", {"session": session_id}),
+            timeout=timeout,
+        )
+        if revive_result.get("isError") is True:
+            logger.warning(
+                "cua-driver session %s could not be revived: %s",
+                session_id,
+                self._logical_error_text(revive_result),
+            )
+            return first_result
+
+        # Return the second result as-is. A second rejection is surfaced; no loop.
+        return self._bridge.run(
+            self._call_tool_async(name, args),
+            timeout=timeout,
+        )
+
+    @staticmethod
     def _is_closed_session_error(exc: Exception) -> bool:
         """Return True for MCP/stdio failures that are recoverable by reconnecting."""
         name = exc.__class__.__name__
@@ -1265,6 +1364,7 @@ class _CuaDriverSession:
                 try:
                     proc = _subprocess.run(
                         cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=max(15.0, timeout),
+                        creationflags=windows_hide_flags(),
                         env=_sanitize_subprocess_env(cua_driver_child_env()),
                     )
                 except Exception as e:  # pragma: no cover - subprocess spawn failure
@@ -1347,28 +1447,19 @@ class _CuaDriverSession:
 
     def call_tool(self, name: str, args: Dict[str, Any], timeout: float = 30.0) -> Dict[str, Any]:
         # A prior session may have died (MCP drop / driver crash): its
-        # lifecycle coro reset _started to False in its finally (#55048
-        # Bug 1). Re-enter start() so we rebuild the session instead of
-        # calling _require_started() straight into a "not started" raise or
-        # a None session. start() is idempotent when already started. Skip
-        # this for the start_session/end_session handshake, which start()/
-        # stop() drive directly while _started is still in flux.
+        # lifecycle coro reset _started to False in its finally (#55048).
         if not self._started and name not in self._LIFECYCLE_CALLS:
             logger.warning(
                 "cua-driver session not active on %s; (re)starting before call", name
             )
             self.start()
         self._require_started()
-        # The cua-driver daemon proxy returns POSIX EAGAIN ("Resource
-        # temporarily unavailable") for heavier calls like get_window_state when
-        # its non-blocking socket buffer is full. On some machines/builds this
-        # is persistent for get_window_state over the MCP stdio bridge, while
-        # the direct CLI transport keeps working. So: try the MCP path ONCE,
-        # and on the transient/transport error fall straight through to the CLI
-        # transport (which has its own retry + screenshot-to-file mitigation)
-        # rather than burning a long backoff chain on a path that won't recover.
+
         try:
-            return self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
+            result = self._bridge.run(
+                self._call_tool_async(name, args),
+                timeout=timeout,
+            )
         except Exception as e:
             if self._is_transient_daemon_error(e):
                 logger.warning(
@@ -1378,13 +1469,31 @@ class _CuaDriverSession:
                 return self._call_tool_via_cli(name, args, timeout)
             if not self._is_closed_session_error(e):
                 raise
-            # Daemon restart closes the cached stdio channel. Reconnect once and
-            # retry exactly one more time — never loop, to avoid hammering a
-            # genuinely dead daemon.
             logger.warning("cua-driver MCP session closed during %s; reconnecting once", name)
             with self._lock:
                 self._restart_session_locked()
-            return self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
+            result = self._bridge.run(
+                self._call_tool_async(name, args),
+                timeout=timeout,
+            )
+
+        # Remember only a successfully declared stable identity. Failed
+        # start_session calls must not leave stale recovery state behind.
+        if name == "start_session" and result.get("isError") is not True:
+            declared_id = args.get("session")
+            if isinstance(declared_id, str) and declared_id:
+                self._declared_session_id = declared_id
+
+        if self._is_ended_session_result(result):
+            result = self._revive_declared_session_once(name, args, result, timeout)
+
+        if (
+            name == "end_session"
+            and result.get("isError") is not True
+            and args.get("session") == self._declared_session_id
+        ):
+            self._declared_session_id = None
+        return result
 
 
 def _extract_tool_result(mcp_result: Any) -> Dict[str, Any]:
@@ -1516,23 +1625,70 @@ def _ingest_windows(raw_windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     windows: List[Dict[str, Any]] = []
     for w in raw_windows:
+        # Compatibility envelopes are untrusted input: skip non-dict members
+        # instead of raising AttributeError on one malformed record.
+        if not isinstance(w, dict):
+            continue
         pid_int = _positive_int(w.get("pid"))
         window_id_int = _positive_int(w.get("window_id"))
         if pid_int is None or window_id_int is None:
             continue
         z_raw = w.get("z_index")
         z_index = z_raw if isinstance(z_raw, (int, float)) and not isinstance(z_raw, bool) else 0
+        app_name = w.get("app_name", "")
+        title = w.get("title", "")
         windows.append({
-            "app_name": w.get("app_name", ""),
+            "app_name": app_name if isinstance(app_name, str) else "",
             "pid": pid_int,
             "window_id": window_id_int,
             # cua-driver 0.6.x on Linux may return JSON null here.
             # Only explicit False means off-screen; null means unknown.
             "off_screen": w.get("is_on_screen") is False,
-            "title": w.get("title", ""),
+            "title": title if isinstance(title, str) else "",
             "z_index": z_index,
         })
     return windows
+
+
+def _windows_from_tool_result(out: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return list_windows payloads across cua-driver result shapes."""
+    structured = out.get("structuredContent")
+    if isinstance(structured, dict):
+        windows = structured.get("windows")
+        if isinstance(windows, list) and windows:
+            return windows
+
+    data = out.get("data")
+    if isinstance(data, dict):
+        windows = data.get("windows")
+        if isinstance(windows, list) and windows:
+            return windows
+        legacy_windows = data.get("_legacy_windows")
+        if isinstance(legacy_windows, list) and legacy_windows:
+            return legacy_windows
+
+    windows = out.get("windows")
+    if isinstance(windows, list) and windows:
+        return windows
+    legacy_windows = out.get("_legacy_windows")
+    if isinstance(legacy_windows, list) and legacy_windows:
+        return legacy_windows
+    return []
+
+
+def _apps_from_windows(windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    apps: List[Dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for summary in _ingest_windows(windows):
+        name = summary["app_name"]
+        if not name:
+            continue
+        key = (name, summary["pid"])
+        if key in seen:
+            continue
+        seen.add(key)
+        apps.append({"name": name, "pid": summary["pid"]})
+    return apps
 
 
 # ---------------------------------------------------------------------------
@@ -1710,8 +1866,7 @@ class CuaDriverBackend(ComputerUseBackend):
             "list_windows",
             {"on_screen_only": True, "session": self._session_id},
         )
-        raw_windows = (out.get("structuredContent") or {}).get("windows") or []
-        windows = _ingest_windows(raw_windows)
+        windows = _ingest_windows(_windows_from_tool_result(out))
         windows.sort(key=lambda w: w["z_index"], reverse=True)
         if windows:
             return windows
@@ -1733,8 +1888,7 @@ class CuaDriverBackend(ComputerUseBackend):
             logger.error("cua-driver CLI re-fetch for list_windows returned an error")
             self._clear_active_target()
             return []
-        raw_windows = (cli_out.get("structuredContent") or {}).get("windows") or []
-        windows = _ingest_windows(raw_windows)
+        windows = _ingest_windows(_windows_from_tool_result(cli_out))
         windows.sort(key=lambda w: w["z_index"], reverse=True)
         return windows
 
@@ -2404,23 +2558,37 @@ class CuaDriverBackend(ComputerUseBackend):
     def list_apps(self) -> List[Dict[str, Any]]:
         out = self._session.call_tool("list_apps", {"session": self._session_id})
         structured = out.get("structuredContent")
-        if isinstance(structured, dict) and isinstance(structured.get("apps"), list):
-            return structured["apps"]
-
-        # Older drivers and direct CLI fallbacks may put apps in data instead.
         data = out.get("data")
-        if isinstance(data, list):
+
+        # structuredContent is the canonical MCP payload. Empty lists fall
+        # through so a populated compatibility envelope can still recover.
+        if isinstance(structured, dict):
+            apps = structured.get("apps")
+            if isinstance(apps, list) and apps:
+                return apps
+        # Older drivers and direct CLI fallbacks may put apps in data instead.
+        if isinstance(data, list) and data:
             return data
-        if isinstance(data, dict) and isinstance(data.get("apps"), list):
-            return data["apps"]
+        if isinstance(data, dict):
+            apps = data.get("apps")
+            if isinstance(apps, list) and apps:
+                return apps
+        apps = out.get("apps")
+        if isinstance(apps, list) and apps:
+            return apps
+
+        derived = _apps_from_windows(_windows_from_tool_result(out))
+        if derived:
+            return derived
+
         # Old text-only drivers retain a small, name/PID-only fallback.
         if isinstance(data, str):
-            apps = []
+            parsed_apps = []
             for line in data.splitlines():
                 m = re.search(r'(.+?)\s+\(pid\s+(\d+)\)', line)
                 if m:
-                    apps.append({"name": m.group(1).strip(), "pid": int(m.group(2))})
-            return apps
+                    parsed_apps.append({"name": m.group(1).strip(), "pid": int(m.group(2))})
+            return parsed_apps
         return []
 
     def list_windows(self) -> List[Dict[str, Any]]:
