@@ -2,6 +2,7 @@ import { type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useStat
 
 import type { DesktopAuthProvider, DesktopConnectionConfig, DesktopConnectionProbeResult } from '@/global'
 import { useI18n } from '@/i18n'
+import { coerceRemoteUrlScheme } from '@/lib/remote-url'
 import { notify, notifyError, readableError } from '@/store/notifications'
 
 type Mode = 'local' | 'remote' | 'cloud' | 'ssh'
@@ -156,7 +157,7 @@ export function useRemoteConnectionForm({ scope, lockedMode }: UseRemoteConnecti
   // syntactically plausible URL. The probe result drives whether we render the
   // OAuth login button or the session-token entry box. The effective auth mode
   // prefers a fresh probe result over the saved value.
-  const trimmedUrl = state.remoteUrl.trim()
+  const trimmedUrl = coerceRemoteUrlScheme(state.remoteUrl)
 
   useEffect(() => {
     if (state.mode !== 'remote' || !trimmedUrl || !/^https?:\/\//i.test(trimmedUrl)) {
