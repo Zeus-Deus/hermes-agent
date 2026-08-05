@@ -1909,6 +1909,9 @@ export const en: Translations = {
       baseBranchPlaceholder: 'Search branches…',
       baseBranchNone: 'No branches found',
       startWorkFailed: 'Could not create worktree',
+      worktreeProjectLabel: 'Project',
+      worktreeProjectPlaceholder: 'Search projects…',
+      worktreeProjectNone: 'No projects with a folder',
       convertBranch: 'Convert a branch…',
       convertBranchTitle: 'Convert a branch',
       convertBranchDesc: 'Open checked-out branches, or create a worktree for a free branch.',
@@ -1917,6 +1920,7 @@ export const en: Translations = {
       branchOpenExisting: 'open',
       branchSwitchHome: 'switch home',
       branchCreateWorktree: 'new worktree',
+      branchTrackRemote: 'track remote',
       branchesLoading: 'Loading branches…',
       noBranches: 'No branches found',
       removeWorktree: 'Remove worktree',
@@ -2584,10 +2588,6 @@ export const en: Translations = {
 
   preview: {
     tab: 'Preview',
-    closeTab: label => `Close ${label}`,
-    closeOthers: 'Close others',
-    closeToRight: 'Close to the right',
-    closeAll: 'Close all',
     closePane: 'Close preview pane',
     loading: 'Loading preview',
     unavailable: 'Preview unavailable',
