@@ -462,6 +462,9 @@ export interface SidebarSessionSlice {
   /** Per-profile "the window came back full, more rows exist on disk" flags —
    *  what pagination needs, without a COUNT(*) per profile DB per refresh. */
   profiles_truncated?: Record<string, boolean>
+  /** Per-profile tokens and spend over every session, not just this window.
+   *  Absent from the legacy per-slice endpoint, which has no aggregate. */
+  profiles_usage?: Record<string, { cost_usd: number; tokens: number }>
 }
 
 /** Which profiles filled their per-profile window in a returned page. The
@@ -559,6 +562,23 @@ async function listSidebarSessionsLegacy(req: SidebarSessionsRequest): Promise<S
     messaging: { sessions: messaging.sessions },
     ...(errors.length ? { errors } : {})
   }
+}
+
+/** The PR each of these sessions opened, recovered from its own transcript —
+ *  for sessions whose recorded branch can't answer (they started on trunk and
+ *  did the work in a worktree). Also returns every id it looked at, so the
+ *  caller can remember a miss and never ask again. */
+export function scanSessionPullRequests(
+  ids: string[]
+): Promise<{ pull_requests: Record<string, { number: number; url: string }>; scanned: string[] }> {
+  return window.hermesDesktop.api<{
+    pull_requests: Record<string, { number: number; url: string }>
+    scanned: string[]
+  }>({
+    path: '/api/profiles/sessions/pull-requests',
+    method: 'POST',
+    body: { ids }
+  })
 }
 
 export async function listSidebarSessions(req: SidebarSessionsRequest): Promise<SidebarSessionsResponse> {
@@ -892,12 +912,14 @@ export function validateProviderCredential(
 
 export function getCustomEndpoints(): Promise<CustomEndpointsResponse> {
   return window.hermesDesktop.api<CustomEndpointsResponse>({
+    ...profileScoped(),
     path: '/api/providers/custom-endpoints'
   })
 }
 
 export function saveCustomEndpoint(endpoint: CustomEndpointUpdate): Promise<CustomEndpointsResponse> {
   return window.hermesDesktop.api<CustomEndpointsResponse>({
+    ...profileScoped(),
     path: '/api/providers/custom-endpoints',
     method: 'POST',
     body: endpoint
@@ -914,6 +936,7 @@ export function validateCustomEndpoint(endpoint: CustomEndpointUpdate): Promise<
 
 export function activateCustomEndpoint(id: string): Promise<{ ok: boolean; provider: string; model: string }> {
   return window.hermesDesktop.api<{ ok: boolean; provider: string; model: string }>({
+    ...profileScoped(),
     path: `/api/providers/custom-endpoints/${encodeURIComponent(id)}/activate`,
     method: 'POST'
   })
@@ -921,6 +944,7 @@ export function activateCustomEndpoint(id: string): Promise<{ ok: boolean; provi
 
 export function deleteCustomEndpoint(id: string): Promise<CustomEndpointsResponse> {
   return window.hermesDesktop.api<CustomEndpointsResponse>({
+    ...profileScoped(),
     path: `/api/providers/custom-endpoints/${encodeURIComponent(id)}`,
     method: 'DELETE'
   })
@@ -1124,6 +1148,16 @@ export function getMcpOAuthFlow(flowId: string): Promise<McpOAuthFlow> {
   return window.hermesDesktop.api<McpOAuthFlow>({
     ...profileScoped(),
     path: `/api/mcp/oauth/flows/${encodeURIComponent(flowId)}`
+  })
+}
+
+/** Cancel an in-flight MCP OAuth flow server-side, freeing the per-server
+ *  "already in progress" slot so a retry doesn't 409. */
+export function cancelMcpOAuthFlow(flowId: string): Promise<{ ok: boolean; status: string }> {
+  return window.hermesDesktop.api<{ ok: boolean; status: string }>({
+    ...profileScoped(),
+    path: `/api/mcp/oauth/flows/${encodeURIComponent(flowId)}`,
+    method: 'DELETE'
   })
 }
 
@@ -1799,6 +1833,34 @@ export function listMcpServers(): Promise<{ servers: McpServerSummary[] }> {
   return window.hermesDesktop.api<{ servers: McpServerSummary[] }>({
     ...profileScoped(),
     path: '/api/mcp/servers'
+  })
+}
+
+/** Add one server to `mcp_servers` (validated + name-collision-checked
+ *  server-side — the same endpoint the dashboard's add form uses). */
+export function addMcpServer(body: {
+  name: string
+  url?: string
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  auth?: string
+}): Promise<McpServerSummary> {
+  return window.hermesDesktop.api<McpServerSummary>({
+    ...profileScoped(),
+    path: '/api/mcp/servers',
+    method: 'POST',
+    body
+  })
+}
+
+/** Remove one server from `mcp_servers` (the inline setup card's rollback
+ *  when a directory install is cancelled after the config write). */
+export function removeMcpServer(name: string): Promise<{ ok: boolean }> {
+  return window.hermesDesktop.api<{ ok: boolean }>({
+    ...profileScoped(),
+    path: `/api/mcp/servers/${encodeURIComponent(name)}`,
+    method: 'DELETE'
   })
 }
 

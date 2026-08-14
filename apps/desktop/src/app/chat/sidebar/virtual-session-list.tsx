@@ -1,6 +1,7 @@
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useVirtualizer } from '@tanstack/react-virtual'
+import type * as React from 'react'
 import { type FC, useCallback, useRef } from 'react'
 
 import type { SessionInfo } from '@/hermes'
@@ -15,6 +16,7 @@ import { SidebarSessionRow } from './session-row'
 
 interface SessionRowCommonProps {
   branchStem?: string
+  card?: boolean
   isPinned: boolean
   isSelected: boolean
   onArchive: () => void
@@ -28,7 +30,11 @@ interface SessionRowCommonProps {
 
 export interface VirtualSessionListProps {
   activeSessionId: null | string
+  /** Render every session row as the three-line inbox card. */
+  card?: boolean
   className?: string
+  /** Hover-revealed control for date dividers (the group-level "+"). */
+  dividerAction?: React.ReactNode
   rows: SidebarListRow[]
   onArchiveSession: (sessionId: string) => void
   onBranchSession?: (sessionId: string, profile?: string) => void
@@ -41,11 +47,17 @@ export interface VirtualSessionListProps {
 }
 
 const ROW_ESTIMATE_PX = 28
+// Matches the card's typical rendered height (four lines when a preview
+// exists) so long card lists don't jump under the scroll thumb before
+// self-measurement catches up.
+const CARD_ROW_ESTIMATE_PX = 66
 const OVERSCAN_ROWS = 12
 
 export const VirtualSessionList: FC<VirtualSessionListProps> = ({
   activeSessionId,
+  card = false,
   className,
+  dividerAction,
   rows: listRows,
   onArchiveSession,
   onBranchSession,
@@ -62,7 +74,7 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
 
   const virtualizer = useVirtualizer({
     count: listRows.length,
-    estimateSize: () => ROW_ESTIMATE_PX,
+    estimateSize: () => (card ? CARD_ROW_ESTIMATE_PX : ROW_ESTIMATE_PX),
     getItemKey: index => {
       const row = listRows[index]
 
@@ -90,9 +102,10 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
     if (row.kind === 'divider') {
       return (
         <SidebarDateDivider
+          action={dividerAction}
           data-index={virtualItem.index}
           key={row.key}
-          label={sessionBucketLabel(row.bucket, dividerLabels)}
+          label={'label' in row ? row.label : sessionBucketLabel(row.bucket, dividerLabels)}
           ref={virtualizer.measureElement}
         />
       )
@@ -103,6 +116,7 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
 
     const commonProps: SessionRowCommonProps = {
       branchStem,
+      card,
       isPinned: pinned,
       isSelected: session.id === activeSessionId,
       onArchive: () => onArchiveSession(session.id),
@@ -138,7 +152,16 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
   // just consume that context via useSortable.
   return (
     <div
-      className={cn('relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain', className)}
+      // scrollbar-fade, NOT scrollbar-overlay: overlay opts out of the themed
+      // thin scrollbar entirely, and on Windows (no native overlay scrollbars)
+      // Chromium then paints the classic always-visible gutter. The themed
+      // fade bar reserves its 4px on every platform but stays invisible until
+      // hover — and the wrapper no longer stacks a second scroller, so the
+      // double-gutter this class change was reaching for is already gone.
+      className={cn(
+        'scrollbar-fade relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain',
+        className
+      )}
       ref={scrollerRef}
     >
       <div className="grid gap-px" style={{ paddingBottom: `${paddingBottom}px`, paddingTop: `${paddingTop}px` }}>

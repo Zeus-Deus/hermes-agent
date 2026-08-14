@@ -34,7 +34,7 @@ import { playWakeSound } from '@/lib/wake-sound'
 import { $billingSettingsRequest } from '@/store/billing-block'
 import { $desktopBoot } from '@/store/boot'
 import { requestVoiceConversationStart } from '@/store/composer'
-import { setCronFocusJobId } from '@/store/cron'
+import { $cronReviewRequest, setCronFocusJobId } from '@/store/cron'
 import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
 import { $previewTarget } from '@/store/preview'
 import {
@@ -112,7 +112,12 @@ import { useSessionStateCache } from '../session/hooks/use-session-state-cache'
 import { startWorkspaceSession } from '../session/workspace-session-target'
 import { useOverlayRouting } from '../shell/hooks/use-overlay-routing'
 import { useWindowControlsOverlayWidth } from '../shell/hooks/use-window-controls-overlay-width'
-import { titlebarControlsPosition } from '../shell/titlebar'
+import {
+  titlebarControlsPosition,
+  titlebarControlsYNudge,
+  titlebarToolsRightCss,
+  titlebarToolsWidthCss
+} from '../shell/titlebar'
 import { TitlebarControls } from '../shell/titlebar-controls'
 import { UpdatesOverlay } from '../updates-overlay'
 
@@ -153,6 +158,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   // context (the sticky toast). The shell owns `navigate`, so it consumes the
   // intent counter here; the ref skips the initial mount value.
   const billingSettingsSeenRef = useRef(0)
+  const cronReviewSeenRef = useRef(0)
   const messagingTranscriptSignatureRef = useRef(new Map<string, string>())
   // Stable identity for the whole callback surface (see WiringActions). Mutated
   // in place each render so memoized surfaces never re-render on churn.
@@ -161,6 +167,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const gatewayState = useStore($gatewayState)
   const activeSessionId = useStore($activeSessionId)
   const billingSettingsRequest = useStore($billingSettingsRequest)
+  const cronReviewRequest = useStore($cronReviewRequest)
   const currentCwd = useStore($currentCwd)
 
   // eslint-disable-next-line no-restricted-syntax -- one-shot request-seen sentinel, not an atom mirror
@@ -175,6 +182,19 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       navigate(`${SETTINGS_ROUTE}?tab=billing`)
     }
   }, [billingSettingsRequest, navigate])
+
+  // eslint-disable-next-line no-restricted-syntax -- one-shot request-seen sentinel, not an atom mirror
+  useEffect(() => {
+    if (cronReviewRequest === cronReviewSeenRef.current) {
+      return
+    }
+
+    cronReviewSeenRef.current = cronReviewRequest
+
+    if (cronReviewRequest > 0) {
+      navigate(CRON_ROUTE)
+    }
+  }, [cronReviewRequest, navigate])
   const freshDraftReady = useStore($freshDraftReady)
   const resumeFailedSessionId = useStore($resumeFailedSessionId)
   const resumeExhaustedSessionId = useStore($resumeExhaustedSessionId)
@@ -248,14 +268,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
   const { connectionRef, gateway, gatewayRef, requestGateway } = useGatewayRequest()
 
-  const {
-    loadMoreMessagingForPlatform,
-    loadMoreSessions,
-    loadMoreSessionsForProfile,
-    refreshCronJobs,
-    refreshMessagingSessions,
-    refreshSessions
-  } = useSessionListActions({ profileScope })
+  const { loadMoreMessagingForPlatform, loadMoreSessions, refreshCronJobs, refreshMessagingSessions, refreshSessions } =
+    useSessionListActions({ profileScope })
 
   const updateActiveSessionRuntimeInfo = useCallback(
     (info: { branch?: string; cwd?: string }) => {
@@ -865,6 +879,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     onArchiveSession: sessionId => void archiveSession(sessionId),
     onAttachDroppedItems: composer.attachDroppedItems,
     onAttachImageBlob: composer.attachImageBlob,
+    onAttachPrCommentUrl: composer.attachPrCommentUrl,
     onBranchInNewChat: messageId => void branchInNewChat(messageId),
     onBranchSession: sessionId => void branchStoredSession(sessionId),
     onCancel: cancelRun,
@@ -879,7 +894,6 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     onDismissError: dismissError,
     onEdit: editMessage,
     onLoadMoreMessaging: loadMoreMessagingForPlatform,
-    onLoadMoreProfileSessions: loadMoreSessionsForProfile,
     onLoadMoreSessions: loadMoreSessions,
     onManageCronJob: jobId => {
       setCronFocusJobId(jobId)
@@ -974,27 +988,27 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const rightTitlebarTools = useTitlebarToolContributions('right')
   const connection = useStore($connection)
   const controlsPos = titlebarControlsPosition(connection?.windowButtonPosition, Boolean(connection?.isFullscreen))
-  // Exact vertical centering: titlebarControlsPosition() returns
-  // (TITLEBAR_HEIGHT - TITLEBAR_CONTROL_HEIGHT) / 2, but TitlebarControls
-  // also applies a hard translate-y-0.5 (+2px) to its clusters. Cancel that
-  // constant so cluster center == bar center — measured, not eyeballed.
-  const controlsTranslateY = 2
   // Windows/WSLg reserve native min/max/close on the right (AppShell parity:
   // prefer the live WCO measurement, fall back to the static reservation).
   const measuredOverlayWidth = useWindowControlsOverlayWidth()
   const nativeOverlayWidth = measuredOverlayWidth ?? connection?.nativeOverlayWidth ?? 0
-  const titlebarToolsRight = nativeOverlayWidth > 0 ? `${nativeOverlayWidth}px` : '0.75rem'
+
+  const titlebarChrome = {
+    darwinMajor: connection?.darwinMajor ?? 0,
+    isFullscreen: Boolean(connection?.isFullscreen),
+    windowButtonPosition: connection?.windowButtonPosition
+  }
+
+  const titlebarToolsRight = titlebarToolsRightCss(nativeOverlayWidth, titlebarChrome)
   // Pane-registered tools (preview's monitor/devtools cluster) anchor flush
   // against the static system cluster — in the tree layout the titlebar band
   // sits ABOVE the grid, so AppShell's pane-width anchoring doesn't apply.
   const SYSTEM_TOOL_COUNT = 4
   const paneToolCount = rightTitlebarTools.filter(tool => !tool.hidden).length
-  const systemToolsWidth = `calc(${SYSTEM_TOOL_COUNT} * (var(--titlebar-control-size) + 0.25rem))`
+  const systemToolsWidth = titlebarToolsWidthCss(SYSTEM_TOOL_COUNT)
 
   const titlebarToolsWidth =
-    paneToolCount > 0
-      ? `calc(${systemToolsWidth} + ${paneToolCount} * (var(--titlebar-control-size) + 0.25rem))`
-      : systemToolsWidth
+    paneToolCount > 0 ? `calc(${systemToolsWidth} + ${titlebarToolsWidthCss(paneToolCount)})` : systemToolsWidth
 
   return (
     <ContribWiringContext.Provider value={api}>
@@ -1003,7 +1017,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
         style={
           {
             '--titlebar-controls-left': `${controlsPos.left}px`,
-            '--titlebar-controls-top': `${controlsPos.top - controlsTranslateY}px`,
+            '--titlebar-controls-top': `${controlsPos.top}px`,
+            '--titlebar-controls-y-nudge': titlebarControlsYNudge(titlebarChrome),
             '--titlebar-tools-right': titlebarToolsRight,
             '--titlebar-tools-width': titlebarToolsWidth,
             '--shell-preview-toolbar-gap': systemToolsWidth

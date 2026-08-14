@@ -170,6 +170,7 @@ export interface Translations {
     updateHermes: string
     updateReadyTitle: string
     updateReadyMessage: (count: number) => string
+    updateReadyMessageUnknown: string
     seeWhatsNew: string
     errors: {
       elevenLabsNeedsKey: string
@@ -326,6 +327,7 @@ export interface Translations {
         search: string
         noMatches: string
         toggleFailed: (name: string) => string
+        updateBackendToManage: string
         sources: Record<string, string>
       }
     }
@@ -449,6 +451,7 @@ export interface Translations {
       cantReach: string
       tapCheck: string
       updateReady: (count: number) => string
+      updateReadyUnknown: string
       lastChecked: (age: string) => string
       justNowSuffix: string
       automaticUpdates: string
@@ -1402,6 +1405,13 @@ export interface Translations {
     close: string
     title: string
     count: (count: number) => string
+    modelImpact: {
+      title: string
+      message: (count: number) => string
+      detailMore: (names: string, remaining: number) => string
+      review: string
+      saveFailed: string
+    }
     search: string
     loading: string
     states: Record<string, string>
@@ -1569,6 +1579,7 @@ export interface Translations {
     noWorkspace: string
     projectEmpty: string
     noSessions: string
+    noFilterMatches: string
     projects: {
       sectionLabel: string
       home: string
@@ -1672,6 +1683,8 @@ export interface Translations {
       renameDesc: string
       untitledPlaceholder: string
       untitledChat: (id: string) => string
+      messageCount: (count: number) => string
+      todoProgress: string
       ageNow: string
       ageDay: string
       ageHour: string
@@ -1683,6 +1696,10 @@ export interface Translations {
       thisWeek: string
       lastWeek: string
       thisMonth: string
+    }
+    statusDivider: {
+      working: string
+      done: string
     }
   }
 
@@ -1743,6 +1760,7 @@ export interface Translations {
     queueEdit: string
     queueSendNext: string
     queueSend: string
+    queueSteer: string
     queueDelete: string
     queueResume: string
     queueResumeTip: string
@@ -1774,6 +1792,37 @@ export interface Translations {
     snippets: Record<string, { label: string; description: string; text: string }>
     dropFiles: string
     dropSession: string
+    mcpSuggestions: {
+      label: (server: string) => string
+      tip: (keyword: string) => string
+      connecting: (server: string) => string
+      cancelTip: string
+      added: (server: string) => string
+      addedTip: string
+      connectFailed: (server: string) => string
+    }
+    skillSuggestions: {
+      label: (skill: string) => string
+      tip: (skill: string) => string
+      done: (skill: string) => string
+      doneTip: string
+    }
+    repairSuggestions: {
+      label: (server: string) => string
+      tip: (server: string) => string
+      working: (server: string) => string
+      workingTip: string
+      done: (server: string) => string
+      doneTip: string
+      failed: (server: string) => string
+    }
+    cronSuggestions: {
+      label: string
+      tip: (phrase: string) => string
+      prefix: string
+      done: string
+      doneTip: string
+    }
   }
 
   statusStack: {
@@ -2106,6 +2155,7 @@ export interface Translations {
       gatewayTitle: string
       customizeTitle: string
       hideStatusbar: string
+      resetStatusbar: string
       toggleApprovalMode: string
       toggleBackendVersion: string
       toggleCommandCenter: string
@@ -2391,6 +2441,28 @@ export interface Translations {
       lateAnswer: (question: string, choice: string) => string
       lateAnswerTip: string
       lateAnswerHint: string
+    }
+    mcpSetup: {
+      installTitle: (server: string) => string
+      enableTitle: (server: string) => string
+      authorizeTitle: (server: string) => string
+      installAction: string
+      enableAction: string
+      authorizeAction: string
+      decline: string
+      declined: string
+      installed: (server: string) => string
+      enabled: (server: string) => string
+      authorized: (server: string) => string
+      failed: (server: string) => string
+      unanswered: string
+      toolCount: (count: number) => string
+      notInCatalog: (server: string) => string
+      catalogSource: string
+      envRequired: string
+      sendFailed: string
+      reloadFailed: string
+      gatewayDisconnected: string
     }
     tool: {
       copyCode: string

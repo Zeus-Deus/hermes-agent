@@ -70,7 +70,8 @@ declare global {
         open: (request?: { sessionId?: null | string; profile?: null | string }) => Promise<{ ok: boolean }>
         close: () => Promise<{ ok: boolean }>
         setIgnoreMouse: (ignore: boolean) => void
-        moveBy: (delta: { x: number; y: number }) => void
+        moveBy: (delta: { x: number; y: number; width: number; height: number }) => void
+        setBounds: (bounds: { x: number; y: number; width: number; height: number }) => void
         setVibrancy: (on: boolean) => Promise<{ ok: boolean }>
         setSession: (sessionId: null | string) => void
         onGoto: (callback: (sessionId: string) => void) => () => void
@@ -197,6 +198,13 @@ declare global {
       }
       revealLogs: () => Promise<{ ok: boolean; path: string; error?: string }>
       getRecentLogs: () => Promise<{ path: string; lines: string[] }>
+      /** Persist a renderer error-boundary catch to desktop.log (fire-and-forget). */
+      reportRendererError?: (report: {
+        label: string
+        boundary: string
+        message: string
+        componentStack: string
+      }) => void
       readDir: (path: string) => Promise<HermesReadDirResult>
       gitRoot?: (path: string) => Promise<string | null>
       // Reveal a path in the OS file manager (Finder / Explorer).
@@ -207,6 +215,11 @@ declare global {
       // resolved by Electron independently of the connected backend (#66899).
       // Created on demand; returns the normalized absolute path.
       desktopPluginsRoot?: () => Promise<string>
+      // Local AGENT-plugin root (<HERMES_HOME>/plugins), same Electron-local
+      // resolution. The disk door also scans it for `<name>/desktop/plugin.js`
+      // so one agent-plugin package can ship a desktop UI half. Optional:
+      // older Electron shells predate it — the scanner then skips this root.
+      agentPluginsRoot?: () => Promise<string>
       // Rename a file/folder in place (new base name, same parent dir).
       renamePath?: (path: string, newName: string) => Promise<{ path: string }>
       // Write a small UTF-8 text file (hardened path, parent must exist).
@@ -260,6 +273,14 @@ declare global {
           commitContext: (repoPath: string) => Promise<{ diff: string; recent: string }>
           push: (repoPath: string) => Promise<{ ok: boolean }>
           shipInfo: (repoPath: string) => Promise<HermesReviewShipInfo>
+          // The PR on each of the given branches — plus any known only by
+          // number — for badging a list of sessions in one request instead of
+          // one `pr view` per checkout.
+          prList: (repoPath: string, branches: string[], numbers?: number[]) => Promise<HermesRepoPullRequests>
+          // A pasted PR review/issue comment URL resolved to its structured
+          // context (author, body, file + line anchor, diff hunk). Null when
+          // gh can't answer — the paste stays a plain URL.
+          fetchPrComment: (repoPath: string, url: string) => Promise<HermesPrComment | null>
           createPr: (repoPath: string) => Promise<{ url: string }>
         }
         // Repo-first discovery: scan bounded roots for git repos (depth-capped).
@@ -418,7 +439,10 @@ export interface DesktopUpdateStatus {
   reason?: string
   message?: string
   error?: string
-  behind?: number
+  /** Exact commits behind. null = update available, but the count is
+   *  unknowable (shallow clone without a merge-base) — never render it as a
+   *  literal number. */
+  behind?: number | null
   currentSha?: string
   /** Backend only: the version string the backend reports for itself. */
   currentVersion?: string
@@ -494,6 +518,7 @@ export interface DesktopUpdateProgress {
 
 export interface HermesConnection {
   baseUrl: string
+  darwinMajor?: number
   isFullscreen: boolean
   // The live, RESOLVED connection mode. Only ever 'local' or 'remote' — a
   // 'cloud' saved-config entry resolves to a 'remote' connection under the hood
@@ -527,6 +552,7 @@ export interface HermesActiveWork {
 }
 
 export interface HermesWindowState {
+  darwinMajor?: number
   isFullscreen: boolean
   isMinimized?: boolean
   isVisible?: boolean
@@ -947,6 +973,38 @@ export interface HermesReviewPr {
   number: number
 }
 
+// One repo's PRs as reported by `gh pr list`, each tied to the branch it was
+// opened from — how a session row finds its own PR.
+export interface HermesBranchPullRequest {
+  branch: string
+  draft: boolean
+  number: number
+  /** `open` | `closed` | `merged`, lowercased from gh. */
+  state: string
+  title: string
+  url: string
+}
+
+export interface HermesRepoPullRequests {
+  ghReady: boolean
+  prs: HermesBranchPullRequest[]
+}
+
+// A PR review/issue comment resolved from a pasted GitHub URL — the composer's
+// review-comment attachment context. `path`/`line`/`diffHunk` are empty for
+// conversation-tab (issue) comments; `line` is null when the comment is
+// outdated and only `original_line` remained.
+export interface HermesPrComment {
+  author: string
+  body: string
+  diffHunk: string
+  kind: 'issue' | 'review'
+  line: null | number
+  path: string
+  prNumber: number
+  startLine: null | number
+  url: string
+}
 // gh availability/auth + the current branch's PR — drives the review pane's PR
 // button (disabled when gh isn't ready, "Open PR" vs "Create PR" otherwise).
 export interface HermesReviewShipInfo {

@@ -6,6 +6,7 @@ import type { ContextSuggestion } from '@/app/types'
 import type { HermesConnection } from '@/global'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { persistBoolean, persistString, storedBoolean, storedString } from '@/lib/storage'
+import { syncCronModelImpactConnection } from '@/store/cron-model-impact-scope'
 import type { SessionInfo, UsageStats } from '@/types/hermes'
 
 type Updater<T> = T | ((current: T) => T)
@@ -254,6 +255,48 @@ export const sessionMatchesStoredId = (
   storedSessionId: string
 ): boolean => session.id === storedSessionId || session._lineage_root_id === storedSessionId
 
+// Alias lookup, memoized per sessions-list reference. `lineageAliases` runs
+// per cached session state per status projection per message delta — an
+// O(sessions) scan there multiplies out to states × sessions × ~30Hz per busy
+// session, which is what made a populated recents list drag every stream. The
+// list is replaced wholesale (never mutated), so its reference is the cache key.
+type LineageRow = Pick<SessionInfo, '_lineage_root_id' | 'id'>
+const lineageIndexBySessions = new WeakMap<readonly LineageRow[], Map<string, string[]>>()
+
+function lineageIndex(sessions: readonly LineageRow[]): Map<string, string[]> {
+  const cached = lineageIndexBySessions.get(sessions)
+
+  if (cached) {
+    return cached
+  }
+
+  const index = new Map<string, string[]>()
+
+  const add = (key: string, value: string) => {
+    const bucket = index.get(key)
+
+    if (!bucket) {
+      index.set(key, [value])
+    } else if (!bucket.includes(value)) {
+      bucket.push(value)
+    }
+  }
+
+  for (const session of sessions) {
+    add(session.id, session.id)
+
+    if (session._lineage_root_id) {
+      add(session.id, session._lineage_root_id)
+      add(session._lineage_root_id, session.id)
+      add(session._lineage_root_id, session._lineage_root_id)
+    }
+  }
+
+  lineageIndexBySessions.set(sessions, index)
+
+  return index
+}
+
 /** Every id one conversation answers to: the id we were handed, plus the live
  *  id and lineage root of each session it resolves to.
  *
@@ -262,25 +305,10 @@ export const sessionMatchesStoredId = (
  *  same lineage after a compression. Publishing every alias lets those surfaces
  *  keep using a plain membership test instead of each re-deriving lineage —
  *  and getting it wrong, which reads as a running session going idle mid-turn. */
-export function lineageAliases(
-  storedId: string,
-  sessions: readonly Pick<SessionInfo, '_lineage_root_id' | 'id'>[]
-): string[] {
-  const aliases = new Set([storedId])
-
-  for (const session of sessions) {
-    if (!sessionMatchesStoredId(session, storedId)) {
-      continue
-    }
-
-    aliases.add(session.id)
-
-    if (session._lineage_root_id) {
-      aliases.add(session._lineage_root_id)
-    }
-  }
-
-  return [...aliases]
+export function lineageAliases(storedId: string, sessions: readonly LineageRow[]): string[] {
+  // Every key is in its own bucket by construction, so the bucket IS the
+  // alias set. Copied so no caller can mutate the shared index.
+  return lineageIndex(sessions).get(storedId)?.slice() ?? [storedId]
 }
 
 /** True when two ids name the same conversation across compression tip rotation. */
@@ -482,6 +510,16 @@ export const $messagingTruncated = atom<boolean>(false)
 // "is there another page?" is what pagination actually needs and comes free
 // from the row count the query already returned.
 export const $sessionProfilesTruncated = atom<Record<string, boolean>>({})
+
+/** Tokens and spend per profile across ALL its sessions, not just the loaded
+ *  page — summed in SQL so a profile group's header total doesn't move when the
+ *  window does. Keyed by profile name. */
+export interface ProfileUsage {
+  cost_usd: number
+  tokens: number
+}
+
+export const $sessionProfilesUsage = atom<Record<string, ProfileUsage>>({})
 export const $sessionsLoading = atom(true)
 export const $activeSessionId = atom<string | null>(null)
 export const $selectedStoredSessionId = atom<string | null>(null)
@@ -584,7 +622,11 @@ export const $contextSuggestions = atom<ContextSuggestion[]>([])
 export const $modelPickerOpen = atom(false)
 export const $sessionPickerOpen = atom(false)
 
-export const setConnection = (next: Updater<HermesConnection | null>) => updateAtom($connection, next)
+export const setConnection = (next: Updater<HermesConnection | null>) => {
+  updateAtom($connection, next)
+  syncCronModelImpactConnection($connection.get())
+}
+
 export const setGatewayState = (next: Updater<ConnectionState>) => updateAtom($gatewayState, next)
 export const setSessions = (next: Updater<SessionInfo[]>) => updateAtom($sessions, next)
 export const setCronSessions = (next: Updater<SessionInfo[]>) => updateAtom($cronSessions, next)
@@ -594,6 +636,8 @@ export const setMessagingPlatformTotals = (next: Updater<Record<string, number>>
 export const setMessagingTruncated = (next: Updater<boolean>) => updateAtom($messagingTruncated, next)
 export const setSessionProfilesTruncated = (next: Updater<Record<string, boolean>>) =>
   updateAtom($sessionProfilesTruncated, next)
+export const setSessionProfilesUsage = (next: Updater<Record<string, ProfileUsage>>) =>
+  updateAtom($sessionProfilesUsage, next)
 export const setSessionsLoading = (next: Updater<boolean>) => updateAtom($sessionsLoading, next)
 export const setActiveSessionId = (next: Updater<string | null>) => updateAtom($activeSessionId, next)
 export const setActiveSessionStoredIdRotation = (next: Updater<ActiveSessionStoredIdRotation | null>) =>
@@ -607,6 +651,12 @@ export const setActiveSessionStoredIdRotation = (next: Updater<ActiveSessionStor
 // finished while the app was CLOSED still comes up unread. Written by
 // session-states.ts (live busy→idle edge), cleared here on session open.
 export const $unreadFinishedSessionIds = atom<string[]>([])
+
+export const markAllSessionsRead = () => {
+  if ($unreadFinishedSessionIds.get().length) {
+    $unreadFinishedSessionIds.set([])
+  }
+}
 
 export const setSelectedStoredSessionId = (next: Updater<string | null>) => {
   updateAtom($selectedStoredSessionId, next)

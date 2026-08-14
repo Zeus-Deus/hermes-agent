@@ -16,6 +16,24 @@ from hermes_cli.active_sessions import active_session_registry_snapshot
 from hermes_cli.browser_connect import ChromeDebugLaunch
 from tools import async_delegation as ad
 from tui_gateway import server
+from tui_gateway.transport import bind_transport, reset_transport
+
+
+def _dispatch_sync(req: dict, transport=None) -> dict | None:
+    """Run one RPC to completion synchronously, regardless of pool routing.
+
+    Voice RPCs (voice.toggle/record/tts) are in ``_LONG_HANDLERS`` so they run
+    on the RPC pool and ``server.dispatch`` returns None — the pool worker
+    writes the response via the bound transport. These tests exercise the
+    handler's business logic, not the routing, so they drive the handler
+    inline while preserving the transport-binding semantics ``dispatch``
+    applies around a real request.
+    """
+    token = bind_transport(transport)
+    try:
+        return server.handle_request(req)
+    finally:
+        reset_transport(token)
 
 
 @pytest.fixture(autouse=True)
@@ -1234,10 +1252,10 @@ def test_voice_toggle_returns_configured_record_key(monkeypatch):
     # review on #19835).
     monkeypatch.setenv("HERMES_VOICE", "0")
 
-    on_resp = server.dispatch(
+    on_resp = _dispatch_sync(
         {"id": "voice-on", "method": "voice.toggle", "params": {"action": "on"}}
     )
-    status_resp = server.dispatch(
+    status_resp = _dispatch_sync(
         {"id": "voice-status", "method": "voice.toggle", "params": {"action": "status"}}
     )
 
@@ -1260,7 +1278,7 @@ def test_voice_toggle_on_carries_stop_hint(monkeypatch):
     )
     monkeypatch.setenv("HERMES_VOICE", "0")
 
-    on_resp = server.dispatch(
+    on_resp = _dispatch_sync(
         {"id": "voice-on", "method": "voice.toggle", "params": {"action": "on"}}
     )
     assert on_resp["result"]["stop_hint"] == 'Say "halt" to end the voice chat.'
@@ -1274,13 +1292,13 @@ def test_voice_toggle_on_carries_stop_hint(monkeypatch):
             voice_stop_hint=lambda: "",
         ),
     )
-    on_resp = server.dispatch(
+    on_resp = _dispatch_sync(
         {"id": "voice-on2", "method": "voice.toggle", "params": {"action": "on"}}
     )
     assert on_resp["result"]["stop_hint"] == ""
 
     # off carries no hint text (mode is ending).
-    off_resp = server.dispatch(
+    off_resp = _dispatch_sync(
         {"id": "voice-off", "method": "voice.toggle", "params": {"action": "off"}}
     )
     assert off_resp["result"]["stop_hint"] == ""
@@ -1306,7 +1324,7 @@ def test_voice_toggle_handles_non_dict_voice_cfg(monkeypatch):
     for bad in (True, "cmd+b", None, 42, ["ctrl+b"]):
         monkeypatch.setattr(server, "_load_cfg", lambda b=bad: {"voice": b})
 
-        status_resp = server.dispatch(
+        status_resp = _dispatch_sync(
             {
                 "id": "voice-status",
                 "method": "voice.toggle",
@@ -1325,7 +1343,7 @@ def test_voice_toggle_handles_non_dict_voice_cfg(monkeypatch):
     for bad_root in (True, None, [], "ctrl+b", 42):
         monkeypatch.setattr(server, "_load_cfg", lambda r=bad_root: r)
 
-        status_resp = server.dispatch(
+        status_resp = _dispatch_sync(
             {
                 "id": "voice-status-root",
                 "method": "voice.toggle",
@@ -1366,7 +1384,7 @@ def test_voice_record_start_handles_non_dict_voice_cfg(monkeypatch):
         captured.clear()
         monkeypatch.setattr(server, "_load_cfg", lambda b=bad: {"voice": b})
 
-        resp = server.dispatch(
+        resp = _dispatch_sync(
             {
                 "id": "voice-record",
                 "method": "voice.record",
@@ -1395,7 +1413,7 @@ def test_voice_record_start_handles_non_dict_voice_cfg(monkeypatch):
         captured.clear()
         monkeypatch.setattr(server, "_load_cfg", lambda c=bad_bool_cfg: {"voice": c})
 
-        resp = server.dispatch(
+        resp = _dispatch_sync(
             {
                 "id": "voice-record-bool",
                 "method": "voice.record",
@@ -1594,12 +1612,12 @@ def test_wake_owner_is_sticky_and_routes_detection_to_first_transport(monkeypatc
     server._wake_owner_transport = None
     server._wake_owner_surface = ""
     try:
-        started = server.dispatch({
+        started = _dispatch_sync({
             "id": "wake-1",
             "method": "wake.start",
             "params": {"surface": "gui", "session_id": "first-session"},
         }, transport=first)
-        denied = server.dispatch({
+        denied = _dispatch_sync({
             "id": "wake-2",
             "method": "wake.start",
             "params": {"surface": "tui", "session_id": "second-session"},
@@ -1609,7 +1627,7 @@ def test_wake_owner_is_sticky_and_routes_detection_to_first_transport(monkeypatc
             "method": "wake.stop",
             "params": {},
         }, transport=second)
-        denied_voice_stop = server.dispatch({
+        denied_voice_stop = _dispatch_sync({
             "id": "voice-stop-2",
             "method": "voice.record",
             "params": {"action": "stop"},
@@ -1640,7 +1658,7 @@ def test_wake_owner_is_sticky_and_routes_detection_to_first_transport(monkeypatc
         )]
         assert state["paused"] is True
 
-        voice_started = server.dispatch({
+        voice_started = _dispatch_sync({
             "id": "voice-start-1",
             "method": "voice.record",
             "params": {"action": "start", "session_id": "first-session"},
@@ -1660,7 +1678,7 @@ def test_wake_owner_is_sticky_and_routes_detection_to_first_transport(monkeypatc
             "disabled_persisted": False,
         }
 
-        reclaimed = server.dispatch({
+        reclaimed = _dispatch_sync({
             "id": "wake-reclaim-2",
             "method": "wake.start",
             "params": {"surface": "tui", "session_id": "second-session"},
@@ -1730,7 +1748,7 @@ def test_wake_toggle_persists_enabled_flag_only_on_explicit_gesture(monkeypatch)
     server._wake_owner_surface = ""
     try:
         # Passive auto-arm (no persist): refused, config untouched.
-        passive = server.dispatch({
+        passive = _dispatch_sync({
             "id": "wake-passive",
             "method": "wake.start",
             "params": {"surface": "gui"},
@@ -1739,7 +1757,7 @@ def test_wake_toggle_persists_enabled_flag_only_on_explicit_gesture(monkeypatch)
         assert persisted == []
 
         # Explicit gesture: enables in config AND arms.
-        clicked = server.dispatch({
+        clicked = _dispatch_sync({
             "id": "wake-click",
             "method": "wake.start",
             "params": {"surface": "gui", "persist": True},
@@ -1760,7 +1778,7 @@ def test_wake_toggle_persists_enabled_flag_only_on_explicit_gesture(monkeypatch)
 
         # persist does NOT override an explicit surface scoping.
         config.update(enabled=True, surface="tui")
-        scoped = server.dispatch({
+        scoped = _dispatch_sync({
             "id": "wake-scoped",
             "method": "wake.start",
             "params": {"surface": "gui", "persist": True},
@@ -1814,7 +1832,7 @@ def test_wake_status_reports_configured_input_device_and_windows_silence_hint(mo
     server._wake_owner_transport = transport
     server._wake_owner_surface = "gui"
     try:
-        response = server.dispatch(
+        response = _dispatch_sync(
             {"id": "wake-status", "method": "wake.status", "params": {}},
             transport=transport,
         )
@@ -1863,7 +1881,7 @@ def test_voice_record_start_forwards_max_recording_seconds(monkeypatch):
         captured.clear()
         monkeypatch.setattr(server, "_load_cfg", lambda c=cfg: {"voice": c})
 
-        resp = server.dispatch(
+        resp = _dispatch_sync(
             {
                 "id": "voice-record-cap",
                 "method": "voice.record",
@@ -1893,7 +1911,7 @@ def test_voice_record_stop_forces_transcription(monkeypatch):
         ),
     )
 
-    resp = server.dispatch(
+    resp = _dispatch_sync(
         {
             "id": "voice-record-stop",
             "method": "voice.record",
@@ -1916,7 +1934,7 @@ def test_voice_record_stop_updates_event_session_id(monkeypatch):
     )
     monkeypatch.setattr(server, "_voice_event_sid", "old-session")
 
-    resp = server.dispatch(
+    resp = _dispatch_sync(
         {
             "id": "voice-record-stop-session",
             "method": "voice.record",
@@ -1940,7 +1958,7 @@ def test_voice_record_start_reports_busy_when_stop_is_in_progress(monkeypatch):
     monkeypatch.setenv("HERMES_VOICE", "1")
     monkeypatch.setattr(server, "_load_cfg", lambda: {"voice": {}})
 
-    resp = server.dispatch(
+    resp = _dispatch_sync(
         {
             "id": "voice-record-busy",
             "method": "voice.record",
@@ -1978,7 +1996,7 @@ def test_voice_toggle_tts_branch_also_carries_record_key(monkeypatch):
     # later test in the file (which now spins up the streaming TTS pipeline).
     monkeypatch.setenv("HERMES_VOICE_TTS", "0")
 
-    tts_resp = server.dispatch(
+    tts_resp = _dispatch_sync(
         {"id": "voice-tts", "method": "voice.toggle", "params": {"action": "tts"}}
     )
 
@@ -2190,10 +2208,75 @@ def test_history_to_messages_preserves_tool_calls_for_resume_display():
 
     assert server._history_to_messages(history) == [
         {"role": "user", "text": "first prompt"},
-        {"context": "resume", "name": "search_files", "role": "tool"},
+        {
+            "args": {"pattern": "resume"},
+            "context": "resume",
+            "name": "search_files",
+            "role": "tool",
+        },
         {"role": "assistant", "text": "first answer"},
         {"role": "user", "text": "second prompt"},
     ]
+
+
+def test_history_to_messages_ships_full_tool_args():
+    # This is the display projection. `context` is an 80-char preview for
+    # collapsed row titles. A renderer that shows the full call (the expanded
+    # `$` transcript in the desktop) rebuilds it from `args`. When the
+    # projection dropped the args, the preview truncation was permanent.
+    long_command = "echo " + "x" * 200
+    history = [
+        {"role": "user", "content": "run it"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "function": {
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": long_command}),
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "content": "{}", "tool_call_id": "call_1"},
+    ]
+
+    rows = server._history_to_messages(history)
+    assert rows[1]["args"] == {"command": long_command}
+    # The preview stays alongside for the collapsed title.
+    assert rows[1]["context"]
+
+    # A tool row with no recorded args keeps the old small shape.
+    argless = server._history_to_messages(
+        [{"role": "tool", "content": "{}", "tool_call_id": "missing"}]
+    )
+    assert "args" not in argless[0]
+
+
+def test_tool_start_ships_full_args(monkeypatch):
+    # The desktop rebuilds the expanded row's `$` transcript from args. When
+    # only the 80-char `context` preview shipped, the expanded command was
+    # truncated until tool.complete. tool.complete already ships full args to
+    # every client, so tool.start does too. There is no per-client gate.
+    events: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server, "_emit", lambda event_type, sid, payload: events.append((event_type, sid, payload))
+    )
+    long_command = "echo " + "y" * 200
+    monkeypatch.setitem(
+        server._sessions,
+        "args-test",
+        {"source": "desktop", "tool_progress_mode": "all", "tool_started_at": {}},
+    )
+
+    server._on_tool_start("args-test", "tool-1", "terminal", {"command": long_command})
+    server._on_tool_start("args-test", "tool-2", "terminal", {})
+
+    assert events[0][2]["args"] == {"command": long_command}
+    # Empty args stay omitted. Argless tools get no noise key.
+    assert "args" not in events[1][2]
 
 
 def test_tool_ctx_sends_an_arg_preview_not_a_phrased_label():
@@ -3042,10 +3125,11 @@ def test_session_cwd_set_profile_session_updates_profile_db(monkeypatch, tmp_pat
 
 
 def test_stored_session_runtime_overrides_skips_bare_billing_provider():
-    """A bare billing bucket ("custom"/"auto"/"openrouter") must not be restored as the
-    provider identity on resume. A custom endpoint that never used `/model` persists only
+    """A bare billing bucket ("custom"/"auto") must not be restored as the provider
+    identity on resume. A custom endpoint that never used `/model` persists only
     `billing_provider="custom"`; restoring that broke `session.resume` with "No LLM provider
-    configured" (agent_init treats it as non-routable). A real provider, or an explicit
+    configured" (agent_init treats it as non-routable). ``"openrouter"`` is NOT a bare bucket
+    — it is a fully routable provider; see #57588. A real provider, or an explicit
     `model_config.provider`, is still restored.
     """
     # Bare "custom" bucket, no explicit model_config.provider: no provider override restored.
@@ -3053,7 +3137,7 @@ def test_stored_session_runtime_overrides_skips_bare_billing_provider():
     assert "provider_override" not in ov
     assert ov["model_override"]["provider"] is None
 
-    for bare in ("auto", "openrouter", "custom"):
+    for bare in ("auto", "custom"):
         ov = server._stored_session_runtime_overrides({"model": "m", "billing_provider": bare})
         assert "provider_override" not in ov
 
@@ -3080,6 +3164,33 @@ def test_stored_session_runtime_overrides_restores_explicit_normal_tier():
 
     assert "service_tier_override" in overrides
     assert overrides["service_tier_override"] == ""
+
+
+def test_openrouter_session_resume_restores_provider():
+    """OpenRouter is a fully routable provider — sessions that used OpenRouter must
+    restore the "openrouter" provider override on resume, not fall through to whatever
+    the current global model is.  (#57588)
+    """
+    # OpenRouter session with no explicit model_config.provider (the common case
+    # for sessions that never used /model): billing_provider="openrouter" should
+    # be restored as the provider override.
+    ov = server._stored_session_runtime_overrides(
+        {"model": "anthropic/claude-opus-4.8", "billing_provider": "openrouter"}
+    )
+    assert ov["provider_override"] == "openrouter"
+    assert ov["model_override"]["provider"] == "openrouter"
+    assert ov["model_override"]["model"] == "anthropic/claude-opus-4.8"
+
+    # When an explicit model_config.provider exists, it takes precedence over
+    # billing_provider (this path was already correct).
+    ov = server._stored_session_runtime_overrides(
+        {
+            "model": "anthropic/claude-opus-4.8",
+            "billing_provider": "openrouter",
+            "model_config": {"provider": "openrouter", "base_url": "https://openrouter.ai/api/v1"},
+        }
+    )
+    assert ov["provider_override"] == "openrouter"
 
 
 def test_persist_live_session_runtime_preserves_resume_metadata(monkeypatch):
@@ -4287,7 +4398,7 @@ def test_prompt_submit_rejects_negative_truncate_ordinal(monkeypatch):
     replaced = []
 
     class _FakeDB:
-        def replace_messages(self, key, messages, active_only=False):
+        def replace_messages(self, key, messages, active_only=False, archive_dropped=False):
             replaced.append((key, list(messages)))
 
     history = [
@@ -4329,6 +4440,89 @@ def test_prompt_submit_rejects_negative_truncate_ordinal(monkeypatch):
         server._sessions.pop("trunc-sid", None)
 
 
+def test_prompt_submit_refuses_boolean_ordinal(monkeypatch):
+    """A JSON `true` ordinal must return 4004, not coerce to turn 1.
+
+    bool is an int subclass, so `int(True) == 1`: a client bug that sends
+    `truncate_before_user_ordinal: true` with confirm_truncate would aim a
+    confirmed rewind at the SECOND user turn and hard-truncate everything
+    after the first — the same silent-loss class as #82756.
+    """
+    history = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply 1"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "reply 2"},
+    ]
+    server._sessions["bool-trunc-sid"] = _session(history=list(history))
+    monkeypatch.setattr(
+        server, "_start_agent_build", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+    monkeypatch.setattr(
+        server, "_start_inflight_turn", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "bool-trunc-sid",
+                    "text": "new turn",
+                    "truncate_before_user_ordinal": True,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is not None
+        assert resp["error"]["code"] == 4004
+        assert "must be an integer" in resp["error"]["message"]
+        assert server._sessions["bool-trunc-sid"]["history"] == history
+    finally:
+        server._sessions.pop("bool-trunc-sid", None)
+
+
+def test_prompt_submit_refuses_confirm_truncate_without_target(monkeypatch):
+    """confirm_truncate with no ordinal is leaked rewind state — fail fast.
+
+    The desktop auto-attaches confirm_truncate whenever it builds truncation
+    params (#82756); a bare flag on an ordinary submit means the client's
+    composer state is corrupted. Refusing loudly surfaces the client bug
+    instead of quietly ignoring the flag.
+    """
+    history = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply 1"},
+    ]
+    server._sessions["bare-confirm-sid"] = _session(history=list(history))
+    monkeypatch.setattr(
+        server, "_start_agent_build", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+    monkeypatch.setattr(
+        server, "_start_inflight_turn", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "bare-confirm-sid",
+                    "text": "new turn",
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is not None
+        assert resp["error"]["code"] == 4004
+        assert "confirm_truncate requires" in resp["error"]["message"]
+        assert server._sessions["bare-confirm-sid"]["history"] == history
+    finally:
+        server._sessions.pop("bare-confirm-sid", None)
+
+
 def test_prompt_submit_refuses_unconfirmed_nonempty_truncation(monkeypatch):
     """An ordinal without confirm_truncate must not drop the session tail.
 
@@ -4341,7 +4535,7 @@ def test_prompt_submit_refuses_unconfirmed_nonempty_truncation(monkeypatch):
     replaced = []
 
     class _FakeDB:
-        def replace_messages(self, key, messages):
+        def replace_messages(self, key, messages, active_only=False, archive_dropped=False):
             replaced.append((key, list(messages)))
 
     history = [
@@ -4394,6 +4588,280 @@ def test_prompt_submit_refuses_unconfirmed_nonempty_truncation(monkeypatch):
         server._sessions.pop("unconfirmed-trunc-sid", None)
 
 
+def test_prompt_submit_truncates_by_message_id(monkeypatch):
+    """#82756: truncate_before_message_id resolves target message and cuts history accurately."""
+    replaced = []
+
+    class _FakeDB:
+        def replace_messages(self, key, messages, active_only=False, archive_dropped=False):
+            replaced.append((key, list(messages)))
+
+    history = [
+        {"id": "msg-1", "role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply 1"},
+        {"id": "msg-2", "role": "user", "content": "second"},
+        {"role": "assistant", "content": "reply 2"},
+    ]
+    server._sessions["msg-id-trunc-sid"] = _session(history=list(history))
+    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(
+        server, "_start_agent_build", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        server, "_start_inflight_turn", lambda *a, **k: None
+    )
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "msg-id-trunc-sid",
+                    "text": "new turn",
+                    "truncate_before_message_id": "msg-2",
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("result") is not None
+        assert len(replaced) == 1
+        assert replaced[0][1] == history[:2]
+    finally:
+        server._sessions.pop("msg-id-trunc-sid", None)
+
+
+def test_prompt_submit_refuses_ordinal_and_message_id_mismatch(monkeypatch):
+    """#82756: A mismatch between truncate_before_user_ordinal and truncate_before_message_id must return 4030."""
+    history = [
+        {"id": "msg-1", "role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply 1"},
+        {"id": "msg-2", "role": "user", "content": "second"},
+        {"role": "assistant", "content": "reply 2"},
+    ]
+    server._sessions["mismatch-trunc-sid"] = _session(history=list(history))
+    monkeypatch.setattr(
+        server, "_start_agent_build", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+    monkeypatch.setattr(
+        server, "_start_inflight_turn", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "mismatch-trunc-sid",
+                    "text": "new turn",
+                    "truncate_before_message_id": "msg-2",  # ordinal index 1
+                    "truncate_before_user_ordinal": 0,      # mismatch (stale 0)
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is not None
+        assert resp["error"]["code"] == 4030
+        assert "does not match" in resp["error"]["message"]
+    finally:
+        server._sessions.pop("mismatch-trunc-sid", None)
+
+
+def test_prompt_submit_truncates_by_row_id(monkeypatch):
+    """#82959: prompt.submit with truncate_before_row_id must cut at the target row id."""
+    replaced = []
+
+    class _FakeDB:
+        def replace_messages(self, key, messages, active_only=False, archive_dropped=False):
+            replaced.append((key, list(messages)))
+
+    history = [
+        {"_row_id": 101, "role": "user", "content": "first"},
+        {"_row_id": 102, "role": "assistant", "content": "reply 1"},
+        {"_row_id": 103, "role": "user", "content": "second"},
+        {"_row_id": 104, "role": "assistant", "content": "reply 2"},
+    ]
+    sess = _session(history=list(history))
+    server._sessions["row-id-trunc-sid"] = sess
+    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    started = []
+    monkeypatch.setattr(
+        server, "_start_agent_build", lambda *a, **k: started.append(k)
+    )
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "row-id-trunc-sid",
+                    "text": "new turn",
+                    "truncate_before_row_id": 103,
+                    "truncate_before_user_ordinal": 1,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is None
+        assert len(sess["history"]) == 2
+        assert sess["history"][-1]["content"] == "reply 1"
+        assert len(replaced) == 1
+        assert replaced[0][1] == history[:2]
+    finally:
+        server._sessions.pop("row-id-trunc-sid", None)
+
+
+def test_prompt_submit_truncates_by_string_row_id(monkeypatch):
+    """#82959: String row IDs in history match correctly against integer truncate_before_row_id."""
+    replaced = []
+
+    class _FakeDB:
+        def replace_messages(self, key, messages, active_only=False, archive_dropped=False):
+            replaced.append((key, list(messages)))
+
+    history = [
+        {"_row_id": "101", "role": "user", "content": "first"},
+        {"_row_id": "102", "role": "assistant", "content": "reply 1"},
+        {"_row_id": "103", "role": "user", "content": "second"},
+        {"_row_id": "104", "role": "assistant", "content": "reply 2"},
+    ]
+    sess = _session(history=list(history))
+    server._sessions["str-row-id-trunc-sid"] = sess
+    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(server, "_start_agent_build", lambda *a, **k: None)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "str-row-id-trunc-sid",
+                    "text": "new turn",
+                    "truncate_before_row_id": 103,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is None
+        assert len(sess["history"]) == 2
+    finally:
+        server._sessions.pop("str-row-id-trunc-sid", None)
+
+
+def test_prompt_submit_refuses_ordinal_and_row_id_mismatch(monkeypatch):
+    """#82959: A mismatch between truncate_before_user_ordinal and truncate_before_row_id must return 4030."""
+    history = [
+        {"_row_id": 201, "role": "user", "content": "first"},
+        {"_row_id": 202, "role": "assistant", "content": "reply 1"},
+        {"_row_id": 203, "role": "user", "content": "second"},
+        {"_row_id": 204, "role": "assistant", "content": "reply 2"},
+    ]
+    server._sessions["row-mismatch-sid"] = _session(history=list(history))
+    monkeypatch.setattr(
+        server, "_start_agent_build", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "row-mismatch-sid",
+                    "text": "new turn",
+                    "truncate_before_row_id": 203,  # user turn ordinal 1
+                    "truncate_before_user_ordinal": 0,  # mismatch (stale 0)
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is not None
+        assert resp["error"]["code"] == 4030
+        assert "does not match" in resp["error"]["message"]
+    finally:
+        server._sessions.pop("row-mismatch-sid", None)
+
+
+def test_prompt_submit_refuses_boolean_row_id(monkeypatch):
+    """Boolean truncate_before_row_id must return 4004."""
+    history = [
+        {"_row_id": 301, "role": "user", "content": "first"},
+        {"_row_id": 302, "role": "assistant", "content": "reply 1"},
+    ]
+    server._sessions["bool-row-sid"] = _session(history=list(history))
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "bool-row-sid",
+                    "text": "new turn",
+                    "truncate_before_row_id": True,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is not None
+        assert resp["error"]["code"] == 4004
+        assert "must be an integer" in resp["error"]["message"]
+    finally:
+        server._sessions.pop("bool-row-sid", None)
+
+
+def test_prompt_submit_row_id_not_found(monkeypatch):
+    """Unknown truncate_before_row_id must return 4018."""
+    history = [
+        {"_row_id": 401, "role": "user", "content": "first"},
+    ]
+    server._sessions["missing-row-sid"] = _session(history=list(history))
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "missing-row-sid",
+                    "text": "new turn",
+                    "truncate_before_row_id": 999,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is not None
+        assert resp["error"]["code"] == 4018
+        assert "no longer in session history" in resp["error"]["message"]
+    finally:
+        server._sessions.pop("missing-row-sid", None)
+
+
+def test_prompt_submit_row_id_ignores_platform_id_fallback(monkeypatch):
+    """truncate_before_row_id must not match string platform IDs."""
+    history = [
+        {"id": "999", "role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply 1"},
+    ]
+    server._sessions["string-id-sid"] = _session(history=list(history))
+    try:
+        resp = server.handle_request({
+            "id": "1",
+            "method": "prompt.submit",
+            "params": {
+                "session_id": "string-id-sid",
+                "text": "new turn",
+                "truncate_before_row_id": 999,
+                "confirm_truncate": True,
+            }
+        })
+        assert resp.get("error") is not None
+        assert resp["error"]["code"] == 4018
+    finally:
+        server._sessions.pop("string-id-sid", None)
+
+
 def test_prompt_submit_refuses_empty_truncation_without_confirm(monkeypatch):
     """A confirmed rewind still must not wipe a non-empty transcript by accident.
 
@@ -4404,7 +4872,7 @@ def test_prompt_submit_refuses_empty_truncation_without_confirm(monkeypatch):
     replaced = []
 
     class _FakeDB:
-        def replace_messages(self, key, messages, active_only=False):
+        def replace_messages(self, key, messages, active_only=False, archive_dropped=False):
             replaced.append((key, list(messages)))
 
     history = [
@@ -4491,7 +4959,7 @@ def test_prompt_submit_empty_truncation_allowed_with_confirm(monkeypatch):
             self._target()
 
     class _FakeDB:
-        def replace_messages(self, key, messages, active_only=False):
+        def replace_messages(self, key, messages, active_only=False, archive_dropped=False):
             replaced.append((key, list(messages)))
 
     history = [
@@ -7451,6 +7919,15 @@ def test_config_set_personality_preserves_history_and_returns_info(monkeypatch):
         server, "_session_info", lambda agent, *a: {"model": getattr(agent, "model", "?")}
     )
     monkeypatch.setattr(server, "_emit", lambda *args: emits.append(args))
+    # Persistence now flows through the single owner (hermes_cli.personality),
+    # never _write_config_key / agent.system_prompt.
+    import hermes_cli.personality as personality_mod
+
+    monkeypatch.setattr(
+        personality_mod,
+        "persist_personality",
+        lambda name: writes.append(("display.personality", name)) or True,
+    )
     monkeypatch.setattr(
         server,
         "_write_config_key",
@@ -9461,7 +9938,7 @@ def test_prompt_submit_can_truncate_before_user_ordinal(monkeypatch):
         def __init__(self):
             self.replaced = []
 
-        def replace_messages(self, session_id, messages, active_only=False):
+        def replace_messages(self, session_id, messages, active_only=False, archive_dropped=False):
             self.replaced.append((session_id, list(messages)))
 
     stub_db = _StubDb()
@@ -9518,7 +9995,7 @@ def test_prompt_submit_refuses_turn_when_truncate_persist_fails(monkeypatch):
     server._sessions["trunc-fail-sid"] = sess
 
     class _FailDb:
-        def replace_messages(self, session_id, messages, active_only=False):
+        def replace_messages(self, session_id, messages, active_only=False, archive_dropped=False):
             raise OSError("disk full")
 
     monkeypatch.setattr(server, "_get_db", lambda: _FailDb())
@@ -9610,7 +10087,7 @@ def test_prompt_submit_truncate_ordinal_skips_display_kind_rows(monkeypatch):
         def __init__(self):
             self.replaced = []
 
-        def replace_messages(self, session_id, messages, active_only=False):
+        def replace_messages(self, session_id, messages, active_only=False, archive_dropped=False):
             self.replaced.append((session_id, list(messages)))
 
     stub_db = _StubDb()
@@ -11111,6 +11588,41 @@ def test_session_create_lazy_info_reports_desktop_contract(monkeypatch):
     assert info["desktop_contract"] == server.DESKTOP_BACKEND_CONTRACT
 
     server._sessions.pop(resp["result"]["session_id"], None)
+
+
+def test_session_activate_lazy_info_reports_desktop_contract():
+    """Activating an already-live *lazy* session (agent not built yet) must
+    still advertise desktop_contract. _live_session_payload falls back to
+    _fallback_session_info while session["agent"] is None; the desktop reads a
+    missing field as contract 0 and falsely warns "Backend out of date" against
+    a current backend (#68392). The sibling session.create path was fixed in
+    #36112; this pins the session.activate path."""
+    import threading
+
+    sid = "lazy-activate-contract"
+    server._sessions[sid] = {
+        "agent": None,
+        "created_at": 123.0,
+        "history": [],
+        "history_lock": threading.RLock(),
+        "last_active": 123.0,
+        "running": False,
+        "session_key": sid,
+        "transport": server._stdio_transport,
+    }
+    try:
+        resp = server.handle_request(
+            {
+                "id": "activate-lazy",
+                "method": "session.activate",
+                "params": {"session_id": sid},
+            }
+        )
+        info = resp["result"]["info"]
+        assert info["lazy"] is True
+        assert info["desktop_contract"] == server.DESKTOP_BACKEND_CONTRACT
+    finally:
+        server._sessions.pop(sid, None)
 
 
 def test_session_list_returns_clean_error_when_state_db_is_unavailable(monkeypatch):
@@ -12936,7 +13448,10 @@ def test_browser_manage_connect_defaults_to_loopback(monkeypatch):
 
 def test_browser_manage_connect_default_local_reports_launch_hint(monkeypatch):
     monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
-    monkeypatch.setattr("platform.system", lambda: "Linux")
+    # No ``platform.system`` fake: the resolved system string only flows into
+    # ``launch_chrome_debug`` / ``manual_chrome_debug_command`` /
+    # ``get_chrome_debug_candidates``, all of which are mocked below — the
+    # host's real value never reaches unmocked code.
     emitted: list[tuple[str, dict]] = []
     monkeypatch.setattr(
         server,
@@ -16451,7 +16966,26 @@ def _branch_history():
             "codex_reasoning_items": BRANCH_CODEX_REASONING_ITEMS,
             "codex_message_items": BRANCH_CODEX_MESSAGE_ITEMS,
         },
+        # Timeline marker: rides as role=user but must keep its tag through
+        # the branch copy, or it re-enters the truncate ordinal address space
+        # as a phantom user turn after a restart (#82756).
+        {
+            "role": "user",
+            "content": "[System: personality changed]",
+            "display_kind": "personality_switch",
+        },
     ]
+
+
+def _branched_marker(db, session_key):
+    return next(
+        (
+            m
+            for m in db.get_messages_as_conversation(session_key)
+            if m.get("display_kind") == "personality_switch"
+        ),
+        None,
+    )
 
 
 def _branched_assistant(db, session_key):
@@ -16490,6 +17024,11 @@ def test_persist_branch_seed_keeps_reasoning_fields(monkeypatch, tmp_path):
         assert assistant["reasoning_details"] == BRANCH_REASONING_DETAILS
         assert assistant["codex_reasoning_items"] == BRANCH_CODEX_REASONING_ITEMS
         assert assistant["codex_message_items"] == BRANCH_CODEX_MESSAGE_ITEMS
+        marker = _branched_marker(db, "branch-key")
+        assert marker is not None, (
+            "the branch seed dropped display_kind: the marker re-entered the "
+            "truncate ordinal address space as a phantom user turn (#82756)"
+        )
         assert session["_branch_seed_persisted"] is True
     finally:
         db.close()
@@ -16532,6 +17071,977 @@ def test_session_branch_keeps_reasoning_fields(monkeypatch, tmp_path):
         assert assistant["reasoning_details"] == BRANCH_REASONING_DETAILS
         assert assistant["codex_reasoning_items"] == BRANCH_CODEX_REASONING_ITEMS
         assert assistant["codex_message_items"] == BRANCH_CODEX_MESSAGE_ITEMS
+        marker = _branched_marker(db, "branch-key")
+        assert marker is not None, (
+            "session.branch dropped display_kind: the marker re-entered the "
+            "truncate ordinal address space as a phantom user turn (#82756)"
+        )
     finally:
         server._sessions.pop("sid", None)
         db.close()
+
+
+# ── _save_cfg comment-preservation regression tests ────────────────────────
+#
+# Until ~mid-2026 _save_cfg used yaml.safe_dump on a deep-loaded config dict.
+# Every /personality (or /reasoning, /details_mode, /prompt, ...) write
+# silently rewrote ~/.hermes/config.yaml top-to-bottom — top-level keys
+# reordered alphabetically, comments stripped, kaomoji/Chinese in stored
+# personality prompts mangled to \uXXXX escapes. These tests pin the
+# user-visible behavior of the comment-preserving replacement so we don't
+# regress.
+
+
+def test_save_cfg_preserves_user_comments(tmp_path, monkeypatch):
+    """The TUI gateway must not strip user-edited comments on setting writes."""
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "# top of file note\n"
+        "model:\n"
+        "  # provider rationale\n"
+        "  default: claude-opus-4-7\n"
+        "display:\n"
+        "  skin: default  # trailing skin note\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+
+    server._save_cfg(
+        {
+            "model": {"default": "claude-opus-4-7"},
+            "display": {"skin": "mono"},
+        }
+    )
+
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "# top of file note" in text
+    assert "# provider rationale" in text
+    assert "# trailing skin note" in text
+
+    import yaml as _yaml
+
+    parsed = _yaml.safe_load(text)
+    assert parsed["display"]["skin"] == "mono"
+
+
+def test_save_cfg_preserves_top_level_key_order(tmp_path, monkeypatch):
+    """Top-level keys must keep the file's hand-edited ordering instead of
+    being rewritten alphabetically by the underlying YAML dumper."""
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "model:\n"
+        "  default: claude-opus-4-7\n"
+        "toolsets:\n"
+        "  - hermes-cli\n"
+        "agent:\n"
+        "  max_turns: 90\n"
+        "display:\n"
+        "  skin: default\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+
+    # Caller's dict iteration order is intentionally alphabetical to confirm
+    # the helper consults disk order, not caller order.
+    server._save_cfg(
+        {
+            "agent": {"max_turns": 90},
+            "display": {"skin": "mono"},
+            "model": {"default": "claude-opus-4-7"},
+            "toolsets": ["hermes-cli"],
+        }
+    )
+
+    text = cfg_path.read_text(encoding="utf-8")
+    top_keys = [
+        line.split(":", 1)[0]
+        for line in text.splitlines()
+        if line and not line.startswith(" ") and not line.startswith("-")
+        and not line.startswith("#")
+    ]
+    assert top_keys == ["model", "toolsets", "agent", "display"]
+
+
+def test_save_cfg_keeps_unicode_personalities_readable(tmp_path, monkeypatch):
+    """The catgirl/kawaii personality prompts must stay readable on disk
+    instead of being \\uXXXX-escaped on every unrelated setting write."""
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "agent:\n"
+        "  personalities:\n"
+        "    catgirl: \"nya (=^･ω･^=) 你好\"\n"
+        "display:\n"
+        "  skin: default\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+
+    # Simulate an unrelated /skin write — must not corrupt the catgirl
+    # personality string sitting in agent.personalities.
+    server._save_cfg(
+        {
+            "agent": {"personalities": {"catgirl": "nya (=^･ω･^=) 你好"}},
+            "display": {"skin": "mono"},
+        }
+    )
+
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "你好" in text
+    assert "(=^･ω･^=)" in text
+    assert "\\u4f60" not in text
+
+
+def test_personality_marker_does_not_shift_truncate_ordinal(monkeypatch):
+    """A personality pivot must not occupy a slot in the ordinal address space.
+
+    ``_apply_personality_to_session`` injects its pivot as ``role=user`` so
+    strict OpenAI-compatible providers accept it mid-conversation. Untagged, the
+    ordinal filter (``role == "user" and not display_kind``) counted it as a
+    real user turn while no client renders it as one, so every rewind issued
+    after a personality change resolved one turn too early and
+    ``replace_messages()`` hard-deleted the extra span (#82756, third occurrence
+    after #70516 / #80763).
+
+    The sibling ``test_prompt_submit_truncate_ordinal_skips_display_kind_rows``
+    pins the filter itself; this one pins the producer, which is where the
+    invariant was actually broken.
+    """
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None, **_kwargs):
+            return {
+                "final_response": "reply",
+                "messages": [
+                    *(conversation_history or []),
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "reply"},
+                ],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    class _StubDb:
+        def __init__(self):
+            self.replaced = []
+
+        def replace_messages(self, session_id, messages, active_only=False, archive_dropped=False):
+            self.replaced.append((session_id, list(messages)))
+
+    session = _session(
+        agent=_Agent(),
+        history=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "first reply"},
+        ],
+    )
+    server._sessions["personality-ordinal-sid"] = session
+    stub_db = _StubDb()
+
+    try:
+        monkeypatch.setattr(server, "_session_info", lambda *a, **k: {})
+        monkeypatch.setattr(server, "_emit", lambda *a: None)
+
+        # Real production injection point — not a hand-written marker dict.
+        server._apply_personality_to_session(
+            "personality-ordinal-sid", session, "talk like a pirate", "pirate"
+        )
+
+        marker = session["history"][-1]
+        assert marker["role"] == "user", "provider compatibility: pivot rides as a user turn"
+
+        # Two more real turns land after the personality change.
+        session["history"].extend(
+            [
+                {"role": "user", "content": "second"},
+                {"role": "assistant", "content": "second reply"},
+                {"role": "user", "content": "third"},
+                {"role": "assistant", "content": "third reply"},
+            ]
+        )
+        history_before = list(session["history"])
+        third_index = history_before.index({"role": "user", "content": "third"})
+
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_get_usage", lambda _a: {})
+        monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
+        monkeypatch.setattr(server, "_get_db", lambda: stub_db)
+
+        # The client counts three user bubbles (first=0, second=1, third=2) —
+        # it never sees the pivot. Rewinding to "third" must cut exactly there.
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "personality-ordinal-sid",
+                    "text": "third, reworded",
+                    "truncate_before_user_ordinal": 2,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("result"), f"got error: {resp.get('error')}"
+
+        expected = history_before[:third_index]
+        assert stub_db.replaced == [("session-key", expected)], (
+            "the pivot shifted the ordinal: the cut landed at "
+            f"{len(stub_db.replaced[0][1]) if stub_db.replaced else None} instead of {third_index}"
+        )
+        # The turn before the target must survive — that is the span the three
+        # reported incidents lost.
+        assert {"role": "user", "content": "second"} in expected
+        # And the mechanism that keeps it out of the address space, so a future
+        # producer cannot regress this by dropping the tag.
+        assert marker.get("display_kind"), (
+            "an untagged role=user pivot silently consumes a truncate ordinal slot"
+        )
+    finally:
+        server._sessions.pop("personality-ordinal-sid", None)
+
+
+def test_prompt_submit_truncation_archives_instead_of_deleting(monkeypatch):
+    """The rewind write must be recoverable, not a hard DELETE.
+
+    #70516 / #80763 / #82756 all ended at this one call, and all three were
+    unrecoverable for the same reason: `replace_messages` DELETEs the rows and
+    the FTS entry goes with them. Guarding the *aim* of a rewind still leaves
+    every other way of aiming it wrong terminal, so the write itself has to
+    stop destroying. The storage-layer contract this relies on is pinned in
+    tests/hermes_state/test_replace_messages_archive_siblings.py.
+    """
+
+    captured = {}
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None, **_kwargs):
+            return {
+                "final_response": "reply",
+                "messages": [
+                    *(conversation_history or []),
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "reply"},
+                ],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    class _StubDb:
+        def replace_messages(
+            self, session_id, messages, active_only=False, archive_dropped=False
+        ):
+            captured["active_only"] = active_only
+            captured["archive_dropped"] = archive_dropped
+
+    server._sessions["archive-trunc-sid"] = _session(
+        agent=_Agent(),
+        history=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "first reply"},
+            {"role": "user", "content": "second"},
+            {"role": "assistant", "content": "second reply"},
+        ],
+    )
+
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_session_info", lambda *a, **k: {})
+        monkeypatch.setattr(server, "_emit", lambda *a: None)
+        monkeypatch.setattr(server, "_get_usage", lambda _a: {})
+        monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
+        monkeypatch.setattr(server, "_get_db", lambda: _StubDb())
+
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "archive-trunc-sid",
+                    "text": "second, reworded",
+                    "truncate_before_user_ordinal": 1,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+
+        assert resp.get("result"), f"got error: {resp.get('error')}"
+        assert captured.get("archive_dropped") is True, (
+            "a rewind must soft-archive the turns it drops, not DELETE them"
+        )
+        # #80216: still must not touch rows archived by an earlier compaction.
+        assert captured.get("active_only") is True
+    finally:
+        server._sessions.pop("archive-trunc-sid", None)
+
+
+def test_insert_message_rows_sets_row_id_on_fresh_dicts(tmp_path):
+    """#82959: _insert_message_rows must assign _row_id on freshly inserted message dicts."""
+    from hermes_state import SessionDB
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("fresh-msg-row-id-sid", "cli")
+    msg = {"role": "user", "content": "fresh turn without pre-existing _row_id"}
+    with db._lock:
+        db._insert_message_rows(db._conn, "fresh-msg-row-id-sid", [msg])
+    assert "_row_id" in msg, "New message dict did not receive _row_id"
+    assert isinstance(msg["_row_id"], int) and msg["_row_id"] > 0
+
+
+def test_prompt_submit_unmatched_row_id_refuses_even_with_ordinal(monkeypatch):
+    """#82959: Unknown row_id must refuse (4018), not fall back to a client ordinal."""
+    replaced = []
+
+    class _FakeDB:
+        def replace_messages(self, key, messages, active_only=False, archive_dropped=False):
+            replaced.append((key, list(messages)))
+
+    history = [
+        {"_row_id": 101, "role": "user", "content": "first"},
+        {"_row_id": 102, "role": "assistant", "content": "reply 1"},
+        {"_row_id": 103, "role": "user", "content": "second"},
+        {"_row_id": 104, "role": "assistant", "content": "reply 2"},
+    ]
+    sess = _session(history=list(history))
+    server._sessions["fallback-row-id-sid"] = sess
+    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(
+        server, "_start_agent_build", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+
+    try:
+        # Stale row_id 999 not in history — even with a valid ordinal, refuse.
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "fallback-row-id-sid",
+                    "text": "new turn",
+                    "truncate_before_row_id": 999,
+                    "truncate_before_user_ordinal": 1,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is not None
+        assert resp["error"]["code"] == 4018
+        assert replaced == []
+        assert len(sess["history"]) == 4
+    finally:
+        server._sessions.pop("fallback-row-id-sid", None)
+
+
+def test_prompt_submit_unmatched_message_id_refuses_even_with_ordinal(monkeypatch):
+    """#82959: Unknown message_id must refuse; no silent ordinal degradation."""
+    replaced = []
+
+    class _FakeDB:
+        def replace_messages(self, key, messages, active_only=False, archive_dropped=False):
+            replaced.append((key, list(messages)))
+
+    # Production-shaped history: no renderer "id" keys on user dicts.
+    history = [
+        {"_row_id": 201, "role": "user", "content": "first"},
+        {"_row_id": 202, "role": "assistant", "content": "reply 1"},
+        {"_row_id": 203, "role": "user", "content": "second"},
+        {"_row_id": 204, "role": "assistant", "content": "reply 2"},
+    ]
+    sess = _session(history=list(history))
+    server._sessions["synthetic-msg-id-sid"] = sess
+    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(
+        server, "_start_agent_build", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "synthetic-msg-id-sid",
+                    "text": "fresh start",
+                    "truncate_before_message_id": "user-1723456789-0",
+                    "truncate_before_user_ordinal": 0,
+                    "confirm_truncate": True,
+                    "confirm_empty_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is not None
+        assert resp["error"]["code"] == 4018
+        assert replaced == []
+        assert len(sess["history"]) == 4
+    finally:
+        server._sessions.pop("synthetic-msg-id-sid", None)
+
+
+def test_prompt_submit_row_id_resolves_via_db_when_memory_lacks_stamps(monkeypatch):
+    """#82959: After turn rewrite strips _row_id, resolve against durable DB history."""
+    replaced = []
+    # Live memory after turn completion: provider-format, no _row_id stamps.
+    live_history = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply 1"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "reply 2"},
+    ]
+    durable_history = [
+        {"_row_id": 501, "role": "user", "content": "first"},
+        {"_row_id": 502, "role": "assistant", "content": "reply 1"},
+        {"_row_id": 503, "role": "user", "content": "second"},
+        {"_row_id": 504, "role": "assistant", "content": "reply 2"},
+    ]
+
+    class _FakeDB:
+        def replace_messages(self, key, messages, active_only=False, archive_dropped=False):
+            replaced.append((key, list(messages)))
+
+        def get_messages_as_conversation(self, key, repair_alternation=False, include_row_ids=False):
+            assert include_row_ids is True
+            return list(durable_history)
+
+    sess = _session(history=list(live_history), session_key="db-row-key")
+    server._sessions["db-row-resolve-sid"] = sess
+    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(server, "_start_agent_build", lambda *a, **k: None)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "db-row-resolve-sid",
+                    "text": "new turn",
+                    "truncate_before_row_id": 503,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is None, resp
+        assert len(sess["history"]) == 2
+        assert sess["history"][-1]["content"] == "reply 1"
+        assert len(replaced) == 1
+        # Healing: live list should now carry stamps for subsequent rewinds.
+        assert sess["history"][0].get("_row_id") == 501
+    finally:
+        server._sessions.pop("db-row-resolve-sid", None)
+
+
+def test_prompt_submit_row_id_real_sessiondb_resolve_without_memory_stamps(
+    monkeypatch, tmp_path
+):
+    """#82959 production path: real SessionDB insert → live history without
+    _row_id (turn rewrite) → truncate_before_row_id cuts durable + memory.
+
+    No hand-seeded ids and no MagicMock state manager — the contract that
+    #82766 review said unit fixtures must exercise.
+    """
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "rowid-trunc.db")
+    session_key = "real-db-row-trunc"
+    db.create_session(session_key, "cli")
+    msgs = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply 1"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "reply 2"},
+        {"role": "user", "content": "third"},
+        {"role": "assistant", "content": "reply 3"},
+    ]
+    with db._lock:
+        db._insert_message_rows(db._conn, session_key, msgs)
+        db._conn.commit()
+    row_ids = [m["_row_id"] for m in msgs]
+    assert all(isinstance(r, int) and r > 0 for r in row_ids)
+
+    # After turn completion gateway rewrites history as provider-format dicts
+    # without _row_id — production-shaped live memory.
+    live_history = [{"role": m["role"], "content": m["content"]} for m in msgs]
+    assert all("_row_id" not in m for m in live_history)
+
+    sess = _session(history=list(live_history), session_key=session_key)
+    sid = "real-db-row-trunc-sid"
+    server._sessions[sid] = sess
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_start_inflight_turn", lambda *a, **k: None)
+
+    try:
+        # Cut before second user turn (row_ids[2]) — leave first exchange only.
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": sid,
+                    "text": "rewound second",
+                    "truncate_before_row_id": row_ids[2],
+                    "truncate_before_user_ordinal": 1,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is None, resp
+        assert len(sess["history"]) == 2
+        assert sess["history"][0]["content"] == "first"
+        assert sess["history"][1]["content"] == "reply 1"
+        # Durable active transcript matches the cut (archive_dropped keeps
+        # inactive rows; get_messages_as_conversation returns active only).
+        active = db.get_messages_as_conversation(session_key)
+        assert len(active) == 2
+        assert active[0]["content"] == "first"
+        assert active[1]["content"] == "reply 1"
+        # Heal stamps for subsequent rewinds when memory lined up with DB.
+        assert sess["history"][0].get("_row_id") is not None
+    finally:
+        server._sessions.pop(sid, None)
+
+
+def test_prompt_submit_row_id_real_sessiondb_unknown_refuses_despite_ordinal(
+    monkeypatch, tmp_path
+):
+    """#82959 fail-closed: unknown row_id + valid ordinal must not truncate
+    real SessionDB (the mass-delete class when durable id cannot resolve).
+    """
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "rowid-refuse.db")
+    session_key = "real-db-row-refuse"
+    db.create_session(session_key, "cli")
+    msgs = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply 1"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "reply 2"},
+    ]
+    with db._lock:
+        db._insert_message_rows(db._conn, session_key, msgs)
+        db._conn.commit()
+
+    live_history = [{"role": m["role"], "content": m["content"]} for m in msgs]
+    sess = _session(history=list(live_history), session_key=session_key)
+    sid = "real-db-row-refuse-sid"
+    server._sessions[sid] = sess
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(
+        server, "_start_agent_build", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+    monkeypatch.setattr(
+        server, "_start_inflight_turn", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+
+    n_before = len(db.get_messages_as_conversation(session_key))
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": sid,
+                    "text": "stale durable id",
+                    "truncate_before_row_id": 999_999_999,
+                    "truncate_before_user_ordinal": 0,
+                    "confirm_truncate": True,
+                    "confirm_empty_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is not None
+        assert resp["error"]["code"] == 4018
+        assert len(sess["history"]) == 4
+        assert len(db.get_messages_as_conversation(session_key)) == n_before
+    finally:
+        server._sessions.pop(sid, None)
+
+
+def test_prompt_submit_row_id_misaligned_memory_refuses_content_swap(
+    monkeypatch, tmp_path
+):
+    """#82959 heal-path guard: equal-length but content-misaligned live memory
+    must refuse (4018), not zip-stamp durable ids positionally and cut the
+    wrong turn. Probe 4a from the PR #83202 review.
+    """
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "rowid-misalign-content.db")
+    session_key = "real-db-row-misalign-content"
+    db.create_session(session_key, "cli")
+    msgs = [
+        {"role": "user", "content": "A"},
+        {"role": "assistant", "content": "ra"},
+        {"role": "user", "content": "B"},
+        {"role": "assistant", "content": "rb"},
+    ]
+    with db._lock:
+        db._insert_message_rows(db._conn, session_key, msgs)
+        db._conn.commit()
+    rid_b = msgs[2]["_row_id"]
+
+    # Same length + same role pattern, but content positions swapped: a
+    # positional stamp would mark live "B" with durable A's row id and the
+    # cut would keep the very turn the user rewound past.
+    live_history = [
+        {"role": "user", "content": "B"},
+        {"role": "assistant", "content": "rb"},
+        {"role": "user", "content": "A"},
+        {"role": "assistant", "content": "ra"},
+    ]
+    sess = _session(history=list(live_history), session_key=session_key)
+    sid = "misalign-content-sid"
+    server._sessions[sid] = sess
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(
+        server, "_start_agent_build", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+    monkeypatch.setattr(
+        server, "_start_inflight_turn", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+
+    n_before = len(db.get_messages_as_conversation(session_key))
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": sid,
+                    "text": "rewind B",
+                    "truncate_before_row_id": rid_b,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is not None
+        assert resp["error"]["code"] == 4018
+        # Fail-closed: nothing stamped onto the misaligned dicts, nothing cut.
+        assert all("_row_id" not in m for m in sess["history"])
+        assert len(sess["history"]) == 4
+        assert len(db.get_messages_as_conversation(session_key)) == n_before
+    finally:
+        server._sessions.pop(sid, None)
+
+
+def test_prompt_submit_row_id_misaligned_memory_role_shift_targets_real_turn(
+    monkeypatch, tmp_path
+):
+    """#82959 heal-path guard: equal-length but role-misaligned live memory
+    must not be positionally stamped. The content-verified DB fallback still
+    resolves the REAL target turn in live order — the cut drops exactly the
+    addressed user turn, never a positionally mis-aimed one. Probe 4b from
+    the PR #83202 review.
+    """
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "rowid-misalign-role.db")
+    session_key = "real-db-row-misalign-role"
+    db.create_session(session_key, "cli")
+    msgs = [
+        {"role": "user", "content": "A"},
+        {"role": "assistant", "content": "ra"},
+        {"role": "user", "content": "B"},
+        {"role": "assistant", "content": "rb"},
+    ]
+    with db._lock:
+        db._insert_message_rows(db._conn, session_key, msgs)
+        db._conn.commit()
+    rid_b = msgs[2]["_row_id"]
+
+    live_history = [
+        {"role": "user", "content": "A"},
+        {"role": "assistant", "content": "ra"},
+        {"role": "assistant", "content": "rb"},
+        {"role": "user", "content": "B"},
+    ]
+    sess = _session(history=list(live_history), session_key=session_key)
+    sid = "misalign-role-sid"
+    server._sessions[sid] = sess
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_start_inflight_turn", lambda *a, **k: None)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": sid,
+                    "text": "rewind B",
+                    "truncate_before_row_id": rid_b,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp.get("error") is None, resp
+        # The addressed turn ("B") is dropped exactly; earlier live turns
+        # survive untouched. Before the guard, a positional zip-stamp put a
+        # user-row id on an assistant dict and the pre-guard fallback cut at
+        # a mis-aimed index. (Fresh _row_id stamps on survivors are expected —
+        # replace_messages re-inserts and re-stamps the surviving dicts.)
+        survivors = [(m["role"], m["content"]) for m in sess["history"]]
+        assert survivors == [
+            ("user", "A"),
+            ("assistant", "ra"),
+            ("assistant", "rb"),
+        ]
+    finally:
+        server._sessions.pop(sid, None)
+
+
+def test_prompt_submit_row_id_db_fallback_ordinal_mapping_verifies_content(
+    monkeypatch,
+):
+    """#82959 db-fallback guard: when live/durable lengths differ, mapping the
+    durable user-ordinal onto live indices must verify the mapped turn shows
+    the durable target's content — a repaired user;user merge shifts ordinals
+    and would otherwise cut an extra turn silently.
+    """
+    replaced = []
+
+    # Durable transcript (repaired): the merge collapsed two user turns, so
+    # durable user-ordinal 1 ("second") maps onto a DIFFERENT live user turn.
+    durable_history = [
+        {"_row_id": 601, "role": "user", "content": "first\nfollow-up"},
+        {"_row_id": 603, "role": "assistant", "content": "reply 1"},
+        {"_row_id": 604, "role": "user", "content": "second"},
+        {"_row_id": 605, "role": "assistant", "content": "reply 2"},
+    ]
+    # Live memory (unrepaired, longer): user ordinal 1 here is "follow-up",
+    # NOT "second".
+    live_history = [
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "follow-up"},
+        {"role": "assistant", "content": "reply 1"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "reply 2"},
+    ]
+
+    class _FakeDB:
+        def replace_messages(self, key, messages, active_only=False, archive_dropped=False):
+            replaced.append((key, list(messages)))
+
+        def get_messages_as_conversation(self, key, repair_alternation=False, include_row_ids=False):
+            return [dict(m) for m in durable_history]
+
+    sess = _session(history=list(live_history), session_key="db-fallback-verify-key")
+    sid = "db-fallback-verify-sid"
+    server._sessions[sid] = sess
+    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(
+        server, "_start_agent_build", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+    monkeypatch.setattr(
+        server, "_start_inflight_turn", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": sid,
+                    "text": "rewind to second",
+                    "truncate_before_row_id": 604,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        # Mapped live turn ("follow-up") does not match durable target
+        # ("second") — refuse instead of cutting the wrong turn.
+        assert resp.get("error") is not None
+        assert resp["error"]["code"] == 4018
+        assert replaced == []
+        assert len(sess["history"]) == 5
+    finally:
+        server._sessions.pop(sid, None)
+
+
+def test_prompt_submit_consecutive_rewinds_with_returned_survivor_row_ids(
+    monkeypatch, tmp_path
+):
+    """#83202 review (consecutive-rewind staleness): replace_messages re-inserts
+    the surviving prefix as NEW rows, so the pre-rewind client row ids die on
+    the first rewind. The submit response must return the fresh survivor ids,
+    and a second rewind using them must succeed where the stale id fail-closes.
+    """
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "rowid-consec.db")
+    session_key = "real-db-consec-rewind"
+    db.create_session(session_key, "cli")
+    msgs = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply 1"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "reply 2"},
+        {"role": "user", "content": "third"},
+        {"role": "assistant", "content": "reply 3"},
+    ]
+    with db._lock:
+        db._insert_message_rows(db._conn, session_key, msgs)
+        db._conn.commit()
+    original_row_ids = [m["_row_id"] for m in msgs]
+
+    sess = _session(history=[dict(m) for m in msgs], session_key=session_key)
+    sid = "real-db-consec-rewind-sid"
+    server._sessions[sid] = sess
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_start_inflight_turn", lambda *a, **k: None)
+
+    try:
+        # Rewind 1: cut before "third" (last user turn). Survivors: turns
+        # "first" + "second" (+ assistant replies) — re-inserted as NEW rows.
+        resp1 = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": sid,
+                    "text": "rewound third",
+                    "truncate_before_row_id": original_row_ids[4],
+                    "truncate_before_user_ordinal": 2,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp1.get("error") is None, resp1
+        survivors = resp1["result"].get("survivor_user_row_ids")
+        # Fresh ids for the two surviving user turns, in visible-user order.
+        assert isinstance(survivors, list) and len(survivors) == 2
+        assert all(isinstance(r, int) for r in survivors)
+        # They must be NEW rows — the old ids are archived (active=0) now.
+        assert set(survivors).isdisjoint(set(original_row_ids))
+        sess["running"] = False
+
+        # Rewind 2a: the STALE pre-rewind id for "second" must fail closed.
+        stale_resp = server.handle_request(
+            {
+                "id": "2",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": sid,
+                    "text": "rewound second (stale id)",
+                    "truncate_before_row_id": original_row_ids[2],
+                    "truncate_before_user_ordinal": 1,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert stale_resp.get("error") is not None
+        assert stale_resp["error"]["code"] == 4018
+        assert len(sess["history"]) == 4  # nothing cut
+
+        # Rewind 2b: the RETURNED survivor id for "second" must succeed.
+        resp2 = server.handle_request(
+            {
+                "id": "3",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": sid,
+                    "text": "rewound second (fresh id)",
+                    "truncate_before_row_id": survivors[1],
+                    "truncate_before_user_ordinal": 1,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+        assert resp2.get("error") is None, resp2
+        assert len(sess["history"]) == 2
+        assert sess["history"][0]["content"] == "first"
+        active = db.get_messages_as_conversation(session_key)
+        assert [m["content"] for m in active] == ["first", "reply 1"]
+        # And the second response rebinds again: one surviving user turn.
+        survivors2 = resp2["result"].get("survivor_user_row_ids")
+        assert isinstance(survivors2, list) and len(survivors2) == 1
+    finally:
+        server._sessions.pop(sid, None)
+
+
+def test_prompt_submit_unconfirmed_truncation_refuses_before_target_resolution(
+    monkeypatch,
+):
+    """Consent (4029) is checked BEFORE target resolution: an unconfirmed
+    submit carrying truncation params must not pay the durable-transcript
+    read or heal-stamp live history (simplify review on #83785), and an
+    out-of-range unconfirmed ordinal refuses 4029, not 4018 — the baseline
+    precedence before the row-id feature.
+    """
+    db_reads = []
+
+    class _SpyDB:
+        def get_messages_as_conversation(self, *a, **k):
+            db_reads.append(1)
+            return []
+
+        def replace_messages(self, *a, **k):
+            pytest.fail("must not write")
+
+    hist = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "r1"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "r2"},
+    ]
+    sess = _session(history=list(hist), session_key="consent-precedence-key")
+    sid = "consent-precedence-sid"
+    server._sessions[sid] = sess
+    monkeypatch.setattr(server, "_get_db", lambda: _SpyDB())
+    monkeypatch.setattr(
+        server, "_start_agent_build", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+    monkeypatch.setattr(
+        server, "_start_inflight_turn", lambda *a, **k: pytest.fail("must not start a turn")
+    )
+
+    try:
+        # Unconfirmed row_id: 4029, no DB read, no heal stamps on history.
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": sid, "text": "x", "truncate_before_row_id": 3},
+            }
+        )
+        assert (resp.get("error") or {}).get("code") == 4029, resp
+        assert db_reads == []
+        assert all("_row_id" not in m for m in sess["history"])
+
+        # Malformed param still beats consent: bool row_id is 4004.
+        resp = server.handle_request(
+            {
+                "id": "2",
+                "method": "prompt.submit",
+                "params": {"session_id": sid, "text": "x", "truncate_before_row_id": True},
+            }
+        )
+        assert (resp.get("error") or {}).get("code") == 4004, resp
+
+        # Unconfirmed out-of-range ordinal: 4029 (consent), not 4018 (range).
+        resp = server.handle_request(
+            {
+                "id": "3",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": sid,
+                    "text": "x",
+                    "truncate_before_user_ordinal": 99,
+                },
+            }
+        )
+        assert (resp.get("error") or {}).get("code") == 4029, resp
+        assert len(sess["history"]) == 4
+    finally:
+        server._sessions.pop(sid, None)

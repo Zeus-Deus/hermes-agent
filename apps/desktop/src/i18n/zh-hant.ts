@@ -125,6 +125,7 @@ export const zhHant = defineLocale({
     updateHermes: '更新 Hermes',
     updateReadyTitle: '有可用更新',
     updateReadyMessage: count => `有 ${count} 項新變更可用。`,
+    updateReadyMessageUnknown: '有新更新可用。',
     seeWhatsNew: '查看新增內容',
     errors: {
       elevenLabsNeedsKey: 'ElevenLabs STT 需要 ELEVENLABS_API_KEY。',
@@ -624,6 +625,7 @@ export const zhHant = defineLocale({
       cantReach: '無法連線到更新伺服器。',
       tapCheck: '點選「立即檢查」以尋找更新。',
       updateReady: count => `新更新已就緒（包含 ${count} 項變更）。`,
+      updateReadyUnknown: '新更新已就緒。',
       lastChecked: age => `上次檢查：${age}`,
       justNowSuffix: ' · 剛剛',
       automaticUpdates: '自動更新',
@@ -1436,6 +1438,13 @@ export const zhHant = defineLocale({
     close: '關閉排程',
     title: '排程工作',
     count: count => `${count} 個工作`,
+    modelImpact: {
+      title: '排程工作需要檢查',
+      message: count => `在您檢查模型設定之前，${count} 個排程工作將被略過。`,
+      detailMore: (names, remaining) => `${names}，以及另外 ${remaining} 個`,
+      review: '檢查排程工作',
+      saveFailed: 'Hermes 未儲存該模型變更。'
+    },
     search: '搜尋排程工作…',
     loading: '正在載入排程工作…',
     states: {
@@ -1627,7 +1636,8 @@ export const zhHant = defineLocale({
       'new-session': '新工作階段',
       skills: '技能與工具',
       messaging: '訊息平台',
-      artifacts: '成品'
+      artifacts: '成品',
+      cron: '排程工作'
     },
     searchAria: '搜尋工作階段',
     searchPlaceholder: '搜尋工作階段…',
@@ -1648,6 +1658,7 @@ export const zhHant = defineLocale({
     noWorkspace: '無工作區',
     projectEmpty: '尚無工作階段',
     noSessions: '尚無工作階段',
+    noFilterMatches: '沒有工作階段符合這些篩選條件',
     projects: {
       sectionLabel: '專案',
       home: '主頁',
@@ -1753,6 +1764,10 @@ export const zhHant = defineLocale({
       thisWeek: '本週',
       lastWeek: '上週',
       thisMonth: '本月'
+    },
+    statusDivider: {
+      working: '進行中',
+      done: '已完成'
     }
   },
 
@@ -1843,6 +1858,7 @@ export const zhHant = defineLocale({
     editingQueuedInComposer: '在輸入框中編輯排隊回合',
     queueEdit: '編輯',
     queueSendNext: '下一個',
+    queueSteer: '引導 — 立即修正目前回合',
     queueSend: '傳送',
     queueDelete: '刪除',
     queueResume: '繼續',
