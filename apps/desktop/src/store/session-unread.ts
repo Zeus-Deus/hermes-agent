@@ -224,7 +224,6 @@ export function markSessionUnreadFinished(storedSessionId: string): void {
 /** ACK — the user opened (or is looking at) this session: watermark := its
  *  current message_count, and any explicit marker is retired. */
 function ackSessionRow(row: SessionInfo): void {
-
   const profile = profileKeyForRow(row)
   const durableId = sessionPinId(row)
 
@@ -279,6 +278,16 @@ export function ackStoredSessionId(storedSessionId: null | string): void {
 
   if (next.length !== markers.length) {
     setMarkerBucket(profile, next)
+  }
+}
+
+/** Sidebar "Mark all as read" — ack every LOADED row (watermark := its current
+ *  count, markers retired) so the persisted layer doesn't repaint the dots the
+ *  user just dismissed on the next list refresh. Rows not loaded keep their
+ *  state: an unseen session in a collapsed profile stays honestly unread. */
+export function ackAllSessionsRead(): void {
+  for (const row of rowsFor([$sessions.get(), $cronSessions.get(), $messagingSessions.get()])) {
+    ackSessionRow(row)
   }
 }
 
