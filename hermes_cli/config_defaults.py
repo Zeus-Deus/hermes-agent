@@ -569,6 +569,16 @@ DEFAULT_CONFIG = {
             "rewrite_loopback_urls": False,
             "loopback_host_alias": "host.docker.internal",
         },
+        # Authenticated browser-extension controller lane. When enabled, an
+        # extension that registers through the gateway can become the exact
+        # controller for a session's browser_* tools (fail-closed once bound).
+        # Local API registration additionally requires the API server bearer
+        # key. developer_mode gates the privileged capabilities
+        # (browser_cdp / browser_evaluate) — never negotiable without it.
+        "extension_control": {
+            "enabled": False,
+            "developer_mode": False,
+        },
     },
 
     # Filesystem checkpoints — automatic snapshots before destructive file ops.
@@ -2933,7 +2943,7 @@ DEFAULT_CONFIG = {
         # — whether the feature is enabled at all is the Labs toggle, never a
         # config key (decisions.md D2/D11). 0/negative falls back to the default.
         "scale_to_zero": {
-            "idle_timeout_minutes": 5,
+            "idle_timeout_minutes": 2,
         },
 
         # Auto-resume restart-loop breaker (#30719, defense-3). When the

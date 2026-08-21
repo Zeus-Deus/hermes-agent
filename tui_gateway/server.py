@@ -35,6 +35,7 @@ from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
 from tools.environments.local import hermes_subprocess_env
 from agent.replay_cleanup import sanitize_replay_history
+from agent.compaction_display import project_compaction_message_for_display
 from agent.skill_commands import describe_skill_invocation
 from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 from tui_gateway import git_probe
@@ -153,6 +154,10 @@ _db = None
 _db_error: str | None = None
 _stdout_lock = threading.Lock()
 _cfg_lock = threading.Lock()
+# Shared profile UI metadata can be updated concurrently by Desktop, mobile,
+# and multiple worker-pool RPCs.  Its compare/check/write transaction needs a
+# dedicated lock rather than the unrelated process-config cache lock.
+_profile_ui_meta_lock = threading.Lock()
 _sessions_lock = threading.RLock()  # reentrant: _close_session_by_id may run under callers that already hold it
 _prompt_lock = threading.Lock()
 _cfg_cache: dict | None = None
@@ -3428,6 +3433,8 @@ def _set_session_context(
         # it instead of falling back to the gateway launch dir.
         resolved = cwd if cwd is not None else _cwd_for_session_key(session_key)
         source = _resolve_session_platform()
+        browser_control_principal = ""
+        browser_control_transport_family = ""
         # Derive the live conversation id so terminal/execute_code subprocesses
         # can read HERMES_SESSION_ID. Without this, set_session_vars leaves the
         # session-id contextvar as "" (explicitly empty), and the subprocess-env
@@ -3445,11 +3452,22 @@ def _set_session_context(
                     session_id = (
                         getattr(sess.get("agent"), "session_id", None) or session_key
                     )
+                    transport = sess.get("transport")
+                    identity = getattr(transport, "auth_identity", None)
+                    if _methods_browser_control._is_authenticated_identity(identity):
+                        browser_control_principal = (
+                            _methods_browser_control._principal_digest(identity)
+                        )
+                        browser_control_transport_family = (
+                            _methods_browser_control._CLOUD_TRANSPORT_FAMILY
+                        )
                     break
         return set_session_vars(
             session_key=session_key,
             session_id=session_id,
             source=source,
+            browser_control_principal=browser_control_principal,
+            browser_control_transport_family=browser_control_transport_family,
             cwd=resolved,
             ui_session_id=ui_session_id,
             cron_session="",
@@ -7668,6 +7686,9 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
 
     for m in history:
         if not isinstance(m, dict):
+            continue
+        m = project_compaction_message_for_display(m)
+        if m is None:
             continue
         role = m.get("role")
         if role not in {"user", "assistant", "tool", "system"}:
@@ -13885,14 +13906,17 @@ def _format_live_usage_output(session: dict) -> str:
 def _format_live_history_output(session: dict) -> str:
     with session["history_lock"]:
         history = list(session.get("history", []))
-    db = _get_db()
-    if db is not None and session.get("session_key"):
-        try:
-            history = db.get_messages_as_conversation(
-                session["session_key"], include_ancestors=True, include_row_ids=True
-            )
-        except Exception:
-            pass
+    # _session_db, not _get_db(): a profile session's transcript lives in its
+    # own profile's state.db, and this read is scoped by session id — through
+    # the launch handle it comes back empty and /history renders nothing.
+    with _session_db(session) as db:
+        if db is not None and session.get("session_key"):
+            try:
+                history = db.get_messages_as_conversation(
+                    session["session_key"], include_ancestors=True, include_row_ids=True
+                )
+            except Exception:
+                pass
     messages = _history_to_messages(history)
     if not messages:
         return "No conversation history yet."
@@ -13925,16 +13949,18 @@ def _format_live_prompt_output(session: dict) -> str:
 
 def _format_live_context_output(session: dict) -> str:
     messages = []
-    db = _get_db()
-    if db is not None and session.get("session_key"):
-        try:
-            messages = _history_to_messages(
-                db.get_messages_as_conversation(
-                    session["session_key"], include_ancestors=True, include_row_ids=True
+    # Same session-scoped read as /history — resolve it against the db that
+    # owns this session's rows, not the launch profile's handle.
+    with _session_db(session) as db:
+        if db is not None and session.get("session_key"):
+            try:
+                messages = _history_to_messages(
+                    db.get_messages_as_conversation(
+                        session["session_key"], include_ancestors=True, include_row_ids=True
+                    )
                 )
-            )
-        except Exception:
-            messages = []
+            except Exception:
+                messages = []
     if not messages:
         with session["history_lock"]:
             messages = _history_to_messages(list(session.get("history", [])))
@@ -15608,6 +15634,7 @@ def _mcp_summarize_server(name, cfg):  # noqa: E402
 # Imported at the end of this module so every global the handlers close
 # over already exists; register() rebinds them onto this namespace.
 from . import (  # noqa: E402
+    methods_browser_control as _methods_browser_control,
     methods_complete as _methods_complete,
     methods_config as _methods_config,
     methods_images as _methods_images,
@@ -15618,6 +15645,7 @@ from . import (  # noqa: E402
 )
 
 for _m in (
+    _methods_browser_control,
     _methods_session,
     _methods_prompt,
     _methods_config,
