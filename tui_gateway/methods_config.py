@@ -7,9 +7,17 @@ Handler bodies are byte-identical to their pre-split server.py form; they
 are rebound onto server.py's globals at install time — see method_ctx.py.
 """
 
+from pathlib import Path
+
 from .method_ctx import HandlerRegistry
 
-from hermes_constants import DEFAULT_INDICATOR_STYLE, INDICATOR_STYLES
+from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
+from hermes_constants import (
+    DEFAULT_INDICATOR_STYLE,
+    INDICATOR_STYLES,
+    reset_hermes_home_override,
+    set_hermes_home_override,
+)
 
 _registry = HandlerRegistry()
 method = _registry.method
@@ -376,12 +384,73 @@ def _(rid, params: dict) -> dict:
     return _err(rid, 4002, f"unknown config key: {key}")
 
 
+def _readiness_profile_home(params: dict):
+    """Resolve the optional ``profile`` param of the setup readiness RPCs.
+
+    Returns ``(profile, home)``: ``home`` is the named profile's directory on
+    THIS host (None for the launch profile / no param). A profile that does
+    not exist here raises ``FileNotFoundError`` instead of silently answering
+    for the launch profile — a readiness check that quietly reports the wrong
+    profile (or the wrong machine) is exactly the failure #94071 describes.
+    """
+    profile = str(params.get("profile") or "").strip() if isinstance(params, dict) else ""
+    if not profile:
+        return "", None
+    from hermes_cli import profiles as profiles_mod
+
+    if not profiles_mod.profile_exists(profile):
+        raise FileNotFoundError(f"Profile '{profile}' does not exist on this backend.")
+    # Looked up on the server module at call time: these helpers keep THIS
+    # module's globals (only handlers are rebound onto server.py's), and tests
+    # monkeypatch ``server._profile_home``.
+    from tui_gateway import server as _server
+
+    return profile, _server._profile_home(profile)
+
+
+def _bind_readiness_profile(home):
+    """Bind a profile's HERMES_HOME *and* its ``.env`` secret scope.
+
+    ``_profile_scoped`` only overrides the home; provider resolution also reads
+    credentials through the secret scope, so a scoped check must see the same
+    ``.env`` the agent would at session build (server.py's turn thread does the
+    identical pair). Returns the two reset tokens (None, None) for no-op.
+    """
+    if home is None:
+        return None, None
+    home_token = set_hermes_home_override(home)
+    secret_token = set_secret_scope(build_profile_secret_scope(Path(home)))
+    return home_token, secret_token
+
+
+def _unbind_readiness_profile(home_token, secret_token) -> None:
+    if secret_token is not None:
+        reset_secret_scope(secret_token)
+    if home_token is not None:
+        reset_hermes_home_override(home_token)
+
+
 @method("setup.status")
 def _(rid, params: dict) -> dict:
+    """Loose provider check; ``profile`` (optional) scopes it to that profile's home."""
     try:
         from hermes_cli.main import _has_any_provider_configured
+        from tui_gateway.methods_config import (
+            _bind_readiness_profile,
+            _readiness_profile_home,
+            _unbind_readiness_profile,
+        )
 
-        return _ok(rid, {"provider_configured": bool(_has_any_provider_configured())})
+        profile, home = _readiness_profile_home(params)
+        home_token, secret_token = _bind_readiness_profile(home)
+        try:
+            configured = bool(_has_any_provider_configured())
+        finally:
+            _unbind_readiness_profile(home_token, secret_token)
+        payload = {"provider_configured": configured}
+        if profile:
+            payload["profile"] = profile
+        return _ok(rid, payload)
     except Exception as e:
         return _err(rid, 5016, str(e))
 
@@ -396,15 +465,39 @@ def _(rid, params: dict) -> dict:
     uses on session creation. It returns ok=False with the auth error message
     when the user's configured model cannot actually be served, so UIs can
     surface onboarding before the user submits a doomed prompt.
+
+    ``profile`` (optional): answer for THAT profile's home on this host —
+    its config.yaml model pin and its ``.env`` — instead of the launch
+    profile's. The Desktop uses this right after creating a bot on a target
+    connection, before starting the bot's automatic first turn (#94071). A
+    profile unknown to this backend answers ``ok=False`` with an explicit
+    error rather than reporting the launch profile's readiness.
     """
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
         from hermes_cli.auth import has_usable_secret
         from hermes_cli.main import _has_any_provider_configured
+        from tui_gateway.methods_config import (
+            _bind_readiness_profile,
+            _readiness_profile_home,
+            _unbind_readiness_profile,
+        )
 
         requested = str(params.get("provider") or "").strip() or None
-        runtime = resolve_runtime_provider(requested=requested)
-        provider_configured = bool(_has_any_provider_configured())
+        try:
+            profile, home = _readiness_profile_home(params)
+        except FileNotFoundError as e:
+            return _ok(
+                rid,
+                {"ok": False, "profile": str(params.get("profile") or "").strip(), "error": str(e)},
+            )
+        home_token, secret_token = _bind_readiness_profile(home)
+        try:
+            runtime = resolve_runtime_provider(requested=requested)
+            provider_configured = bool(_has_any_provider_configured())
+        finally:
+            _unbind_readiness_profile(home_token, secret_token)
+        scoped = {"profile": profile} if profile else {}
         provider = runtime.get("provider") or "provider"
         source = str(runtime.get("source") or "")
         if (
@@ -424,6 +517,7 @@ def _(rid, params: dict) -> dict:
                     "model": runtime.get("model"),
                     "source": source,
                     "error": "No Hermes provider is configured.",
+                    **scoped,
                 },
             )
 
@@ -445,6 +539,7 @@ def _(rid, params: dict) -> dict:
                     "model": runtime.get("model"),
                     "source": runtime.get("source"),
                     "error": f"No usable credentials found for {provider}.",
+                    **scoped,
                 },
             )
 
@@ -455,6 +550,7 @@ def _(rid, params: dict) -> dict:
                 "provider": runtime.get("provider"),
                 "model": runtime.get("model"),
                 "source": runtime.get("source"),
+                **scoped,
             },
         )
     except Exception as e:
