@@ -42,6 +42,7 @@ import {
   $selectedStoredSessionId,
   $sessions,
   clearReadBaseline,
+  getSessionOwnerHint,
   knownSessionProfile,
   lineageAliases,
   markSessionRead,
@@ -93,6 +94,88 @@ export function liveSessionScopes(): Set<string> {
     if (scope) {
       scopes.add(scope)
     }
+  }
+
+  return scopes
+}
+
+// Owner a tile's resume actually resolved (use-session-tile-delegate), keyed
+// by stored id. A route-less local Bot Chat — legacy roster row, primary
+// active — has no ownerRoute, no owner hint and no sidebar row, so without
+// this record foregroundSessionScopes could not name its socket (#93892).
+const resolvedTileOwners = new Map<string, SessionOwnerScope>()
+
+export function recordTileOwner(storedSessionId: string, owner: SessionOwnerScope): void {
+  if (!storedSessionId || !owner) {
+    return
+  }
+
+  resolvedTileOwners.set(storedSessionId, owner)
+}
+
+/**
+ * Scopes a FOREGROUND surface is bound to right now — every mounted session
+ * tile's owner plus the primary thread's — the foreground half of the
+ * gateway registry's dispose guard (its `foregroundScopes` hook, #93892).
+ * Live work alone (liveSessionScopes) is not enough: an idle tile still
+ * holds a resumed runtime on its owner's socket. Closing that socket makes
+ * the backend detach and orphan-reap the runtime, whose `session.reclaimed`
+ * unbinds the tile, whose resume effect binds a fresh runtime on a fresh
+ * socket, which the next dispose decision closes again — a spinner loop with
+ * no terminal state.
+ *
+ * Owners are named the way the resume itself resolves them (owner hint, tile
+ * route, the owner the delegate recorded), falling back to the session row's
+ * profile. Route-owned surfaces map to their composite (connectionId,
+ * profile) scope; profile-owned ones to the bare profile key the local/legacy
+ * pool entries match on. The set follows `$sessionTiles` /
+ * `$selectedStoredSessionId`, so closing the tile (or navigating away)
+ * releases the socket — nothing latches. Cost, deliberately: every open
+ * tile (including a background Bot Chat tab) keeps its owner's socket and
+ * backend alive for as long as it is open.
+ */
+export function foregroundSessionScopes(): Set<string> {
+  const scopes = new Set<string>()
+  const sessions = $sessions.get()
+
+  const addOwner = (owner: SessionOwnerScope): boolean => {
+    if (!owner) {
+      return false
+    }
+
+    if (typeof owner === 'string') {
+      scopes.add(normalizeProfileKey(owner))
+
+      return true
+    }
+
+    if (!owner.connectionId.trim()) {
+      return false
+    }
+
+    scopes.add(registryBackendScopeKey(owner.connectionId, normalizeProfileKey(owner.profile)))
+
+    return true
+  }
+
+  const addStoredSession = (storedSessionId: string, route: SessionProfileRoute | undefined) => {
+    const known = [getSessionOwnerHint(storedSessionId), route, resolvedTileOwners.get(storedSessionId)]
+      .map(addOwner)
+      .some(Boolean)
+
+    if (!known) {
+      addOwner(knownSessionProfile(sessions, storedSessionId))
+    }
+  }
+
+  for (const tile of $sessionTiles.get()) {
+    addStoredSession(tile.storedSessionId, tile.ownerRoute)
+  }
+
+  const selected = $selectedStoredSessionId.get()
+
+  if (selected) {
+    addStoredSession(selected, sessionTileOwnerRoute(selected))
   }
 
   return scopes

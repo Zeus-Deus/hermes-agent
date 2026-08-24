@@ -48,6 +48,7 @@ import {
   $activeSessionId,
   $connection,
   $currentCwd,
+  $selectedStoredSessionId,
   $sessions,
   ensureDefaultWorkspaceCwd,
   setConnection,
@@ -57,7 +58,9 @@ import {
 } from '@/store/session'
 import {
   $attentionSessionIds,
+  $sessionTiles,
   $workingSessionIds,
+  foregroundSessionScopes,
   liveSessionScopes,
   reconcileBusyStatesOnReconnect,
   recordSessionEventScope,
@@ -614,6 +617,10 @@ export function useGatewayBoot({
     // (connectionId, profile) keep-set so two sources exposing the same
     // profile name (every source has a 'default') can't collide.
     configureGatewayRegistry({
+      // Every dispose path in the registry (live-work pruner AND the
+      // refcount-0 request leases) spares a socket a mounted tile or the
+      // primary thread is bound to (#93892).
+      foregroundScopes: foregroundSessionScopes,
       onActiveConnectionChanged: publish,
       // Keep $activeGatewayProfile in lockstep with the registry's OWN record
       // of which profile the active socket serves. The registry is the only
@@ -741,12 +748,20 @@ export function useGatewayBoot({
         }
       }
 
+      // Foreground-bound owners (a mounted tile, the primary thread) are NOT
+      // added here: the registry reads them itself through its
+      // `foregroundScopes` hook so every dispose path agrees (#93892). This
+      // recompute only has to RUN when they change — see the tile / selected
+      // session subscriptions below, which is how closing a tile releases
+      // its socket.
       pruneSecondaryGateways(keep)
     }
 
     const offWorking = $workingSessionIds.subscribe(() => recomputeKeptGateways())
     const offAttention = $attentionSessionIds.subscribe(() => recomputeKeptGateways())
     const offActiveProfile = $activeGatewayProfile.subscribe(() => recomputeKeptGateways())
+    const offTiles = $sessionTiles.subscribe(() => recomputeKeptGateways())
+    const offSelectedSession = $selectedStoredSessionId.subscribe(() => recomputeKeptGateways())
 
     const offWindowState = desktop.onWindowStateChanged?.(payload => {
       const current = $connection.get()
@@ -939,6 +954,8 @@ export function useGatewayBoot({
       offWorking()
       offAttention()
       offActiveProfile()
+      offTiles()
+      offSelectedSession()
       window.removeEventListener('online', onOnline)
       document.removeEventListener('visibilitychange', onVisible)
       offPowerResume?.()
