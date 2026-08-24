@@ -146,7 +146,20 @@ npm run pack
 Do not substitute `dist:linux` unless the user asks for AppImage/deb/rpm
 installers. `pack` is the correct target for the existing launcher.
 
-## 5. Verify the artifact
+## 5. Sync the managed runtime
+
+The Desktop binary and its backend are separate installations. Updating only
+the personal checkout leaves `~/.hermes/hermes-agent` behind and makes the
+footer immediately offer the missing commits. After packaging, update that
+managed checkout with the public installer pinned to the packaged
+`runtimeCommit` on `main`; preserve any local changes and do not build or
+replace the personal Desktop from the managed checkout. Refresh its locked
+dependencies as the installer requires.
+
+Do not treat writing `runtimeCommit` into the build stamp as synchronization:
+that pin controls first-time bootstrap, not an already-complete installation.
+
+## 6. Verify the artifact and runtime
 
 From the repository root:
 
@@ -169,6 +182,10 @@ temporarily unavailable, seed `~/.hermes/bootstrap-cache/` only from an
 installer proven identical to `upstream/main`; do not treat a network failure
 as proof that the ref is wrong.
 
+Also assert that `git -C ~/.hermes/hermes-agent rev-parse HEAD` equals the
+packaged `runtimeCommit` and that its comparison with official `main` reports
+zero commits behind. A nonzero footer count means the update is incomplete.
+
 If Hermes was open while packaging, its `/proc/<pid>/exe` path may end in
 `(deleted)`. Do not kill it without permission. Tell the user to close and
 reopen `Hermes (Personal)`, then verify the new process points to the live
@@ -180,6 +197,7 @@ Report:
 
 - upstream tip and resulting personal merge commit;
 - client version and packaged runtime pin;
+- managed-runtime commit and zero-behind result;
 - whether personal behavior was preserved or superseded;
 - validation commands and results;
 - absolute artifact and launcher paths;
