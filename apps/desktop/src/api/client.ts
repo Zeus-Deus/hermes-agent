@@ -138,15 +138,21 @@ export function capabilityScoped(scope?: ProfileScope): { connectionId?: string;
   return { ...profileScoped(scope), ...connectionScoped() }
 }
 
-/** Stable cache-key for a capability scope: `profile` for the local/legacy
- *  path, `connectionId::profile` for an explicit remote pin. Mirrors
- *  normalizeProfileKey for plain strings so existing keys stay byte-identical. */
+/** Stable cache-key for a capability scope: `profile` for the legacy path
+ *  (string scope / empty connection id), `connectionId::profile` for ANY
+ *  explicit pin — `'local'` included. capabilityScoped routes an explicit
+ *  `'local'` pin to THIS machine while the legacy path follows the active
+ *  gateway, so the two must never share a cache row: with a remote gateway
+ *  active, a "This device" bot's editor would otherwise read (and write) the
+ *  remote same-named profile's skills/toolsets/config from the query cache
+ *  (#94071). Mirrors normalizeProfileKey for plain strings so existing keys
+ *  stay byte-identical. */
 export function profileScopeKey(scope?: ProfileScope): string {
   if (scope && typeof scope === 'object') {
     const profile = (scope.profile ?? '').trim() || 'default'
     const connectionId = (scope.connectionId ?? '').trim()
 
-    return connectionId && connectionId !== 'local' ? `${connectionId}::${profile}` : profile
+    return connectionId ? `${connectionId}::${profile}` : profile
   }
 
   return (scope ?? '').trim() || 'default'
