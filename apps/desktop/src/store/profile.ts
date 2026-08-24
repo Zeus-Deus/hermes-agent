@@ -210,6 +210,53 @@ export interface AgentProfileRoute {
 // change before the first Send; the draft's owner must not change with it.
 export const $newChatRoute = atom<AgentProfileRoute | null>(null)
 
+// The registry source captured TOGETHER with a $newChatProfile intent
+// (selectProfile / newSessionInProfile / a connection switch / `/profile`).
+// A profile is not a machine-global name: "omar" picked while the `local`
+// registry source is active means local::omar — the exact registry entry
+// whose WebSocket will mint the runtime. Without this the profile-rail path
+// (which deliberately clears $newChatRoute) reduced the owner to the bare
+// string "omar", and every follow-up RPC dialed requestGatewayForProfile
+// ("omar") — a DIFFERENT socket than the one that created the session —
+// and 4001'd "session not found" (#94071). null = no registry source was
+// active at intent time (legacy v1 primary).
+export const $newChatConnectionId = atom<null | string>(null)
+
+/** Capture the active registry source alongside a new-chat profile intent. */
+export function captureNewChatSource(): void {
+  $newChatConnectionId.set(activeGatewayConnectionId())
+}
+
+/**
+ * The EXACT owner route the next new chat is created on, or null for the
+ * legacy ambient path. An explicit agent route ($newChatRoute) wins; else,
+ * whenever a registry source is live, the (connection, profile) pair is
+ * derived from the source captured with the profile intent — falling back to
+ * the currently active source — so session.create, the owner hint, the
+ * optimistic row and every later session-scoped RPC name the same registry
+ * entry. Only a v1 primary with no registry identity yields null.
+ */
+export function resolveNewChatOwnerRoute(): AgentProfileRoute | null {
+  const explicit = $newChatRoute.get()
+
+  if (explicit) {
+    return explicit
+  }
+
+  const intentProfile = $newChatProfile.get()
+  const activeConnectionId = activeGatewayConnectionId()
+  const connectionId = ((intentProfile ? $newChatConnectionId.get() : null) ?? activeConnectionId ?? '').trim()
+
+  if (!connectionId) {
+    return null
+  }
+
+  return {
+    connectionId,
+    profile: normalizeProfileKey(intentProfile || $activeGatewayProfile.get())
+  }
+}
+
 // Bumped whenever the open session should be dropped for a fresh new-session
 // draft: a profile switch/create (below), or deleting the project that owns the
 // currently-open session (store/projects). The chat controller subscribes and
@@ -518,6 +565,10 @@ export function selectProfile(name: string): void {
   $showAllProfiles.set(false)
   $newChatProfile.set(target)
   $newChatRoute.set(null)
+  // Clearing the agent route must NOT discard the registry identity: the pick
+  // is made on the source the user is looking at (activateOnCurrentSource
+  // dials exactly that pair), so the draft's exact owner is that pair.
+  captureNewChatSource()
 
   if (switching) {
     requestFreshSession()
@@ -553,6 +604,7 @@ export function newSessionInProfile(name: string): void {
   const target = normalizeProfileKey(name)
   $newChatProfile.set(target)
   $newChatRoute.set(null)
+  captureNewChatSource()
   requestFreshSession()
   void activateOnCurrentSource(target).catch(error => notifyRemoteOverrideAuthFailure(target, error))
 }
@@ -574,6 +626,7 @@ export function newSessionInAgent(route: AgentProfileRoute): void {
 
   $newChatProfile.set(captured.profile)
   $newChatRoute.set(captured)
+  $newChatConnectionId.set(captured.connectionId)
   requestFreshSession()
   void ensureGatewayAgent(captured.connectionId, captured.profile)
 }
