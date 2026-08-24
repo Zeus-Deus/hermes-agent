@@ -7,6 +7,8 @@ description: Update the personal Hermes Agent fork from NousResearch upstream wh
 
 Update this fork carefully. Preserve its personal behavior, integrate current
 upstream intent, produce a clean local build, and leave the launcher usable.
+The result is the latest upstream Desktop with the personal PR behavior layered
+on top; it is not a separate frozen release line.
 
 ## Repository contract
 
@@ -91,6 +93,10 @@ git commit --no-edit
 Warnings originating unchanged from upstream are not personal merge failures.
 Ensure `upstream/main` is an ancestor of `HEAD`.
 
+Confirm `apps/desktop/package.json` carries upstream's current `version`. A
+personal merge must not keep an older client version merely because that was
+the version at which the fork began.
+
 ## 3. Install and validate
 
 Install the exact locked workspace dependencies from the repository root:
@@ -108,6 +114,18 @@ npm run test:desktop:platforms
 ```
 
 Run focused tests for every personal path touched during conflict resolution.
+Always run the build-stamp and bootstrap-runner tests. Personal builds have two
+distinct identities that must survive the full stamp-loading path:
+
+- `commit` / `branch`: the exact personal Desktop build (`HEAD` and
+  `personal/remote-desktop`), used for bundle identity.
+- `runtimeCommit` / `runtimeBranch`: `upstream/main` and `main`, used to fetch
+  and pin the public NousResearch installer/runtime.
+
+`loadInstallStamp()` must preserve the runtime fields. Bootstrap must never ask
+`NousResearch/hermes-agent` for the personal commit, because that commit exists
+only in the fork and would return HTTP 404.
+
 Run `npm run test:desktop:all` when the integration changes install, boot,
 update, packaging, or release-path behavior. Do not hide failures as
 “pre-existing” without proving that premise.
@@ -143,7 +161,13 @@ git merge-base --is-ancestor upstream/main HEAD
 ```
 
 Confirm the build stamp commit and branch match the intended build. Confirm the
-launcher still points to this artifact.
+launcher still points to this artifact. For a personal build, also assert that
+the packaged `runtimeCommit` equals `git rev-parse upstream/main`, its
+`runtimeBranch` is `main`, and the bootstrap resolver selects those runtime
+fields rather than the personal commit. If the public raw-file endpoint is
+temporarily unavailable, seed `~/.hermes/bootstrap-cache/` only from an
+installer proven identical to `upstream/main`; do not treat a network failure
+as proof that the ref is wrong.
 
 If Hermes was open while packaging, its `/proc/<pid>/exe` path may end in
 `(deleted)`. Do not kill it without permission. Tell the user to close and
@@ -155,6 +179,7 @@ executable without `(deleted)`.
 Report:
 
 - upstream tip and resulting personal merge commit;
+- client version and packaged runtime pin;
 - whether personal behavior was preserved or superseded;
 - validation commands and results;
 - absolute artifact and launcher paths;
