@@ -114,12 +114,23 @@ describe('capability helpers are connection-scoped', () => {
     expect(last()).not.toHaveProperty('connectionId')
   })
 
-  it('profileScopeKey keeps legacy keys byte-identical and namespaces remote pins', () => {
+  it('profileScopeKey keeps legacy keys byte-identical and namespaces every explicit pin', () => {
     expect(profileScopeKey()).toBe('default')
     expect(profileScopeKey(null)).toBe('default')
     expect(profileScopeKey('coder')).toBe('coder')
-    expect(profileScopeKey({ connectionId: 'local', profile: 'coder' })).toBe('coder')
+    expect(profileScopeKey({ connectionId: '', profile: 'coder' })).toBe('coder')
     expect(profileScopeKey({ connectionId: 'homelab', profile: 'coder' })).toBe('homelab::coder')
     expect(profileScopeKey({ connectionId: 'homelab' })).toBe('homelab::default')
+  })
+
+  it("a 'local' pin is namespaced apart from the legacy key it no longer routes with (#94071)", () => {
+    // capabilityScoped sends an explicit 'local' pin to THIS machine while a
+    // legacy string scope follows the active gateway. Sharing the bare key
+    // would let the query cache serve a remote same-named profile's
+    // skills/toolsets/config to a "This device" bot's editor — and let that
+    // editor's toggles write into the remote row.
+    expect(profileScopeKey({ connectionId: 'local', profile: 'coder' })).toBe('local::coder')
+    expect(profileScopeKey({ connectionId: 'local', profile: 'coder' })).not.toBe(profileScopeKey('coder'))
+    expect(profileScopeKey({ connectionId: 'local' })).toBe('local::default')
   })
 })
