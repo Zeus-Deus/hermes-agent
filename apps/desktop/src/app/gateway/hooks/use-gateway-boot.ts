@@ -720,8 +720,14 @@ export function useGatewayBoot({
       }
     }
 
+    const onFocus = () => void reconnectNow()
+
     window.addEventListener('online', onOnline)
     document.addEventListener('visibilitychange', onVisible)
+    // Focus nudge: Electron keeps document 'visible' while unfocused, and a
+    // macOS wake often restores focus without a visibilitychange — without
+    // this a socket dropped during sleep sits closed until the user clicks.
+    window.addEventListener('focus', onFocus)
 
     // Keep live pool backends alive while this window is open (the main process
     // can't observe the direct renderer↔backend WS). No-op for the primary.
@@ -958,6 +964,7 @@ export function useGatewayBoot({
       offSelectedSession()
       window.removeEventListener('online', onOnline)
       document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onFocus)
       offPowerResume?.()
       offConnectionApplied?.()
       offConnectionsChanged?.()
