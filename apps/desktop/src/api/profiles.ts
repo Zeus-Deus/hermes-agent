@@ -44,8 +44,9 @@ export function deleteProfile(name: string, scope?: ProfileScope): Promise<{ ok:
   }
 
   return hermesApi<{ ok: boolean; path: string }>({
+    // capabilityScoped emits an explicit 'local' pin itself, which wins over
+    // hermesApi's ambient connection tag spread underneath it.
     ...capabilityScoped(scope),
-    ...(scope && typeof scope === 'object' && scope.connectionId?.trim() === 'local' ? { connectionId: 'local' } : {}),
     path: `/api/profiles/${encodeURIComponent(normalized)}`,
     method: 'DELETE'
   })

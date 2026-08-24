@@ -22,8 +22,9 @@ import {
 // machine's backend. Three shapes:
 //   - no scope         → ambient profile + ambient registry connection tag
 //   - string scope     → explicit profile, ambient connection tag
-//   - object scope     → explicit (connection, profile) pin; 'local' pins the
-//                        local pool and DROPS the ambient connection tag
+//   - object scope     → explicit (connection, profile) pin; 'local' pins THIS
+//                        machine explicitly (overriding the ambient connection
+//                        tag AND the legacy remote route in the main process)
 describe('capability helpers are connection-scoped', () => {
   const api = vi.fn(async (_req: { connectionId?: string; path: string; profile?: string }) => ({}) as never)
 
@@ -89,11 +90,25 @@ describe('capability helpers are connection-scoped', () => {
     }
   })
 
-  it("a 'local' pin routes to the local pool even while a remote gateway is active", () => {
+  it("a 'local' pin routes to THIS machine even while a remote gateway is active (#94071)", () => {
     setApiRequestProfile('research')
     setApiRequestConnection('gw-tailscale')
 
     void getSkills({ connectionId: 'local', profile: 'coder' })
+
+    // Emitted verbatim: the main process keeps an explicit `local` registry-
+    // pinned so it cannot inherit the active/legacy remote route. Dropping it
+    // sent a "This device" bot's capability reads to the remote gateway,
+    // which answered 404 "Profile 'coder' does not exist".
+    expect(last().profile).toBe('coder')
+    expect(last().connectionId).toBe('local')
+  })
+
+  it('an empty connection id in an object scope stays unpinned (legacy route, no ambient tag)', () => {
+    setApiRequestProfile('research')
+    setApiRequestConnection('gw-tailscale')
+
+    void getSkills({ connectionId: '', profile: 'coder' })
 
     expect(last().profile).toBe('coder')
     expect(last()).not.toHaveProperty('connectionId')
