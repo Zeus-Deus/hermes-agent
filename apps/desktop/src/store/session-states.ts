@@ -825,8 +825,12 @@ export function sessionTileOwnerRoute(storedSessionId: string): SessionProfileRo
 /**
  * Sync owner resolution for a session id that may be a RUNTIME or a STORED id.
  * Tile route first (exact connectionId+profile, survives relaunch), then the
- * known session profile (row or open-time hint). Returns undefined when no
- * owner is known — the caller falls back to ambient, never to "active".
+ * exact unique owner hint (stamped when a routed create returns / at open
+ * time), then the known session profile (row, else hint). The hint outranks
+ * the row for the same reason as contrib/wiring's ladder: a row can be
+ * stamped from the ambient profile and carries no connection. Returns
+ * undefined when no owner is known — the caller falls back to ambient, never
+ * to "active".
  */
 export function knownOwnerForSession(sessionId: null | string | undefined): SessionOwnerScope {
   if (!sessionId) {
@@ -835,7 +839,11 @@ export function knownOwnerForSession(sessionId: null | string | undefined): Sess
 
   const storedSessionId = storedSessionIdForRuntimeId(sessionId) ?? sessionId
 
-  return sessionTileOwnerRoute(storedSessionId) ?? knownSessionProfile($sessions.get(), storedSessionId)
+  return (
+    sessionTileOwnerRoute(storedSessionId) ??
+    getSessionOwnerHint(storedSessionId) ??
+    knownSessionProfile($sessions.get(), storedSessionId)
+  )
 }
 
 /**
