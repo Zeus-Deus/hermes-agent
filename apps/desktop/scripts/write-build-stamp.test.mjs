@@ -31,10 +31,13 @@ test('fromLocalGit reads HEAD + branch + dirty status', () => {
     if (cmd === 'git rev-parse HEAD') return 'b'.repeat(40)
     if (cmd === 'git rev-parse --abbrev-ref HEAD') return 'main'
     if (cmd === 'git status --porcelain -uno') return ' M apps/desktop/package.json'
+    if (cmd === 'git merge-base HEAD upstream/main') return 'a'.repeat(40)
     return null
   }
   assert.deepEqual(fromLocalGit('/repo', execFn), {
     commit: 'b'.repeat(40),
+    runtimeCommit: 'a'.repeat(40),
+    runtimeBranch: 'main',
     branch: 'main',
     dirty: true,
     source: 'local'
@@ -67,6 +70,7 @@ test('resolveStamp prefers CI over local git over fallback', () => {
       if (cmd === 'git rev-parse HEAD') return 'd'.repeat(40)
       if (cmd === 'git rev-parse --abbrev-ref HEAD') return 'main'
       if (cmd === 'git status --porcelain -uno') return ''
+      if (cmd === 'git merge-base HEAD upstream/main') return 'd'.repeat(40)
       return null
     }
   })

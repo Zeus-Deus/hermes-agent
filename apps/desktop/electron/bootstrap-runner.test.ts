@@ -95,6 +95,29 @@ test('fresh bootstrap args include the packaged commit pin', () => {
   )
 })
 
+test('fork stamps bootstrap from their canonical upstream runtime commit', () => {
+  const stamp = {
+    commit: 'a'.repeat(40),
+    runtimeCommit: 'b'.repeat(40),
+    runtimeBranch: 'main',
+    branch: 'personal/remote-desktop'
+  }
+
+  assert.deepEqual(installRefForStamp(stamp), {
+    ref: stamp.runtimeCommit,
+    cacheKey: stamp.runtimeCommit,
+    pinned: true
+  })
+  assert.deepEqual(buildPinArgs(stamp), [
+    '-Commit', stamp.runtimeCommit,
+    '-Branch', 'main'
+  ])
+  assert.equal(
+    resolveMarkerPinnedCommit(stamp, '/tmp/checkout', { resolveHead: () => 'c'.repeat(40) }),
+    stamp.runtimeCommit
+  )
+})
+
 test('existing-checkout bootstrap args keep branch but skip the packaged commit pin', () => {
   const installStamp = { commit: 'a'.repeat(40), branch: 'main' }
 

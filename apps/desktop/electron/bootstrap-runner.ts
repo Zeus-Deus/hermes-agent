@@ -50,6 +50,18 @@ function isPinnedCommit(commit) {
   return typeof commit === 'string' && STAMP_COMMIT_RE.test(commit) && !FALLBACK_COMMIT_RE.test(commit)
 }
 
+function runtimeCommitForStamp(installStamp) {
+  if (installStamp && isPinnedCommit(installStamp.runtimeCommit)) {
+    return installStamp.runtimeCommit
+  }
+
+  return installStamp?.commit
+}
+
+function runtimeBranchForStamp(installStamp) {
+  return installStamp?.runtimeBranch || installStamp?.branch
+}
+
 type ExecGitFn = (args: string[], cwd: string) => string
 type ResolveHeadFn = (activeRoot: string | null | undefined) => string | null
 
@@ -111,8 +123,10 @@ function resolveMarkerPinnedCommit(
 ): string | null {
   const resolveHead = opts.resolveHead || resolveCheckoutHead
 
-  if (installStamp && isPinnedCommit(installStamp.commit)) {
-    return installStamp.commit
+  const runtimeCommit = runtimeCommitForStamp(installStamp)
+
+  if (isPinnedCommit(runtimeCommit)) {
+    return runtimeCommit
   }
 
   const head = resolveHead(activeRoot)
@@ -131,16 +145,18 @@ function resolveMarkerPinnedCommit(
  * never asks GitHub for commit 0000000... (#50823).
  */
 function installRefForStamp(installStamp) {
-  if (installStamp && isPinnedCommit(installStamp.commit)) {
+  const runtimeCommit = runtimeCommitForStamp(installStamp)
+
+  if (isPinnedCommit(runtimeCommit)) {
     return {
-      ref: installStamp.commit,
-      cacheKey: installStamp.commit,
+      ref: runtimeCommit,
+      cacheKey: runtimeCommit,
       pinned: true
     }
   }
 
   if (installStamp && typeof installStamp.commit === 'string' && FALLBACK_COMMIT_RE.test(installStamp.commit)) {
-    const ref = installStamp.branch || FALLBACK_BRANCH
+    const ref = runtimeBranchForStamp(installStamp) || FALLBACK_BRANCH
 
     return {
       ref,
@@ -665,12 +681,14 @@ function spawnBash(scriptPath, args, { emit, stageName, abortSignal, hermesHome 
 function buildPinArgs(installStamp, { pinCommit = true } = {}) {
   const args = []
 
-  if (pinCommit && installStamp && isPinnedCommit(installStamp.commit)) {
-    args.push('-Commit', installStamp.commit)
+  const runtimeCommit = runtimeCommitForStamp(installStamp)
+  if (pinCommit && isPinnedCommit(runtimeCommit)) {
+    args.push('-Commit', runtimeCommit)
   }
 
-  if (installStamp && installStamp.branch) {
-    args.push('-Branch', installStamp.branch)
+  const runtimeBranch = runtimeBranchForStamp(installStamp)
+  if (runtimeBranch) {
+    args.push('-Branch', runtimeBranch)
   }
 
   return args
@@ -679,12 +697,14 @@ function buildPinArgs(installStamp, { pinCommit = true } = {}) {
 function buildPosixPinArgs({ installStamp, activeRoot, hermesHome, pinCommit = true }) {
   const args = ['--dir', activeRoot, '--hermes-home', hermesHome]
 
-  if (installStamp && installStamp.branch) {
-    args.push('--branch', installStamp.branch)
+  const runtimeBranch = runtimeBranchForStamp(installStamp)
+  if (runtimeBranch) {
+    args.push('--branch', runtimeBranch)
   }
 
-  if (pinCommit && installStamp && isPinnedCommit(installStamp.commit)) {
-    args.push('--commit', installStamp.commit)
+  const runtimeCommit = runtimeCommitForStamp(installStamp)
+  if (pinCommit && isPinnedCommit(runtimeCommit)) {
+    args.push('--commit', runtimeCommit)
   }
 
   return args
@@ -999,7 +1019,7 @@ async function runBootstrap(opts) {
 
     const markerPayload = {
       pinnedCommit,
-      pinnedBranch: installStamp ? installStamp.branch : null
+      pinnedBranch: installStamp ? runtimeBranchForStamp(installStamp) : null
     }
 
     const marker = typeof writeMarker === 'function' ? writeMarker(markerPayload) : markerPayload

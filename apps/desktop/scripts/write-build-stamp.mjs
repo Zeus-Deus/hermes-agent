@@ -8,6 +8,7 @@
  *   {
  *     "schemaVersion": 1,
  *     "commit":        "<40-char SHA>",
+ *     "runtimeCommit": "<optional upstream SHA used by bootstrap>",
  *     "branch":        "<branch name>",
  *     "builtAt":       "<ISO 8601 UTC timestamp>",
  *     "dirty":         true|false,
@@ -75,8 +76,16 @@ export function fromLocalGit(repoRoot = REPO_ROOT, execFn = tryExec) {
   // differs from the commit being pinned.
   const status = execFn("git status --porcelain -uno", { cwd: repoRoot })
   const dirty = status !== null && status.length > 0
+  // A locally-built fork may have a HEAD that does not exist in the canonical
+  // NousResearch repository. Bootstrap downloads the installer from that
+  // repository, so record the fork's upstream base separately from the bundle
+  // identity. In an ordinary upstream checkout this equals HEAD and is omitted.
+  const upstreamBase = execFn("git merge-base HEAD upstream/main", { cwd: repoRoot })
   return {
     commit: sha,
+    ...(upstreamBase && upstreamBase !== sha
+      ? { runtimeCommit: upstreamBase, runtimeBranch: "main" }
+      : {}),
     branch: branch === "HEAD" ? null : branch, // detached HEAD -> null
     dirty: dirty,
     source: "local"
@@ -152,6 +161,8 @@ function main() {
   const payload = {
     schemaVersion: STAMP_SCHEMA_VERSION,
     commit: stamp.commit,
+    ...(stamp.runtimeCommit ? { runtimeCommit: stamp.runtimeCommit } : {}),
+    ...(stamp.runtimeBranch ? { runtimeBranch: stamp.runtimeBranch } : {}),
     branch: stamp.branch,
     builtAt: new Date().toISOString(),
     dirty: stamp.dirty,
