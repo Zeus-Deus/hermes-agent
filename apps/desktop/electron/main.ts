@@ -610,7 +610,8 @@ const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
 // build hasn't been invoked, or schema mismatch). Callers must handle null.
 //
 // Schema:
-//   { schemaVersion: 1, commit, branch, builtAt, dirty, source }
+//   { schemaVersion: 1, commit, runtimeCommit?, runtimeBranch?, branch,
+//     builtAt, dirty, source }
 const INSTALL_STAMP_SCHEMA_VERSION = 1
 
 function loadInstallStamp() {
@@ -640,6 +641,11 @@ function loadInstallStamp() {
         return Object.freeze({
           schemaVersion: parsed.schemaVersion,
           commit: parsed.commit,
+          runtimeCommit:
+            typeof parsed.runtimeCommit === 'string' && parsed.runtimeCommit.length >= 7
+              ? parsed.runtimeCommit
+              : null,
+          runtimeBranch: typeof parsed.runtimeBranch === 'string' ? parsed.runtimeBranch : null,
           branch: parsed.branch || null,
           builtAt: parsed.builtAt || null,
           dirty: Boolean(parsed.dirty),
