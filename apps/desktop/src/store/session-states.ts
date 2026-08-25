@@ -128,7 +128,34 @@ export function recordTileOwner(storedSessionId: string, owner: SessionOwnerScop
 // selected or tiled), the caller releases it (failed create / drift close),
 // or a bounded TTL expires — nothing latches.
 const SESSION_OWNER_HOLD_TTL_MS = 60_000
-const sessionOwnerHolds = new Map<string, { owner: SessionOwnerScope; until: number }>()
+
+const sessionOwnerHolds = new Map<
+  string,
+  { owner: SessionOwnerScope; timer: ReturnType<typeof setTimeout>; until: number }
+>()
+
+export const $sessionOwnerHoldRevision = atom(0)
+
+function bumpSessionOwnerHoldRevision(): void {
+  $sessionOwnerHoldRevision.set($sessionOwnerHoldRevision.get() + 1)
+}
+
+function forgetSessionOwnerHold(storedSessionId: string, publish: boolean): boolean {
+  const hold = sessionOwnerHolds.get(storedSessionId)
+
+  if (!hold) {
+    return false
+  }
+
+  clearTimeout(hold.timer)
+  sessionOwnerHolds.delete(storedSessionId)
+
+  if (publish) {
+    bumpSessionOwnerHoldRevision()
+  }
+
+  return true
+}
 
 export function holdSessionOwnerUntilForeground(storedSessionId: string, owner: SessionOwnerScope): () => void {
   const id = storedSessionId.trim()
@@ -137,18 +164,33 @@ export function holdSessionOwnerUntilForeground(storedSessionId: string, owner: 
     return () => undefined
   }
 
-  sessionOwnerHolds.set(id, { owner, until: Date.now() + SESSION_OWNER_HOLD_TTL_MS })
+  forgetSessionOwnerHold(id, false)
+  const until = Date.now() + SESSION_OWNER_HOLD_TTL_MS
+  const timer = setTimeout(() => releaseSessionOwnerHold(id), SESSION_OWNER_HOLD_TTL_MS)
+
+  sessionOwnerHolds.set(id, { owner, timer, until })
+  bumpSessionOwnerHoldRevision()
 
   return () => releaseSessionOwnerHold(id)
 }
 
 export function releaseSessionOwnerHold(storedSessionId: string): void {
-  sessionOwnerHolds.delete(storedSessionId.trim())
+  forgetSessionOwnerHold(storedSessionId.trim(), true)
 }
 
 /** @internal Tests. */
 export function _resetSessionOwnerHoldsForTests(): void {
+  const hadHolds = sessionOwnerHolds.size > 0
+
+  for (const hold of sessionOwnerHolds.values()) {
+    clearTimeout(hold.timer)
+  }
+
   sessionOwnerHolds.clear()
+
+  if (hadHolds) {
+    bumpSessionOwnerHoldRevision()
+  }
 }
 
 /**
@@ -230,7 +272,9 @@ export function foregroundSessionScopes(): Set<string> {
       storedSessionId === selected ||
       tiles.some(tile => tile.storedSessionId === storedSessionId)
     ) {
-      sessionOwnerHolds.delete(storedSessionId)
+      // This recompute was already triggered by the selected/tile publication
+      // (or is itself observing expiry), so avoid recursively publishing.
+      forgetSessionOwnerHold(storedSessionId, false)
 
       continue
     }
