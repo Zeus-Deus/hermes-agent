@@ -420,15 +420,21 @@ def _bind_readiness_profile(home):
     if home is None:
         return None, None
     home_token = set_hermes_home_override(home)
-    secret_token = set_secret_scope(build_profile_secret_scope(Path(home)))
+    try:
+        secret_token = set_secret_scope(build_profile_secret_scope(Path(home)))
+    except Exception:
+        reset_hermes_home_override(home_token)
+        raise
     return home_token, secret_token
 
 
 def _unbind_readiness_profile(home_token, secret_token) -> None:
-    if secret_token is not None:
-        reset_secret_scope(secret_token)
-    if home_token is not None:
-        reset_hermes_home_override(home_token)
+    try:
+        if secret_token is not None:
+            reset_secret_scope(secret_token)
+    finally:
+        if home_token is not None:
+            reset_hermes_home_override(home_token)
 
 
 def _unknown_readiness_profile(ok, rid, params: dict, error: FileNotFoundError) -> dict:
@@ -461,7 +467,7 @@ def _(rid, params: dict) -> dict:
             return _unknown_readiness_profile(_ok, rid, params, e)
         home_token, secret_token = _bind_readiness_profile(home)
         try:
-            configured = bool(_has_any_provider_configured())
+            configured = bool(_has_any_provider_configured(strict_profile_scope=bool(profile)))
         finally:
             _unbind_readiness_profile(home_token, secret_token)
         payload = {"provider_configured": configured}
@@ -509,7 +515,7 @@ def _(rid, params: dict) -> dict:
         home_token, secret_token = _bind_readiness_profile(home)
         try:
             runtime = resolve_runtime_provider(requested=requested)
-            provider_configured = bool(_has_any_provider_configured())
+            provider_configured = bool(_has_any_provider_configured(strict_profile_scope=bool(profile)))
         finally:
             _unbind_readiness_profile(home_token, secret_token)
         scoped = {"profile": profile} if profile else {}

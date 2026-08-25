@@ -67,8 +67,8 @@ function loadMcpRpc(hostRequest) {
   const context = { host: { request: hostRequest } }
   vm.createContext(context)
   return vm.runInContext(
-    `${slice('async function mcpRpc(', '// Probe whether the new lifecycle RPCs exist')}
-;({ mcpRpc })`,
+    `${slice('async function mcpRpc(', 'function McpSetupButton(')}
+;({ mcpRpc, mcpSetupSupported })`,
     context
   )
 }
@@ -388,6 +388,30 @@ test('mcpRpc rides the supplied request fn (owning backend) and falls back to ho
     throw new Error('unknown method: mcp.servers.list')
   })
   assert.deepEqual(plain(unsupported), { ok: false, unsupported: true })
+})
+
+test('mcpSetupSupported probes and caches each owning backend independently', async () => {
+  const ambientCalls = []
+  const oldCalls = []
+  const newCalls = []
+  const { mcpSetupSupported } = loadMcpRpc(async (...args) => ambientCalls.push(args))
+  const oldBackend = async (method, params) => {
+    oldCalls.push({ method, params })
+    throw new Error(`unknown method: ${method}`)
+  }
+  const newBackend = async (method, params) => {
+    newCalls.push({ method, params })
+    return { servers: [] }
+  }
+
+  assert.equal(await mcpSetupSupported(oldBackend, 'connection:old'), false)
+  assert.equal(await mcpSetupSupported(newBackend, 'connection:new'), true)
+  assert.equal(await mcpSetupSupported(oldBackend, 'connection:old'), false)
+  assert.equal(await mcpSetupSupported(newBackend, 'connection:new'), true)
+
+  assert.deepEqual(plain(oldCalls), [{ method: 'mcp.servers.list', params: {} }])
+  assert.deepEqual(plain(newCalls), [{ method: 'mcp.servers.list', params: {} }])
+  assert.deepEqual(ambientCalls, [])
 })
 
 test('regression: MCP setup + hub installs carry the owning route (editor) or the create target (New Bot)', () => {

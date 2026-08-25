@@ -3677,18 +3677,23 @@ async function mcpRpc(method, params, request = null) {
   }
 }
 
-// Probe whether the new lifecycle RPCs exist on this gateway (cached per session).
-let _mcpRpcSupported = null
-async function mcpSetupSupported() {
-  if (_mcpRpcSupported !== null) {
-    return _mcpRpcSupported
+// Probe lifecycle support on the owning gateway. Capability is connection
+// state, so cache it by the stable owner/connection key supplied by callers;
+// never let whichever gateway happened to be active answer for every bot.
+const _mcpRpcSupportedByOwner = new Map()
+async function mcpSetupSupported(request, ownerKey) {
+  const key = String(ownerKey || '').trim()
+  if (key && _mcpRpcSupportedByOwner.has(key)) {
+    return _mcpRpcSupportedByOwner.get(key)
   }
-  const r = await mcpRpc('mcp.servers.list', {})
-  _mcpRpcSupported = !(r.ok === false && r.unsupported)
-  return _mcpRpcSupported
+  const probe = mcpRpc('mcp.servers.list', {}, request).then(r => !(r.ok === false && r.unsupported))
+  if (key) {
+    _mcpRpcSupportedByOwner.set(key, probe)
+  }
+  return probe
 }
 
-function McpSetupButton({ profile, entry, onDone, ensureProfile, request }) {
+function McpSetupButton({ profile, entry, onDone, ensureProfile, request, supportScope }) {
   // entry: { name, requires:[env keys], auth?, fromCatalog, installed }
   // profile may be null at first (New Bot: the profile isn't created yet).
   // ensureProfile() lazily creates it on the first setup action and returns the
@@ -3725,7 +3730,7 @@ function McpSetupButton({ profile, entry, onDone, ensureProfile, request }) {
 
   useEffect(() => {
     let alive = true
-    mcpSetupSupported().then(ok => {
+    mcpSetupSupported(request, supportScope).then(ok => {
       if (alive) setSupported(ok)
     })
     return () => {
@@ -8924,6 +8929,9 @@ function AdvancedProfileConfig({ bot, state, setState }) {
   const botRoute = resolveBotConnectionRoute(bot).route
   const backendProfile = botRoute?.targetProfile || botRoute?.profile || bot.name
   const backendScope = botBackendProfileScope(botRoute, bot.name)
+  const mcpSupportScope = botRoute
+    ? `owner:${botOwner(bot).key}`
+    : `connection:${String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || 'active')}`
   const inheritLabel = botInheritLabel(bot)
   // Every mutation from this editor rides the bot's OWN (connection, profile)
   // route; requestForBot rewrites `profile` to the backend name.
@@ -9206,6 +9214,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
                                       profile: bot.name,
                                       entry: m,
                                       request: requestForThisBot,
+                                      supportScope: mcpSupportScope,
                                       onDone: () => toggleMcp(m.name, true)
                                     })
                                   : null,
@@ -10614,6 +10623,9 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                                             entry: m,
                                                             ensureProfile: ensureAgentCreated,
                                                             request: requestForTarget,
+                                                            supportScope: remoteTarget
+                                                              ? `connection:${targetConnection}`
+                                                              : `connection:${activeConnectionId || 'active'}`,
                                                             onDone: () => {
                                                               // Setup done: mark installed so the row's
                                                               // checkbox un-disables, and enable it.

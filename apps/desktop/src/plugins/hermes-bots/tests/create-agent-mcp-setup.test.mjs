@@ -15,7 +15,7 @@ test('McpSetupButton accepts an ensureProfile callback and resolves the profile 
     source.indexOf('function botAppearance(')
   )
   // Signature carries ensureProfile.
-  assert.match(fn, /function McpSetupButton\(\{ profile, entry, onDone, ensureProfile, request \}\)/)
+  assert.match(fn, /function McpSetupButton\(\{ profile, entry, onDone, ensureProfile, request, supportScope \}\)/)
   // resolveProfile falls back to ensureProfile() when no profile is set yet.
   assert.match(fn, /const resolveProfile = async \(\) =>/)
   assert.match(fn, /const created = await ensureProfile\(\)/)
