@@ -22,8 +22,9 @@ import {
 // machine's backend. Three shapes:
 //   - no scope         → ambient profile + ambient registry connection tag
 //   - string scope     → explicit profile, ambient connection tag
-//   - object scope     → explicit (connection, profile) pin; 'local' pins the
-//                        local pool and DROPS the ambient connection tag
+//   - object scope     → explicit (connection, profile) pin; 'local' pins THIS
+//                        machine explicitly (overriding the ambient connection
+//                        tag AND the legacy remote route in the main process)
 describe('capability helpers are connection-scoped', () => {
   const api = vi.fn(async (_req: { connectionId?: string; path: string; profile?: string }) => ({}) as never)
 
@@ -89,22 +90,47 @@ describe('capability helpers are connection-scoped', () => {
     }
   })
 
-  it("a 'local' pin routes to the local pool even while a remote gateway is active", () => {
+  it("a 'local' pin routes to THIS machine even while a remote gateway is active (#94071)", () => {
     setApiRequestProfile('research')
     setApiRequestConnection('gw-tailscale')
 
     void getSkills({ connectionId: 'local', profile: 'coder' })
 
+    // Emitted verbatim: the main process keeps an explicit `local` registry-
+    // pinned so it cannot inherit the active/legacy remote route. Dropping it
+    // sent a "This device" bot's capability reads to the remote gateway,
+    // which answered 404 "Profile 'coder' does not exist".
+    expect(last().profile).toBe('coder')
+    expect(last().connectionId).toBe('local')
+  })
+
+  it('an empty connection id in an object scope stays unpinned (legacy route, no ambient tag)', () => {
+    setApiRequestProfile('research')
+    setApiRequestConnection('gw-tailscale')
+
+    void getSkills({ connectionId: '', profile: 'coder' })
+
     expect(last().profile).toBe('coder')
     expect(last()).not.toHaveProperty('connectionId')
   })
 
-  it('profileScopeKey keeps legacy keys byte-identical and namespaces remote pins', () => {
+  it('profileScopeKey keeps legacy keys byte-identical and namespaces every explicit pin', () => {
     expect(profileScopeKey()).toBe('default')
     expect(profileScopeKey(null)).toBe('default')
     expect(profileScopeKey('coder')).toBe('coder')
-    expect(profileScopeKey({ connectionId: 'local', profile: 'coder' })).toBe('coder')
+    expect(profileScopeKey({ connectionId: '', profile: 'coder' })).toBe('coder')
     expect(profileScopeKey({ connectionId: 'homelab', profile: 'coder' })).toBe('homelab::coder')
     expect(profileScopeKey({ connectionId: 'homelab' })).toBe('homelab::default')
+  })
+
+  it("a 'local' pin is namespaced apart from the legacy key it no longer routes with (#94071)", () => {
+    // capabilityScoped sends an explicit 'local' pin to THIS machine while a
+    // legacy string scope follows the active gateway. Sharing the bare key
+    // would let the query cache serve a remote same-named profile's
+    // skills/toolsets/config to a "This device" bot's editor — and let that
+    // editor's toggles write into the remote row.
+    expect(profileScopeKey({ connectionId: 'local', profile: 'coder' })).toBe('local::coder')
+    expect(profileScopeKey({ connectionId: 'local', profile: 'coder' })).not.toBe(profileScopeKey('coder'))
+    expect(profileScopeKey({ connectionId: 'local' })).toBe('local::default')
   })
 })

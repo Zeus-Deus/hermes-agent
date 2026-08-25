@@ -1243,13 +1243,21 @@ export function upsertOptimisticSession(
   title: string | null = null,
   preview: string | null = null,
   parentSessionId: string | null = null,
-  lastActive?: number
+  lastActive?: number,
+  owner?: null | SessionProfileRoute
 ) {
   const now = lastActive ?? Date.now() / 1000
-  // Stamp the profile the session was just created on (= the live gateway's
-  // profile) so the scoped sidebar shows the new row immediately instead of
-  // filtering it out as "default" until the aggregator re-fetches.
-  const profileKey = normalizeProfileKey($activeGatewayProfile.get())
+  // Stamp the profile the session was just created on so the scoped sidebar
+  // shows the new row immediately instead of filtering it out as "default"
+  // until the aggregator re-fetches. An explicitly routed create ($newChatRoute
+  // / a tile's route) names its EXACT owner: the backend profile that route
+  // serves, on that route's connection. The live gateway's profile is only the
+  // owner for an unrouted create — in All-profiles / Bot routing the ambient
+  // profile stays on `default` while the session lives on another backend, and
+  // a row stamped `default` then misroutes every session-scoped RPC that
+  // resolves its owner off the row ("session not found" on turn two).
+  const profileKey = normalizeProfileKey(owner ? owner.targetProfile || owner.profile : $activeGatewayProfile.get())
+  const connectionId = owner?.connectionId.trim() || ''
 
   const session: SessionInfo = {
     // Seed cwd so the grouped sidebar can place the new row in its repo/worktree
@@ -1271,7 +1279,8 @@ export function upsertOptimisticSession(
     source: 'tui',
     started_at: now,
     title,
-    tool_call_count: 0
+    tool_call_count: 0,
+    ...(connectionId ? { connection_id: connectionId } : {})
   }
 
   setSessions(prev => [session, ...prev.filter(s => s.id !== id)])
