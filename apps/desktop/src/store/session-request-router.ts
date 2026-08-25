@@ -1,3 +1,4 @@
+import { hasRegistryTopology } from '@/store/connection-registry-state'
 import { requestGatewayForAgent, requestGatewayForProfile } from '@/store/gateway'
 
 /**
@@ -79,8 +80,9 @@ function routeParams(route: SessionProfileRoute, params: Record<string, unknown>
 /**
  * True when a session-scoped RPC must be pinned to `ownerProfile`'s own socket.
  *
- * A KNOWN owner (route or profile name) always needs its own socket: the
- * session belongs to that profile regardless of what the window is showing.
+ * A KNOWN owner always needs its own socket: an exact route in registry
+ * topology, or a profile name in legacy profile-only topology. The session
+ * belongs to that owner regardless of what the window is showing.
  * There is deliberately NO comparison against the active profile — "active" is
  * presentation state, never a routing authority. Only a null/empty owner (a
  * fresh draft with no session, or global chrome) routes ambient.
@@ -93,7 +95,7 @@ export function sessionRpcNeedsProfileRoute(ownerProfile: SessionOwnerScope | un
     return Boolean(ownerProfile.connectionId.trim())
   }
 
-  return ownerProfile != null && Boolean(String(ownerProfile).trim())
+  return !hasRegistryTopology() && ownerProfile != null && Boolean(String(ownerProfile).trim())
 }
 
 /**
@@ -127,6 +129,12 @@ export function requestForSessionProfile<T>(
     return timeoutMs === undefined && signal === undefined
       ? requestGatewayForAgent<T>(connectionId, normKey(ownerProfile.profile), method, routedParams)
       : requestGatewayForAgent<T>(connectionId, normKey(ownerProfile.profile), method, routedParams, timeoutMs, signal)
+  }
+
+  if (ownerProfile != null && String(ownerProfile).trim() && hasRegistryTopology()) {
+    return Promise.reject(
+      new Error('A bare session profile is not an owner in registry topology; an exact connection route is required')
+    )
   }
 
   if (!sessionRpcNeedsProfileRoute(ownerProfile)) {
