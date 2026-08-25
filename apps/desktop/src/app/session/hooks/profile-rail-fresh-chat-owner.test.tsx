@@ -24,6 +24,7 @@ import {
 } from '@/store/profile'
 import {
   $activeSessionId,
+  $connection,
   $selectedStoredSessionId,
   $sessions,
   _resetSessionOwnerHintsForTests,
@@ -33,6 +34,7 @@ import {
   setActiveSessionId,
   setAwaitingResponse,
   setBusy,
+  setConnection,
   setMessages,
   setSelectedStoredSessionId,
   setSessions
@@ -314,13 +316,19 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
   beforeEach(() => {
     sockets.length = 0
     clearSingleFlightSessionResumeState()
-    configureGatewayRegistry({ onEvent: vi.fn() })
+    // Wired exactly as useGatewayBoot: the published active descriptor carries
+    // a registry-backed primary's source identity across a renderer reload.
+    configureGatewayRegistry({
+      activeConnectionId: () => $connection.get()?.connectionId ?? null,
+      onEvent: vi.fn()
+    })
     closeSecondaryGateways()
     installDesktop()
     setSessions([])
     setMessages([])
     setActiveSessionId(null)
     setSelectedStoredSessionId(null)
+    setConnection(null)
     setBusy(false)
     setAwaitingResponse(false)
     $newChatProfile.set(null)
@@ -335,6 +343,7 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
     setSessions([])
     setActiveSessionId(null)
     setSelectedStoredSessionId(null)
+    setConnection(null)
     $newChatProfile.set(null)
     $newChatRoute.set(null)
     $newChatConnectionId.set(null)
@@ -402,6 +411,29 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
   }
 
   const calls = (socket: MockGateway) => socket.request.mock.calls.map(call => call[0] as string)
+
+  it('dials local::omar when boot published local on the active primary gateway', async () => {
+    const primary = makePrimary()
+
+    setPrimaryGateway(primary as never, 'default')
+    expect(activeGateway()).toBe(primary as never)
+    // A true legacy primary has no published registry identity.
+    expect(activeGatewayConnectionId()).toBeNull()
+
+    // Cold boot publishes the resolved primary descriptor before profile-rail
+    // interaction. No registry secondary has been opened in this scenario.
+    setConnection({ connectionId: 'local', mode: 'local', profile: 'default' } as never)
+    expect(activeGatewayConnectionId()).toBe('local')
+
+    selectProfile('omar')
+
+    const desktop = window.hermesDesktop!
+
+    await waitFor(() =>
+      expect(desktop.getConnectionFor).toHaveBeenCalledWith({ connectionId: 'local', profile: 'omar' })
+    )
+    expect(desktop.getConnection).not.toHaveBeenCalledWith('omar')
+  })
 
   it('session.create and both prompt.submit calls ride the SAME conn:local::omar socket', async () => {
     const { handle, omarSocket, primary } = await bootProfileRailOmar()

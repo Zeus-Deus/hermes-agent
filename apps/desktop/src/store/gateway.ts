@@ -24,6 +24,10 @@ const normKey = (profile: string | null | undefined): string => (profile ?? '').
 const isOpen = (gateway: HermesGateway | null): boolean => gateway?.connectionState === 'open'
 
 interface RegistryConfig {
+  /** Electron's published descriptor is authoritative for a primary gateway's
+   * registry identity. Kept as a getter so gateway.ts does not own or duplicate
+   * the connection store. */
+  activeConnectionId?: () => null | string
   onEvent: (event: GatewayEvent) => void
   onActiveConnectionInvalidated?: (fallbackProfile: string, activationEpoch: number) => void
   onActiveConnectionChanged?: (connection: HermesConnection) => void
@@ -238,15 +242,17 @@ export function activeGateway(): HermesGateway | null {
 
 /**
  * The registry connection serving the gateway the user is currently looking
- * at — null for the local/legacy primary path and for profile-keyed (local)
- * secondaries. Event consumers pair this with the event's own `connectionId`
+ * at. A registry-backed primary takes its identity from Electron's published
+ * active descriptor; a true legacy primary (no resolved connectionId) and
+ * profile-keyed local secondaries remain null. Event consumers pair this with
+ * the event's own `connectionId`
  * tag so "from the active profile" really means "from the active SOURCE":
  * two connected gateways can both expose a 'default' profile, and a bare
  * profile comparison attributed gateway B's 'default' activity to gateway A.
  */
 export function activeGatewayConnectionId(): null | string {
   if (g.activeKey === g.primaryProfile) {
-    return null
+    return g.config?.activeConnectionId?.()?.trim() || null
   }
 
   return g.secondaries.get(g.activeKey)?.connectionId ?? null
