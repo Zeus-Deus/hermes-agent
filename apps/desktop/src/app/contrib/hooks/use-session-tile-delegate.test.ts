@@ -229,6 +229,61 @@ describe('useSessionTileDelegate resumeTile', () => {
   })
 })
 
+describe('useSessionTileDelegate resumeTile runtime info (#93892)', () => {
+  beforeEach(() => {
+    setSessions([])
+  })
+
+  afterEach(() => {
+    setSessions([])
+  })
+
+  const resumeWithInfo = async (info: Record<string, unknown>, cached: Record<string, unknown>) => {
+    setSessions([row({ id: 'stored-info', profile: 'bot' })])
+    vi.mocked(requestGatewayForProfile).mockResolvedValueOnce({ info, session_id: 'runtime-info' } as never)
+    const updateSessionState = vi.fn()
+
+    renderTile(
+      vi.fn(async () => ({}) as never),
+      { updateSessionState }
+    )
+    await sessionTileDelegate()!.resumeTile('stored-info')
+
+    const [runtimeId, updater] = updateSessionState.mock.calls[0] as [string, (state: unknown) => unknown]
+    expect(runtimeId).toBe('runtime-info')
+
+    return updater({ busy: false, messages: [], model: '', provider: '', ...cached }) as Record<string, unknown>
+  }
+
+  it('lands the resume response’s model/provider in tile state so the pill never waits on session.info', async () => {
+    // The owner socket can churn before a `session.info` ever arrives; the
+    // resume response already names the model, so a cold tile paints it now.
+    const next = await resumeWithInfo({ model: 'nous/hermes-4', provider: 'nous', running: false }, {})
+
+    expect(next.model).toBe('nous/hermes-4')
+    expect(next.provider).toBe('nous')
+    expect(next.busy).toBe(false)
+  })
+
+  it('fills gaps only — a model a session.info already published stays authoritative', async () => {
+    const next = await resumeWithInfo(
+      { model: 'profile-default', provider: '', running: true },
+      { model: 'session/picked', provider: 'openai' }
+    )
+
+    expect(next.model).toBe('session/picked')
+    expect(next.provider).toBe('openai')
+    expect(next.busy).toBe(true)
+  })
+
+  it('ignores an empty or missing model in the resume response', async () => {
+    const next = await resumeWithInfo({ model: '   ', running: false }, {})
+
+    expect(next.model).toBe('')
+    expect(next.provider).toBe('')
+  })
+})
+
 describe('useSessionTileDelegate interruptSession', () => {
   beforeEach(() => {
     setSessions([])

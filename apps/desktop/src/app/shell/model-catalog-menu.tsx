@@ -20,7 +20,7 @@ import { usePointerQuiet } from '@/components/ui/keyboard-first'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { HermesGateway } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
+import { type ModelOptionsDispatch, modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
 import { DEFAULT_REASONING_EFFORT, reasoningEffortLabel } from '@/lib/reasoning-effort'
 import { normalize } from '@/lib/text'
@@ -96,7 +96,15 @@ interface ModelCatalogMenuProps {
   /** Render the virtual `moa` provider's presets as a selectable section.
    *  Off for override surfaces, where a MoA preset isn't a worker model. */
   includeMoa?: boolean
+  /** Profile whose catalog this is; keys the query and pins the REST
+   *  recovery read. Omitted → the active API profile scope, never a literal
+   *  'default' (a detached surface must follow the active profile). */
   profile?: string
+  /** Owner-routed dispatcher for the catalog read. A surface bound to a
+   *  session must pass the same dispatcher it writes through, or the read
+   *  lands on the ambient backend, which never held the session (#93892).
+   *  Detached surfaces omit it and read through `gateway` / REST. */
+  requestGateway?: ModelOptionsDispatch
   /** Session whose catalog to fetch. A live session's catalog can differ from
    *  the profile-global one, and the app invalidates the SESSION-scoped query
    *  key on model changes — a surface bound to a session must pass it or its
@@ -121,7 +129,8 @@ export function ModelCatalogMenu({
   footer,
   gateway,
   includeMoa = false,
-  profile = 'default',
+  profile,
+  requestGateway,
   sessionId = null
 }: ModelCatalogMenuProps) {
   const { t } = useI18n()
@@ -141,7 +150,8 @@ export function ModelCatalogMenu({
     // Gateway-first even with no session: a connected (possibly remote)
     // gateway owns the model catalog, including virtual providers the local
     // REST fallback can't know about (#53817).
-    queryFn: (): Promise<ModelOptionsResponse> => requestModelOptions({ gateway, sessionId })
+    queryFn: (): Promise<ModelOptionsResponse> =>
+      requestModelOptions({ gateway, profile, request: requestGateway, sessionId })
   })
 
   const loading = modelOptions.isPending && !modelOptions.data

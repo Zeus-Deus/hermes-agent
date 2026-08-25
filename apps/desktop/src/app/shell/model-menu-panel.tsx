@@ -38,7 +38,13 @@ export interface ModelSelection {
 interface ModelMenuPanelProps {
   gateway?: HermesGateway
   onSelectModel: (selection: ModelSelection) => Promise<boolean> | void
+  /** Profile whose catalog this is. Omitted → the active API profile scope
+   *  (never pinned to a literal 'default'). */
   profile?: string
+  /** THIS surface's dispatcher — owner-routed for a tile. Catalog reads go
+   *  through it too, not only writes: `model.options` resolves the session in
+   *  the answering backend's own process, so the ambient socket returns the
+   *  wrong profile's catalog for a cross-profile tile (#93892). */
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
 }
 
@@ -48,7 +54,7 @@ interface ModelMenuPanelProps {
  * surface's session, remember the pick as a global preset, keep the optimistic
  * stores honest, and roll back on a failed gateway write.
  */
-export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', requestGateway }: ModelMenuPanelProps) {
+export function ModelMenuPanel({ gateway, onSelectModel, profile, requestGateway }: ModelMenuPanelProps) {
   const { t } = useI18n()
   const copy = t.shell.modelMenu
   const [refreshing, setRefreshing] = useState(false)
@@ -73,7 +79,8 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
   // never repaint that fallback once the catalog resolved.
   const modelOptions = useQuery({
     queryKey: modelOptionsQueryKey(profile, activeSessionId),
-    queryFn: (): Promise<ModelOptionsResponse> => requestModelOptions({ gateway, sessionId: activeSessionId })
+    queryFn: (): Promise<ModelOptionsResponse> =>
+      requestModelOptions({ gateway, profile, request: requestGateway, sessionId: activeSessionId })
   })
 
   const { model: optionsModel, provider: optionsProvider } = currentPickerSelection(
@@ -95,7 +102,13 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
     try {
       const queryKey = modelOptionsQueryKey(profile, activeSessionId)
 
-      const next = await requestModelOptions({ gateway, refresh: true, sessionId: activeSessionId })
+      const next = await requestModelOptions({
+        gateway,
+        profile,
+        refresh: true,
+        request: requestGateway,
+        sessionId: activeSessionId
+      })
 
       queryClient.setQueryData<ModelOptionsResponse>(queryKey, next)
     } catch {
@@ -238,6 +251,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
       gateway={gateway}
       includeMoa
       profile={profile}
+      requestGateway={requestGateway}
       sessionId={activeSessionId}
     />
   )

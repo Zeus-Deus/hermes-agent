@@ -167,3 +167,69 @@ describe('manualPickRemoved', () => {
     expect(manualPickRemoved(providers, '', '')).toBe(false)
   })
 })
+
+// #93892: a session-bound surface (a tile) must read its catalog through the
+// same owner-routed dispatcher it writes through. The backend resolves
+// `session_id` in its own process, so the ambient socket answers a
+// cross-profile session with ITS profile's catalog — silently.
+describe('requestModelOptions owner routing', () => {
+  afterEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('prefers the owner-routed dispatcher over the ambient gateway', async () => {
+    const ownerPayload = {
+      model: 'bot-model',
+      provider: 'nous',
+      providers: [{ models: ['bot-model'], name: 'Nous', slug: 'nous' }]
+    }
+
+    const ambient = { request: vi.fn(() => Promise.resolve(globalOptions)) }
+    const request = vi.fn(() => Promise.resolve(ownerPayload))
+
+    await expect(
+      requestModelOptions({ gateway: ambient as never, request: request as never, sessionId: 'tile-runtime' })
+    ).resolves.toBe(ownerPayload)
+
+    expect(request).toHaveBeenCalledWith('model.options', { explicit_only: true, session_id: 'tile-runtime' })
+    expect(ambient.request).not.toHaveBeenCalled()
+    expect(getGlobalModelOptions).not.toHaveBeenCalled()
+  })
+
+  it('pins the REST recovery read to the owner profile', async () => {
+    const restPayload = {
+      model: 'bot-default',
+      provider: 'nous',
+      providers: [{ models: ['bot-default'], name: 'Nous', slug: 'nous' }]
+    }
+
+    const request = vi.fn(() => Promise.reject(new Error('socket closed')))
+
+    vi.mocked(getGlobalModelOptions).mockResolvedValueOnce(restPayload)
+
+    await expect(
+      requestModelOptions({ profile: 'bot', request: request as never, sessionId: 'tile-runtime' })
+    ).resolves.toEqual(restPayload)
+
+    expect(getGlobalModelOptions).toHaveBeenCalledWith({ explicitOnly: true }, 'bot')
+  })
+
+  it('keeps the unpinned REST call shape when no profile is named', async () => {
+    const request = vi.fn(() => Promise.reject(new Error('socket closed')))
+
+    // Neither path has a selectable model, so the dispatcher error surfaces —
+    // this test is only about the REST call shape.
+    await requestModelOptions({ request: request as never, sessionId: null }).catch(() => undefined)
+
+    expect(getGlobalModelOptions).toHaveBeenCalledWith({ explicitOnly: true })
+  })
+
+  it('returns the REST catalog when the dispatcher yields nothing at all', async () => {
+    const emptyRest = { providers: [] }
+    const request = vi.fn(() => Promise.resolve(undefined))
+
+    vi.mocked(getGlobalModelOptions).mockResolvedValueOnce(emptyRest as never)
+
+    await expect(requestModelOptions({ request: request as never, sessionId: null })).resolves.toBe(emptyRest)
+  })
+})

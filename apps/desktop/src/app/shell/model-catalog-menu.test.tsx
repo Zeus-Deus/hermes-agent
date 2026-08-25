@@ -106,3 +106,18 @@ describe('the catalog owns model curation', () => {
     expect($modelVisibilityOpen.get()).toBe(true)
   })
 })
+
+// #93892 follow-up: a detached surface (no profile, no gateway — the kanban
+// per-task override) must keep reading the ACTIVE profile's REST catalog.
+// Pinning the read to a literal 'default' listed the wrong profile's models
+// whenever the active profile was not `default`.
+describe('ModelCatalogMenu REST scope', () => {
+  it('leaves the REST read unpinned when no profile is named', async () => {
+    renderMenu()
+
+    await screen.findByText(/Gemini 3\.1 Pro/i)
+
+    expect(getGlobalModelOptions).toHaveBeenCalledTimes(1)
+    expect(getGlobalModelOptions.mock.calls[0]).toEqual([{ explicitOnly: true }])
+  })
+})

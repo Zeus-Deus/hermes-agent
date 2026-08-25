@@ -400,3 +400,35 @@ describe('ModelMenuPanel provider collapse', () => {
     expect($collapsedProviders.get()).toContain('deepseek')
   })
 })
+
+// #93892: a tile's menu is handed an owner-routed `requestGateway`; catalog
+// READS must ride it too (not only writes), or a secondary-profile bot chat
+// lists the ambient profile's models.
+describe('ModelMenuPanel catalog routing', () => {
+  it('reads the catalog through the surface dispatcher, scoped to its session', async () => {
+    const requestGateway = vi.fn(async (method: string) =>
+      method === 'model.options' ? { model: 'gemini-3.1-pro', provider: 'google', providers: [GOOGLE_PROVIDER] } : {}
+    )
+
+    // The ambient REST catalog is a different profile's — it must not show.
+    getGlobalModelOptions.mockResolvedValue({ providers: [DEEPSEEK_PROVIDER] })
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    const content = render(
+      <QueryClientProvider client={client}>
+        <DropdownMenu open>
+          <DropdownMenuContent>
+            <ModelMenuPanel onSelectModel={vi.fn()} profile="bot" requestGateway={requestGateway as never} />
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </QueryClientProvider>
+    )
+
+    await content.findByText(/Gemini 3\.1 Pro/i)
+
+    expect(requestGateway).toHaveBeenCalledWith('model.options', { explicit_only: true, session_id: 'runtime-1' })
+    expect(getGlobalModelOptions).not.toHaveBeenCalled()
+    expect(content.queryByText('Deepseek Chat')).toBeNull()
+  })
+})
