@@ -26,7 +26,9 @@ import {
   $activeSessionId,
   $selectedStoredSessionId,
   $sessions,
+  _resetSessionOwnerHintsForTests,
   getSessionOwnerHint,
+  mergeSessionPage,
   sessionMatchesStoredId,
   setActiveSessionId,
   setAwaitingResponse,
@@ -35,6 +37,8 @@ import {
   setSelectedStoredSessionId,
   setSessions
 } from '@/store/session'
+import { foregroundSessionScopes } from '@/store/session-states'
+import type { SessionInfo } from '@/types/hermes'
 
 import type { ClientSessionState } from '../../types'
 
@@ -322,6 +326,7 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
     $newChatProfile.set(null)
     $newChatRoute.set(null)
     $newChatConnectionId.set(null)
+    _resetSessionOwnerHintsForTests({ storage: true })
   })
 
   afterEach(() => {
@@ -338,7 +343,10 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
     delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
   })
 
-  it('session.create and both prompt.submit calls ride the SAME conn:local::omar socket', async () => {
+  /** Boot the exact field state: remote primary on `default`, `local` as the
+   *  active registry source, then selectProfile("omar") in the rail; mount the
+   *  window's real hook stack over the production dispatcher. */
+  async function bootProfileRailOmar() {
     // Primary / ambient source: a remote gateway on `default`.
     const primary = makePrimary()
     setPrimaryGateway(primary as never, 'default')
@@ -374,8 +382,32 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
     render(<Harness ambientRequest={ambientRequest as never} onReady={h => (handle = h)} />)
     await waitFor(() => expect(handle).not.toBeNull())
 
+    return { handle: handle!, omarSocket: omarSocket!, primary }
+  }
+
+  /** What the gateway's stream end does: the turn settles. */
+  async function settleTurn(handle: HarnessHandle) {
+    await act(async () => {
+      handle.updateSessionState(RUNTIME_ID, state => ({
+        ...state,
+        awaitingResponse: false,
+        busy: false,
+        streamId: null,
+        turnStartedAt: null
+      }))
+      handle.busyRef.current = false
+      setBusy(false)
+      setAwaitingResponse(false)
+    })
+  }
+
+  const calls = (socket: MockGateway) => socket.request.mock.calls.map(call => call[0] as string)
+
+  it('session.create and both prompt.submit calls ride the SAME conn:local::omar socket', async () => {
+    const { handle, omarSocket, primary } = await bootProfileRailOmar()
+
     // Turn one: no session yet → createBackendSessionForSend → prompt.submit.
-    await expect(handle!.submitText('first prompt')).resolves.toBe(true)
+    await expect(handle.submitText('first prompt')).resolves.toBe(true)
     await waitFor(() => expect($activeSessionId.get()).toBe(RUNTIME_ID))
 
     // The stored↔runtime binding minted by the create must survive the first
@@ -383,35 +415,28 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
     // (null) stored id, which the state cache read as a detach — after which
     // no session-scoped RPC could translate the runtime id back to the stored
     // id, so tile route / owner hint / row were all bypassed.
-    expect(handle!.bindings()).toEqual({ runtimeForStored: RUNTIME_ID, storedForRuntime: STORED_ID })
+    expect(handle.bindings()).toEqual({ runtimeForStored: RUNTIME_ID, storedForRuntime: STORED_ID })
 
-    // Answer one arrives: the turn settles (what the gateway's stream end does).
-    await act(async () => {
-      handle!.updateSessionState(RUNTIME_ID, state => ({
-        ...state,
-        awaitingResponse: false,
-        busy: false,
-        streamId: null,
-        turnStartedAt: null
-      }))
-      handle!.busyRef.current = false
-      setBusy(false)
-      setAwaitingResponse(false)
-    })
+    // From the moment the create returned, the owner socket is foreground-
+    // pinned (owner hold → selected-thread rung) so no prune / lease release
+    // can close it before the first prompt.submit lands.
+    expect(foregroundSessionScopes()).toContain(omarScope)
+
+    // Answer one arrives: the turn settles.
+    await settleTurn(handle)
 
     // Turn two on the now-existing session.
-    await expect(handle!.submitText('second prompt')).resolves.toBe(true)
-    expect(handle!.bindings()).toEqual({ runtimeForStored: RUNTIME_ID, storedForRuntime: STORED_ID })
+    await expect(handle.submitText('second prompt')).resolves.toBe(true)
+    expect(handle.bindings()).toEqual({ runtimeForStored: RUNTIME_ID, storedForRuntime: STORED_ID })
 
     // Every session-scoped RPC (create + both submits) hit ONE socket: the
     // registry entry conn:local::omar that minted the runtime.
-    const calls = (socket: MockGateway) => socket.request.mock.calls.map(call => call[0] as string)
-    const omarCalls = calls(omarSocket!)
+    const omarCalls = calls(omarSocket)
 
     expect(omarCalls).toContain('session.create')
     expect(omarCalls.filter(method => method === 'prompt.submit')).toHaveLength(2)
     expect(
-      omarSocket!.request.mock.calls
+      omarSocket.request.mock.calls
         .filter(call => call[0] === 'prompt.submit')
         .map(call => [(call[1] as { session_id: string }).session_id, (call[1] as { text: string }).text])
     ).toEqual([
@@ -452,5 +477,65 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
       profile: 'omar'
     })
     expect($newChatConnectionId.get()).toBe('local')
+  })
+
+  it('turn two still rides conn:local::omar after the transient hint is evicted AND a refresh returned the row untagged', async () => {
+    const { handle, omarSocket, primary } = await bootProfileRailOmar()
+
+    await expect(handle.submitText('first prompt')).resolves.toBe(true)
+    await waitFor(() => expect($activeSessionId.get()).toBe(RUNTIME_ID))
+    await settleTurn(handle)
+
+    // The two things that used to leave only a bare "omar" behind:
+    //  1. the bounded owner-hint map evicts (or the app relaunched);
+    //  2. the sidebar refresh comes back from the primary aggregate, where a
+    //     `local` registry source's rows are plain local rows with NO
+    //     connection_id (the unified-list splice tags non-local sources only).
+    _resetSessionOwnerHintsForTests()
+    expect(getSessionOwnerHint(STORED_ID)).toBeUndefined()
+
+    const untagged: SessionInfo = {
+      ...$sessions.get().find(session => sessionMatchesStoredId(session, STORED_ID))!,
+      profile: 'omar'
+    }
+
+    delete untagged.connection_id
+    setSessions(prev => mergeSessionPage(prev, [untagged], []))
+
+    // The row still names the exact owner: the refresh carried the tag.
+    expect($sessions.get().find(session => sessionMatchesStoredId(session, STORED_ID))).toMatchObject({
+      connection_id: 'local',
+      profile: 'omar'
+    })
+
+    await expect(handle.submitText('second prompt')).resolves.toBe(true)
+    expect(handle.bindings()).toEqual({ runtimeForStored: RUNTIME_ID, storedForRuntime: STORED_ID })
+
+    expect(
+      omarSocket.request.mock.calls
+        .filter(call => call[0] === 'prompt.submit')
+        .map(call => (call[1] as { session_id: string; text: string }).text)
+    ).toEqual(['first prompt', 'second prompt'])
+
+    // Nothing session-scoped reached the primary, a v1 "omar" socket, or any
+    // other socket; no REST probe, no session.close, no second create.
+    expect(calls(primary).filter(method => method === 'session.create' || method === 'prompt.submit')).toEqual([])
+    expect(sockets.some(socket => socket.connectUrl?.includes(`:${V1_PORT}`))).toBe(false)
+
+    for (const socket of sockets) {
+      if (socket !== omarSocket) {
+        expect(
+          socket.request.mock.calls.filter(call => sessionScoped(call[1]) || call[0] === 'session.create')
+        ).toEqual([])
+      }
+    }
+
+    expect(vi.mocked(getSession)).not.toHaveBeenCalled()
+
+    for (const socket of [primary, ...sockets]) {
+      expect(calls(socket).filter(method => method === 'session.close')).toEqual([])
+    }
+
+    expect(calls(omarSocket).filter(method => method === 'session.create')).toHaveLength(1)
   })
 })

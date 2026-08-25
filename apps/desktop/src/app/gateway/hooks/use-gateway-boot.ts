@@ -52,6 +52,7 @@ import {
   $selectedStoredSessionId,
   $sessions,
   ensureDefaultWorkspaceCwd,
+  forgetSessionOwnerHintsForConnection,
   setConnection,
   setCurrentBranch,
   setCurrentCwd,
@@ -694,6 +695,13 @@ export function useGatewayBoot({
       }
 
       disposeSecondariesForConnection(payload.connectionId, { redial: payload.reason === 'updated' })
+
+      if (payload.reason !== 'updated') {
+        // Nothing can dial the removed source again: drop the persisted exact
+        // owner hints naming it so its sessions are not pinned (fail-closed)
+        // to a route that no longer exists.
+        forgetSessionOwnerHintsForConnection(payload.connectionId)
+      }
     })
 
     const onOnline = () => void forceReconnectNow()

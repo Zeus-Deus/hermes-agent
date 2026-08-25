@@ -38,6 +38,7 @@ import {
   $sessions,
   $turnStartedAt,
   getSessionOwnerHint,
+  knownSessionOwner,
   sessionMatchesStoredId,
   setActiveSessionId,
   setActiveSessionStoredIdRotation,
@@ -85,7 +86,8 @@ vi.mock('@/store/profile', async importOriginal => ({
 
 vi.mock('@/store/gateway', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  requestGatewayForAgent: vi.fn()
+  requestGatewayForAgent: vi.fn(),
+  retainGatewayForAgent: vi.fn(async () => () => undefined)
 }))
 
 vi.mock('@/components/pane-shell/tree/store', async importOriginal => ({
@@ -3300,7 +3302,7 @@ describe('routed fresh chat keeps its exact owner across turns', () => {
     resolveSessionRpcOwner({
       routingSessionId: storedSessionId,
       sessionOwnerHint: id => getSessionOwnerHint(id),
-      sessionRowProfile: id => $sessions.get().find(session => sessionMatchesStoredId(session, id))?.profile,
+      sessionRowOwner: (id: string) => knownSessionOwner($sessions.get(), id),
       tileOwnerRoute: sessionTileOwnerRoute
     })
 

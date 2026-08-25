@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 
 import { getLatestSessionMessages, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS } from '@/hermes'
 import { toChatMessages } from '@/lib/chat-messages'
-import { getSessionOwnerHint } from '@/store/session'
+import { $sessions, getSessionOwnerHint, knownSessionOwner } from '@/store/session'
 import { requestForSessionProfile, type SessionOwnerScope } from '@/store/session-request-router'
 import {
   publishSessionState,
@@ -15,7 +15,7 @@ import type { SessionResumeResponse } from '@/types/hermes'
 import type { usePromptActions } from '../../session/hooks/use-prompt-actions'
 import { singleFlightSessionResume } from '../../session/hooks/use-prompt-actions/single-flight-resume'
 import { markSessionRecentlyInterrupted, withSessionNotFoundResume } from '../../session/hooks/use-prompt-actions/utils'
-import { resolveSessionProfile } from '../../session/hooks/use-session-actions/utils'
+import { resolveSessionOwner } from '../../session/hooks/use-session-actions/utils'
 import type { useSessionStateCache } from '../../session/hooks/use-session-state-cache'
 import type { GatewayRequester } from '../types'
 
@@ -84,11 +84,15 @@ export function useSessionTileDelegate({
       }
     }
 
+    // Same ladder as the window's session-RPC dispatcher: exact hint → tile
+    // route → the row's owner (exact when connection-tagged, else profile) →
+    // the async cross-profile probe (exact when the resolved row is tagged).
     const ownerForStoredSession = async (storedSessionId: string): Promise<SessionOwnerScope> => {
       const owner =
         getSessionOwnerHint(storedSessionId) ??
         sessionTileOwnerRoute(storedSessionId) ??
-        (await resolveSessionProfile(storedSessionId))
+        knownSessionOwner($sessions.get(), storedSessionId) ??
+        (await resolveSessionOwner(storedSessionId))
 
       return owner
     }
