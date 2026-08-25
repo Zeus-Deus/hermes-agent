@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -8735,6 +8736,52 @@ def test_setup_runtime_check_scopes_to_requested_profile(monkeypatch, tmp_path):
     assert Path(str(get_hermes_home())).resolve() != bot_home.resolve()
 
 
+def test_setup_runtime_check_profile_scope_is_concurrency_safe(monkeypatch, tmp_path):
+    """Hermes home and secret scope are ContextVars, so overlapping checks for
+    different profiles must never observe one another's home or credentials."""
+    from agent.secret_scope import get_secret
+    from hermes_constants import get_hermes_home
+
+    homes = {}
+    for profile in ("alpha", "beta"):
+        home = tmp_path / "profiles" / profile
+        home.mkdir(parents=True)
+        (home / ".env").write_text(f"OPENROUTER_API_KEY={profile}-secret\n", encoding="utf-8")
+        homes[profile] = home
+
+    rendezvous = threading.Barrier(2)
+    seen = {}
+
+    def fake_resolve(requested=None, **kwargs):
+        rendezvous.wait(timeout=5)
+        profile = Path(get_hermes_home()).name
+        seen[profile] = {
+            "home": str(get_hermes_home()),
+            "secret": get_secret("OPENROUTER_API_KEY"),
+        }
+        return {"provider": "openrouter", "api_key": "no-key-required", "source": "env"}
+
+    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda: True)
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve)
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name in homes)
+    monkeypatch.setattr(server, "_profile_home", lambda profile: homes[profile])
+
+    def check(profile):
+        return server.handle_request(
+            {"id": profile, "method": "setup.runtime_check", "params": {"profile": profile}}
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(check, ("alpha", "beta")))
+
+    assert [response["result"]["profile"] for response in responses] == ["alpha", "beta"]
+    assert all(response["result"]["ok"] is True for response in responses)
+    assert Path(seen["alpha"]["home"]).resolve() == homes["alpha"].resolve()
+    assert Path(seen["beta"]["home"]).resolve() == homes["beta"].resolve()
+    assert seen["alpha"]["secret"] == "alpha-secret"
+    assert seen["beta"]["secret"] == "beta-secret"
+
+
 def test_setup_runtime_check_unknown_profile_never_answers_for_launch_profile(monkeypatch):
     """A profile this backend does not have must NOT silently report the
     launch profile's readiness (that is the wrong-backend class of #94071)."""
@@ -8756,6 +8803,24 @@ def test_setup_runtime_check_unknown_profile_never_answers_for_launch_profile(mo
     assert resp["result"]["profile"] == "ghost"
     assert "does not exist on this backend" in resp["result"]["error"]
     assert calls == []
+
+
+def test_setup_readiness_unknown_profile_errors_are_identical(monkeypatch):
+    """Both profile-aware readiness methods reject an invalid target with the
+    same semantic result instead of disagreeing on JSON-RPC error shape."""
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: False)
+
+    params = {"profile": " ghost "}
+    status = server.handle_request({"id": "1", "method": "setup.status", "params": params})
+    runtime = server.handle_request({"id": "2", "method": "setup.runtime_check", "params": params})
+
+    expected = {
+        "ok": False,
+        "profile": "ghost",
+        "error": "Profile 'ghost' does not exist on this backend.",
+    }
+    assert status["result"] == expected
+    assert runtime["result"] == expected
 
 
 def test_setup_runtime_check_without_profile_is_byte_identical(monkeypatch):
@@ -8821,8 +8886,11 @@ def test_setup_status_scopes_to_requested_profile(monkeypatch, tmp_path):
     assert Path(seen["home"]).resolve() == bot_home.resolve()
 
     unknown = server.handle_request({"id": "2", "method": "setup.status", "params": {"profile": "ghost"}})
-    assert "error" in unknown
-    assert "does not exist on this backend" in unknown["error"]["message"]
+    assert unknown["result"] == {
+        "ok": False,
+        "profile": "ghost",
+        "error": "Profile 'ghost' does not exist on this backend.",
+    }
 
 
 def test_complete_slash_drops_removed_provider_alias():

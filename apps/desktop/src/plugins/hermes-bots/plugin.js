@@ -322,6 +322,20 @@ async function preflightProviderReadiness(request, profile) {
   }
 }
 
+/** Preflight and surface the one creation-side effect that belongs to an
+ *  unready backend. Keeping this orchestration outside the dialog makes the
+ *  ordering contract executable: readiness is checked before any first-chat
+ *  decision, and the bot is badged on its owning target. */
+async function prepareBotFirstChat({ request, profile, ownerKey, hostLabel }) {
+  const readiness = await preflightProviderReadiness(request, profile)
+
+  if (!readiness.ready) {
+    noteProviderSetupNeeded(ownerKey, hostLabel, readiness.reason)
+  }
+
+  return readiness
+}
+
 // Bot Mode sessions are ALWAYS hidden from the global Sessions sidebar:
 // canonical Bot Chats are plugin-owned forever-chats and group-chat member
 // sessions are room plumbing — neither is a scratch conversation, and a
@@ -8692,6 +8706,20 @@ function resolveCloneSource(cloneFrom, { remoteTarget = false, targetProfiles = 
   return Array.isArray(targetProfiles) && targetProfiles.includes(cloneFrom) ? cloneFrom : 'default'
 }
 
+/** Route every New Bot backend request through the selected create target.
+ *  The default/active target preserves the ambient request path. */
+function requestForCreateTarget(hostApi, { remoteTarget, targetConnection }, method, params = {}) {
+  if (!remoteTarget) {
+    return hostApi.request(method, params)
+  }
+
+  return hostApi.requestProfile(
+    { connectionId: targetConnection, mode: 'remote', profile: 'default', targetProfile: 'default' },
+    method,
+    params
+  )
+}
+
 function ModelPicker({
   bot = null,
   value,
@@ -9803,13 +9831,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
   /** Gateway RPC on the create target: the picked connection's default
    *  backend for remote targets, the active gateway otherwise. */
   const requestForTarget = (method, params = {}) =>
-    remoteTarget
-      ? host.requestProfile(
-          { connectionId: targetConnection, mode: 'remote', profile: 'default', targetProfile: 'default' },
-          method,
-          params
-        )
-      : host.request(method, params)
+    requestForCreateTarget(host, { remoteTarget, targetConnection }, method, params)
 
   // Clone sources belong to the TARGET backend. For a remote target, list
   // that machine's profiles over the routed RPC (null while loading, [] when
@@ -9824,12 +9846,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
 
     let cancelled = false
 
-    host
-      .requestProfile(
-        { connectionId: targetConnection, mode: 'remote', profile: 'default', targetProfile: 'default' },
-        'profiles.list',
-        { include_sessions: false }
-      )
+    requestForTarget('profiles.list', { include_sessions: false })
       .then(res => {
         if (!cancelled) {
           setTargetProfiles(cloneSourcesFromProfileList(res))
@@ -10115,13 +10132,14 @@ function CreateAgentDialog({ open, onClose, roster }) {
       // init failed" and reads as a failed creation (#94071). Credentials are
       // never copied across machines — the target must be able to serve a
       // model itself.
-      const readiness = await preflightProviderReadiness(requestForTarget, slug)
+      const readiness = await prepareBotFirstChat({
+        request: requestForTarget,
+        profile: slug,
+        ownerKey,
+        hostLabel
+      })
       reset()
       onClose()
-
-      if (!readiness.ready) {
-        noteProviderSetupNeeded(ownerKey, hostLabel, readiness.reason)
-      }
 
       if (wasRemote) {
         // The bot lives on another machine: it appears in the roster via the

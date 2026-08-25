@@ -409,12 +409,13 @@ def _readiness_profile_home(params: dict):
 
 
 def _bind_readiness_profile(home):
-    """Bind a profile's HERMES_HOME *and* its ``.env`` secret scope.
+    """Bind context-local HERMES_HOME and ``.env`` secret scope.
 
-    ``_profile_scoped`` only overrides the home; provider resolution also reads
-    credentials through the secret scope, so a scoped check must see the same
-    ``.env`` the agent would at session build (server.py's turn thread does the
-    identical pair). Returns the two reset tokens (None, None) for no-op.
+    Both setters use ContextVars (not process globals), matching the turn
+    thread's pair while allowing concurrent checks for different profiles to
+    remain isolated. ``_profile_scoped`` only overrides the home; provider
+    resolution also reads credentials through the secret scope. Returns the
+    two reset tokens (None, None) for no-op.
     """
     if home is None:
         return None, None
@@ -430,6 +431,18 @@ def _unbind_readiness_profile(home_token, secret_token) -> None:
         reset_hermes_home_override(home_token)
 
 
+def _unknown_readiness_profile(ok, rid, params: dict, error: FileNotFoundError) -> dict:
+    """Return the same semantic failure for both profile-aware readiness RPCs."""
+    return ok(
+        rid,
+        {
+            "ok": False,
+            "profile": str(params.get("profile") or "").strip(),
+            "error": str(error),
+        },
+    )
+
+
 @method("setup.status")
 def _(rid, params: dict) -> dict:
     """Loose provider check; ``profile`` (optional) scopes it to that profile's home."""
@@ -439,9 +452,13 @@ def _(rid, params: dict) -> dict:
             _bind_readiness_profile,
             _readiness_profile_home,
             _unbind_readiness_profile,
+            _unknown_readiness_profile,
         )
 
-        profile, home = _readiness_profile_home(params)
+        try:
+            profile, home = _readiness_profile_home(params)
+        except FileNotFoundError as e:
+            return _unknown_readiness_profile(_ok, rid, params, e)
         home_token, secret_token = _bind_readiness_profile(home)
         try:
             configured = bool(_has_any_provider_configured())
@@ -481,16 +498,14 @@ def _(rid, params: dict) -> dict:
             _bind_readiness_profile,
             _readiness_profile_home,
             _unbind_readiness_profile,
+            _unknown_readiness_profile,
         )
 
         requested = str(params.get("provider") or "").strip() or None
         try:
             profile, home = _readiness_profile_home(params)
         except FileNotFoundError as e:
-            return _ok(
-                rid,
-                {"ok": False, "profile": str(params.get("profile") or "").strip(), "error": str(e)},
-            )
+            return _unknown_readiness_profile(_ok, rid, params, e)
         home_token, secret_token = _bind_readiness_profile(home)
         try:
             runtime = resolve_runtime_provider(requested=requested)

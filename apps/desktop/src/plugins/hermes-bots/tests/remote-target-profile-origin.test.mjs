@@ -34,7 +34,7 @@ function loadOriginHelpers() {
   vm.createContext(context)
   return vm.runInContext(
     `${slice('/** "Inherit" means the launch/default profile', 'function ModelPicker(')}
-;({ botInheritLabel, cloneSourcesFromProfileList, resolveCloneSource })`,
+;({ botInheritLabel, cloneSourcesFromProfileList, resolveCloneSource, requestForCreateTarget })`,
     context
   )
 }
@@ -44,7 +44,7 @@ function loadReadinessHelpers({ notify, noteBotAttention }) {
   vm.createContext(context)
   return vm.runInContext(
     `${slice('/** A bot was created on a backend that cannot serve a model yet', '// Bot Mode sessions are ALWAYS hidden')}
-;({ noteProviderSetupNeeded, preflightProviderReadiness })`,
+;({ noteProviderSetupNeeded, preflightProviderReadiness, prepareBotFirstChat })`,
     context
   )
 }
@@ -131,19 +131,31 @@ test('regression: the clone picker is never disabled or pinned to default for a 
   assert.match(source, /requestForTarget\('profiles\.describe', \{ name: capSource \}\)/)
 })
 
-test('regression: the clone list for a remote target is the TARGET backend\'s profiles.list (routed RPC)', () => {
-  const dialog = slice('function CreateAgentDialog(', 'function routineBot(')
+test('requestForCreateTarget routes profile discovery and writes to the selected backend', async () => {
+  const { requestForCreateTarget } = loadOriginHelpers()
+  const calls = []
+  const hostApi = {
+    request: async (method, params) => calls.push({ via: 'ambient', method, params }),
+    requestProfile: async (route, method, params) => calls.push({ via: 'profile', route, method, params })
+  }
 
-  assert.match(
-    dialog,
-    /host\s*\.requestProfile\(\s*\{ connectionId: targetConnection, mode: 'remote', profile: 'default', targetProfile: 'default' \},\s*'profiles\.list',\s*\{ include_sessions: false \}\s*\)/
-  )
-  assert.match(dialog, /setTargetProfiles\(cloneSourcesFromProfileList\(res\)\)/)
-  // Switching "Create on" resets the pick to the new target's default and refetches.
-  assert.match(
-    dialog,
-    /setTargetConnection\(value === \(activeConnectionId \|\| 'local'\) \? '' : value\)[\s\S]{0,300}setCloneFrom\('default'\)\s*setTargetProfiles\(null\)/
-  )
+  await requestForCreateTarget(hostApi, { remoteTarget: false, targetConnection: 'ignored' }, 'profiles.list', {
+    include_sessions: false
+  })
+  await requestForCreateTarget(hostApi, { remoteTarget: true, targetConnection: 'homelab' }, 'profiles.create', {
+    name: 'omar',
+    clone_from: null
+  })
+
+  assert.deepEqual(plain(calls), [
+    { via: 'ambient', method: 'profiles.list', params: { include_sessions: false } },
+    {
+      via: 'profile',
+      route: { connectionId: 'homelab', mode: 'remote', profile: 'default', targetProfile: 'default' },
+      method: 'profiles.create',
+      params: { name: 'omar', clone_from: null }
+    }
+  ])
 })
 
 // ── 2. target-explicit wording ──────────────────────────────────────────────
@@ -165,7 +177,10 @@ test('regression: share-keys and inherit copy are scoped to the create target', 
   assert.match(dialog, /inheritLabel: `Inherit from default on \$\{credentialHostLabel\}`/)
   assert.match(dialog, /placeholderModel: `inherited from default on \$\{credentialHostLabel\}`/)
   // The host label is the TARGET's (remote) or the active connection's own row.
-  assert.match(dialog, /const credentialHostLabel = remoteTarget\s*\? targetLabel\s*: \(connections \|\| \[\]\)\.find\(c => c\.id === \(activeConnectionId \|\| 'local'\)\)\?\.label \|\| 'this device'/)
+  assert.match(
+    dialog,
+    /const credentialHostLabel = remoteTarget\s*\? targetLabel\s*: \(connections \|\| \[\]\)\.find\(c => c\.id === \(activeConnectionId \|\| 'local'\)\)\?\.label \|\| 'this device'/
+  )
   // Editor: every ModelPicker in AdvancedProfileConfig carries the bot-qualified label.
   const editor = slice('function AdvancedProfileConfig(', 'function HubSkillsSection(')
   assert.equal((editor.match(/jsx\(ModelPicker, \{\s*bot,\s*inheritLabel,/g) || []).length, 3)
@@ -184,7 +199,12 @@ test('preflightProviderReadiness: ok=false → not ready with the backend reason
   }
 
   assert.deepEqual(
-    plain(await preflightProviderReadiness(request({ ok: false, error: 'No usable credentials found for anthropic.' }), 'omar')),
+    plain(
+      await preflightProviderReadiness(
+        request({ ok: false, error: 'No usable credentials found for anthropic.' }),
+        'omar'
+      )
+    ),
     { ready: false, reason: 'No usable credentials found for anthropic.' }
   )
   assert.deepEqual(plain(calls.at(-1)), { method: 'setup.runtime_check', params: { profile: 'omar' } })
@@ -229,6 +249,40 @@ test('noteProviderSetupNeeded badges the bot as missing_config and points at the
   assert.match(toasts[0].message, /run `hermes model` on This device/)
 })
 
+test('prepareBotFirstChat preflights before badging the owning target', async () => {
+  const events = []
+  const { prepareBotFirstChat } = loadReadinessHelpers({
+    notify: toast => events.push({ type: 'notify', message: toast.message }),
+    noteBotAttention: (key, reason) => events.push({ type: 'badge', key, reason })
+  })
+
+  const readiness = await prepareBotFirstChat({
+    request: async (method, params) => {
+      events.push({ type: 'request', method, params })
+      return { ok: false, error: "Profile 'omar' does not exist on this backend." }
+    },
+    profile: 'omar',
+    ownerKey: 'homelab::omar',
+    hostLabel: 'Home Lab'
+  })
+
+  assert.deepEqual(plain(readiness), {
+    ready: false,
+    reason: "Profile 'omar' does not exist on this backend."
+  })
+  assert.deepEqual(
+    events.map(event => event.type),
+    ['request', 'badge', 'notify']
+  )
+  assert.deepEqual(plain(events[0]), {
+    type: 'request',
+    method: 'setup.runtime_check',
+    params: { profile: 'omar' }
+  })
+  assert.deepEqual(events[1], { type: 'badge', key: 'homelab::omar', reason: 'missing_config' })
+  assert.match(events[2].message, /^Configure a model on Home Lab/)
+})
+
 test('classifier: readiness-check phrasings classify as missing_config', () => {
   const { attentionReasonFromError } = loadClassifier()
 
@@ -243,22 +297,18 @@ test('classifier: readiness-check phrasings classify as missing_config', () => {
   assert.equal(attentionReasonFromError('502 server error'), null)
 })
 
-test('regression: submit preflights the create target BEFORE the intro and withholds the turn when unready', () => {
+test('regression: submit uses the preflight result to withhold the intro turn when unready', () => {
   const dialog = slice('function CreateAgentDialog(', 'function routineBot(')
-  const preflight = dialog.indexOf('const readiness = await preflightProviderReadiness(requestForTarget, slug)')
+  const preflight = dialog.indexOf('const readiness = await prepareBotFirstChat({')
   const resetAt = dialog.indexOf('reset()\n      onClose()', preflight)
   const intro = dialog.indexOf('createCanonicalChat(slug, { intro: readiness.ready })')
 
   assert.ok(preflight > -1, 'preflight runs on the create target')
-  assert.ok(resetAt > preflight, 'preflight closes over this render\'s target before reset()')
+  assert.ok(resetAt > preflight, "preflight closes over this render's target before reset()")
   assert.ok(intro > resetAt, 'intro is gated on readiness')
-  assert.match(dialog, /if \(!readiness\.ready\) \{\s*noteProviderSetupNeeded\(ownerKey, hostLabel, readiness\.reason\)\s*\}/)
-  // Remote creates get the same badge + notice (they never had an intro turn).
-  assert.ok(dialog.indexOf('noteProviderSetupNeeded(ownerKey') < dialog.indexOf('if (wasRemote) {', preflight))
-  assert.match(
-    dialog,
-    /const ownerKey = botRosterKey\(\{ name: slug, connectionId: wasRemote \? targetConnection : activeConnectionId \}\)/
-  )
+  // Remote creates are preflighted and badged by the same helper before their
+  // early return (they never create a local canonical chat).
+  assert.ok(preflight < dialog.indexOf('if (wasRemote) {', preflight))
 })
 
 test('createCanonicalChat({ intro: false }) creates, titles, pins and opens — and sends NO prompt', async () => {
