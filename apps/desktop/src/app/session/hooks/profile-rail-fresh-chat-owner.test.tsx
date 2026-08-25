@@ -1,4 +1,4 @@
-import { registryBackendScopeKey } from '@hermes/shared'
+import { type GatewayEvent, registryBackendScopeKey } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
 import { act, cleanup, render, waitFor } from '@testing-library/react'
 import { useEffect, useMemo, useRef } from 'react'
@@ -20,6 +20,7 @@ import {
   $newChatProfile,
   $newChatRoute,
   ensureGatewayAgent,
+  newSessionInProfile,
   selectProfile
 } from '@/store/profile'
 import {
@@ -85,18 +86,23 @@ interface MockGateway {
   connectionState: string
   connect: Mock<(url: string) => Promise<void>>
   close: Mock<() => void>
-  onEvent: Mock<() => () => void>
-  onState: Mock<() => () => void>
+  eventListeners: Set<(event: GatewayEvent) => void>
+  onEvent: Mock<(listener: (event: GatewayEvent) => void) => () => void>
+  onState: Mock<(listener: (state: 'closed' | 'open') => void) => () => void>
   request: GatewayRequestMock
+  stateListeners: Set<(state: 'closed' | 'open') => void>
 }
 
 const sockets: MockGateway[] = []
+let runtimeOwner: MockGateway | null = null
+let registryOnEvent!: Mock<(event: GatewayEvent) => void>
 
 const sessionScoped = (params: unknown) =>
   typeof (params as { session_id?: unknown } | undefined)?.session_id === 'string'
 
-/** The registry entry local::omar answers; every other socket is a backend
- *  that never held the runtime, exactly as in the field. */
+/** The exact object that mints the runtime owns it. Endpoint equality is not
+ * ownership: a replacement WebSocket connected to the same URL has never held
+ * this in-memory runtime and must fail exactly like a different backend. */
 function answer(socket: MockGateway, method: string, params: Record<string, unknown>) {
   const isOmar = socket.connectUrl?.includes(`:${OMAR_PORT}`) ?? false
 
@@ -105,11 +111,19 @@ function answer(socket: MockGateway, method: string, params: Record<string, unkn
       throw new Error(`session.create landed on the wrong socket: ${socket.connectUrl}`)
     }
 
+    if (runtimeOwner) {
+      throw new Error(`session.create attempted to replace runtime owner: ${socket.connectUrl}`)
+    }
+
+    runtimeOwner = socket
+
     return { info: {}, session_id: RUNTIME_ID, stored_session_id: STORED_ID }
   }
 
-  if (sessionScoped(params) && !isOmar) {
-    throw new Error(`Session not found: ${String(params.session_id)} (socket ${socket.connectUrl}, ${method})`)
+  if (sessionScoped(params) && socket !== runtimeOwner) {
+    throw new Error(
+      `Session not found on concrete owner: ${String(params.session_id)} (socket ${socket.connectUrl}, ${method})`
+    )
   }
 
   if (method === 'prompt.submit') {
@@ -117,16 +131,7 @@ function answer(socket: MockGateway, method: string, params: Record<string, unkn
   }
 
   if (method === 'session.resume' || method === 'session.activate') {
-    // The runtime is alive on this socket: a resume re-binds the SAME id.
-    return {
-      info: {},
-      message_count: 1,
-      messages: [],
-      resumed: STORED_ID,
-      running: false,
-      session_id: RUNTIME_ID,
-      session_key: STORED_ID
-    }
+    throw new Error(`${method} is recovery, not uninterrupted continuity`)
   }
 
   return {}
@@ -137,6 +142,8 @@ vi.mock('@/hermes', async importOriginal => ({
   HermesGateway: class {
     connectUrl: null | string = null
     connectionState = 'closed'
+    eventListeners = new Set<(event: GatewayEvent) => void>()
+    stateListeners = new Set<(state: 'closed' | 'open') => void>()
     connect = vi.fn(async (url: string) => {
       this.connectUrl = url
       this.connectionState = 'open'
@@ -150,9 +157,27 @@ vi.mock('@/hermes', async importOriginal => ({
     })
     close = vi.fn(() => {
       this.connectionState = 'closed'
+      this.stateListeners.forEach(listener => listener('closed'))
+
+      if (runtimeOwner === (this as unknown as MockGateway)) {
+        this.eventListeners.forEach(listener =>
+          listener({
+            payload: { session_id: RUNTIME_ID, stored_session_id: STORED_ID },
+            type: 'session.reclaimed'
+          } as GatewayEvent)
+        )
+      }
     })
-    onEvent = vi.fn(() => () => {})
-    onState = vi.fn(() => () => {})
+    onEvent = vi.fn((listener: (event: GatewayEvent) => void) => {
+      this.eventListeners.add(listener)
+
+      return () => this.eventListeners.delete(listener)
+    })
+    onState = vi.fn((listener: (state: 'closed' | 'open') => void) => {
+      this.stateListeners.add(listener)
+
+      return () => this.stateListeners.delete(listener)
+    })
 
     constructor() {
       sockets.push(this as unknown as MockGateway)
@@ -185,14 +210,27 @@ function installDesktop(): void {
 
 /** The remote primary. Session-scoped traffic here is the bug. */
 function makePrimary(): MockGateway {
+  const eventListeners = new Set<(event: GatewayEvent) => void>()
+  const stateListeners = new Set<(state: 'closed' | 'open') => void>()
+
   const primary: MockGateway = {
     connectUrl: 'ws://remote-primary:4242',
     connectionState: 'open',
     connect: vi.fn(),
     close: vi.fn(),
-    onEvent: vi.fn(() => () => {}),
-    onState: vi.fn(() => () => {}),
-    request: vi.fn(async (method: string, params: Record<string, unknown> = {}) => answer(primary, method, params))
+    eventListeners,
+    onEvent: vi.fn(listener => {
+      eventListeners.add(listener)
+
+      return () => eventListeners.delete(listener)
+    }),
+    onState: vi.fn(listener => {
+      stateListeners.add(listener)
+
+      return () => stateListeners.delete(listener)
+    }),
+    request: vi.fn(async (method: string, params: Record<string, unknown> = {}) => answer(primary, method, params)),
+    stateListeners
   }
 
   return primary
@@ -315,12 +353,14 @@ const omarScope = registryBackendScopeKey('local', 'omar')
 describe('profile rail: a fresh Omar chat keeps its exact registry owner across turns (#94071)', () => {
   beforeEach(() => {
     sockets.length = 0
+    runtimeOwner = null
     clearSingleFlightSessionResumeState()
     // Wired exactly as useGatewayBoot: the published active descriptor carries
     // a registry-backed primary's source identity across a renderer reload.
+    registryOnEvent = vi.fn()
     configureGatewayRegistry({
       activeConnectionId: () => $connection.get()?.connectionId ?? null,
-      onEvent: vi.fn()
+      onEvent: registryOnEvent
     })
     closeSecondaryGateways()
     installDesktop()
@@ -355,7 +395,7 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
   /** Boot the exact field state: remote primary on `default`, `local` as the
    *  active registry source, then selectProfile("omar") in the rail; mount the
    *  window's real hook stack over the production dispatcher. */
-  async function bootProfileRailOmar() {
+  async function bootProfileRailOmar(startDraft: 'newSessionInProfile' | 'selectProfile' = 'selectProfile') {
     // Primary / ambient source: a remote gateway on `default`.
     const primary = makePrimary()
     setPrimaryGateway(primary as never, 'default')
@@ -365,8 +405,13 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
     await ensureGatewayAgent('local', 'default')
     expect(activeGatewayConnectionId()).toBe('local')
 
-    // The profile rail: selectProfile("omar").
-    selectProfile('omar')
+    // Both profile-rail entry points must capture the same concrete source.
+    if (startDraft === 'newSessionInProfile') {
+      newSessionInProfile('omar')
+    } else {
+      selectProfile('omar')
+    }
+
     expect($newChatProfile.get()).toBe('omar')
     expect($newChatRoute.get()).toBeNull()
     await waitFor(() => expect(activeGatewayProfileKey()).toBe('omar'))
@@ -383,15 +428,19 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
     expect(activeGateway()).toBe(omarSocket as never)
 
     // Ambient dispatcher = whatever socket is active, as useGatewayRequest does.
-    const ambientRequest = vi.fn(async (method: string, params?: Record<string, unknown>) =>
-      (activeGateway() as unknown as MockGateway).request(method, params)
-    )
+    const ambientRequest = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.create' || sessionScoped(params)) {
+        throw new Error(`session traffic must not use ambient dispatcher: ${method}`)
+      }
+
+      return (activeGateway() as unknown as MockGateway).request(method, params)
+    })
 
     let handle: HarnessHandle | null = null
     render(<Harness ambientRequest={ambientRequest as never} onReady={h => (handle = h)} />)
     await waitFor(() => expect(handle).not.toBeNull())
 
-    return { handle: handle!, omarSocket: omarSocket!, primary }
+    return { ambientRequest, handle: handle!, omarSocket: omarSocket!, primary }
   }
 
   /** What the gateway's stream end does: the turn settles. */
@@ -435,8 +484,31 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
     expect(desktop.getConnection).not.toHaveBeenCalledWith('omar')
   })
 
+  function expectUninterruptedOwner({
+    ambientRequest,
+    omarSocket,
+    primary
+  }: {
+    ambientRequest: GatewayRequestMock
+    omarSocket: MockGateway
+    primary: MockGateway
+  }) {
+    expect(runtimeOwner).toBe(omarSocket)
+    expect(ambientRequest.mock.calls.filter(call => call[0] === 'session.create' || sessionScoped(call[1]))).toEqual([])
+
+    for (const socket of [primary, ...sockets]) {
+      expect(socket.close).not.toHaveBeenCalled()
+      expect(socket.connectionState).toBe('open')
+      expect(
+        calls(socket).filter(method => ['session.activate', 'session.close', 'session.resume'].includes(method))
+      ).toEqual([])
+    }
+
+    expect(registryOnEvent.mock.calls.filter(([event]) => event.type === 'session.reclaimed')).toEqual([])
+  }
+
   it('session.create and both prompt.submit calls ride the SAME conn:local::omar socket', async () => {
-    const { handle, omarSocket, primary } = await bootProfileRailOmar()
+    const { ambientRequest, handle, omarSocket, primary } = await bootProfileRailOmar()
 
     // Turn one: no session yet → createBackendSessionForSend → prompt.submit.
     await expect(handle.submitText('first prompt')).resolves.toBe(true)
@@ -503,6 +575,7 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
     }
 
     expect(omarCalls.filter(method => method === 'session.create')).toHaveLength(1)
+    expectUninterruptedOwner({ ambientRequest: ambientRequest as GatewayRequestMock, omarSocket, primary })
     expect(getSessionOwnerHint(STORED_ID)).toEqual({ connectionId: 'local', profile: 'omar' })
     expect($sessions.get().find(session => sessionMatchesStoredId(session, STORED_ID))).toMatchObject({
       connection_id: 'local',
@@ -512,7 +585,7 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
   })
 
   it('turn two still rides conn:local::omar after the transient hint is evicted AND a refresh returned the row untagged', async () => {
-    const { handle, omarSocket, primary } = await bootProfileRailOmar()
+    const { ambientRequest, handle, omarSocket, primary } = await bootProfileRailOmar('newSessionInProfile')
 
     await expect(handle.submitText('first prompt')).resolves.toBe(true)
     await waitFor(() => expect($activeSessionId.get()).toBe(RUNTIME_ID))
@@ -569,5 +642,6 @@ describe('profile rail: a fresh Omar chat keeps its exact registry owner across 
     }
 
     expect(calls(omarSocket).filter(method => method === 'session.create')).toHaveLength(1)
+    expectUninterruptedOwner({ ambientRequest: ambientRequest as GatewayRequestMock, omarSocket, primary })
   })
 })
