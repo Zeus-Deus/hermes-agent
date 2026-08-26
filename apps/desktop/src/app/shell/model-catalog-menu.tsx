@@ -18,7 +18,7 @@ import {
 import { HighlightMatches } from '@/components/ui/highlight-matches'
 import { usePointerQuiet } from '@/components/ui/keyboard-first'
 import { Skeleton } from '@/components/ui/skeleton'
-import type { HermesGateway } from '@/hermes'
+import type { HermesGateway, ProfileScope } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { type ModelOptionsDispatch, modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
@@ -99,7 +99,7 @@ interface ModelCatalogMenuProps {
   /** Profile whose catalog this is; keys the query and pins the REST
    *  recovery read. Omitted → the active API profile scope, never a literal
    *  'default' (a detached surface must follow the active profile). */
-  profile?: string
+  profile?: ProfileScope
   /** Owner-routed dispatcher for the catalog read. A surface bound to a
    *  session must pass the same dispatcher it writes through, or the read
    *  lands on the ambient backend, which never held the session (#93892).

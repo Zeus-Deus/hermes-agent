@@ -5,7 +5,7 @@ import { useState } from 'react'
 import { useSessionView } from '@/app/chat/session-view'
 import { Codicon } from '@/components/ui/codicon'
 import { DropdownMenuItem, dropdownMenuRow } from '@/components/ui/dropdown-menu'
-import type { HermesGateway } from '@/hermes'
+import type { HermesGateway, ProfileScope } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { currentPickerSelection } from '@/lib/model-status-label'
@@ -29,6 +29,9 @@ export { ModelMenuCloseContext } from './model-catalog-menu'
 
 export interface ModelSelection {
   model: string
+  /** Catalog owner scope for cache patching/invalidation. A tile carries its
+   * exact connection/profile owner; primary/legacy callers stay ambient. */
+  profile?: ProfileScope
   provider: string
   /** Runtime id of the surface that opened the menu. When set, the switch
    *  targets that session (a tile) instead of the primary `$activeSessionId`. */
@@ -38,9 +41,8 @@ export interface ModelSelection {
 interface ModelMenuPanelProps {
   gateway?: HermesGateway
   onSelectModel: (selection: ModelSelection) => Promise<boolean> | void
-  /** Profile whose catalog this is. Omitted → the active API profile scope
-   *  (never pinned to a literal 'default'). */
-  profile?: string
+  /** Owner scope whose catalog this is. Omitted → the active API scope. */
+  profile?: ProfileScope
   /** THIS surface's dispatcher — owner-routed for a tile. Catalog reads go
    *  through it too, not only writes: `model.options` resolves the session in
    *  the answering backend's own process, so the ambient socket returns the
@@ -207,7 +209,13 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile, requestGateway
     // scopes the switch to that session; with none it's UI state shipped on the
     // next session.create. Always stamp sessionId from this surface so a tile
     // switch never hits the primary (busy) session by accident.
-    select: (model, provider) => onSelectModel({ model, provider, sessionId: activeSessionId || null }),
+    select: (model, provider) =>
+      onSelectModel({
+        model,
+        ...(profile !== undefined ? { profile } : {}),
+        provider,
+        sessionId: activeSessionId || null
+      }),
 
     setOptions: (patch, row) => {
       // Editing always records the model's global preset (keyed by

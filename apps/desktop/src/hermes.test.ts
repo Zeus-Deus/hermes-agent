@@ -670,6 +670,21 @@ describe('Hermes REST helpers', () => {
     )
   })
 
+  it('lets an explicit model-catalog owner override the active connection and profile', async () => {
+    setApiRequestConnection('foreground-connection')
+    setApiRequestProfile('foreground-profile')
+
+    await getGlobalModelOptions(undefined, { connectionId: 'remote-owner', profile: 'backend-bot' })
+
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionId: 'remote-owner',
+        path: '/api/model/options?explicit_only=1',
+        profile: 'backend-bot'
+      })
+    )
+  })
+
   it('can opt into unconfigured providers for onboarding flows', async () => {
     await getGlobalModelOptions({ includeUnconfigured: true, refresh: true, explicitOnly: false })
 

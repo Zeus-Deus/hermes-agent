@@ -22,6 +22,7 @@ import {
   setWorkspaceCwdOwner,
   setYoloActive
 } from '@/store/session'
+import { sessionEventOwnerRoute } from '@/store/session-states'
 import { reportInstallMethodWarning } from '@/store/updates'
 
 import { finalizeInterruptedMessages } from '../../use-prompt-actions/rewind'
@@ -341,8 +342,35 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
     }
 
     if (modelValueChanged || providerValueChanged) {
+      // Registry events carry their exact owner. Invalidate that composite
+      // catalog, not whichever connection/profile is ambient now; primary
+      // events are untagged and retain the active-profile path.
+      const eventProfile = event.profile?.trim() || activeGatewayProfile
+
+      const ownerRoute =
+        event.connectionId && explicitSid && sessionId
+          ? sessionEventOwnerRoute(sessionId, payload?.stored_session_id, {
+              connectionId: event.connectionId,
+              profile: eventProfile
+            })
+          : { kind: 'unknown' as const }
+
+      // Multiple exact owner records mean the alias target is unknowable. Do
+      // not invalidate a guessed socket/ambient catalog; a later authoritative
+      // event or catalog read can reconcile once ownership is unambiguous.
+      if (ownerRoute.kind === 'ambiguous') {
+        return true
+      }
+
+      const catalogProfile =
+        ownerRoute.kind === 'known' ? ownerRoute.route.targetProfile?.trim() || eventProfile : eventProfile
+
+      const profileScope = event.connectionId
+        ? { connectionId: event.connectionId, profile: catalogProfile }
+        : eventProfile
+
       void queryClient.invalidateQueries({
-        queryKey: explicitSid && sessionId ? modelOptionsQueryKey(activeGatewayProfile, sessionId) : ['model-options']
+        queryKey: explicitSid && sessionId ? modelOptionsQueryKey(profileScope, sessionId) : ['model-options']
       })
     }
 

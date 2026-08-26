@@ -124,8 +124,8 @@ export function recordTileOwner(storedSessionId: string, owner: SessionOwnerScop
  * socket, which the next dispose decision closes again — a spinner loop with
  * no terminal state.
  *
- * Owners are named the way the resume itself resolves them (owner hint, tile
- * route, the owner the delegate recorded), falling back to the session row's
+ * Owners are named by authoritative precedence (persisted tile route, owner
+ * hint, the owner the delegate recorded), falling back to the session row's
  * profile. Route-owned surfaces map to their composite (connectionId,
  * profile) scope; profile-owned ones to the bare profile key the local/legacy
  * pool entries match on. The set follows `$sessionTiles` /
@@ -138,33 +138,41 @@ export function foregroundSessionScopes(): Set<string> {
   const scopes = new Set<string>()
   const sessions = $sessions.get()
 
-  const addOwner = (owner: SessionOwnerScope): boolean => {
+  const ownerScopeKey = (owner: SessionOwnerScope): string | undefined => {
     if (!owner) {
-      return false
+      return undefined
     }
 
     if (typeof owner === 'string') {
-      scopes.add(normalizeProfileKey(owner))
-
-      return true
+      return normalizeProfileKey(owner)
     }
 
     if (!owner.connectionId.trim()) {
-      return false
+      return undefined
     }
 
-    scopes.add(registryBackendScopeKey(owner.connectionId, normalizeProfileKey(owner.profile)))
-
-    return true
+    return registryBackendScopeKey(owner.connectionId, normalizeProfileKey(owner.profile))
   }
 
   const addStoredSession = (storedSessionId: string, route: SessionProfileRoute | undefined) => {
-    const known = [getSessionOwnerHint(storedSessionId), route, resolvedTileOwners.get(storedSessionId)]
-      .map(addOwner)
-      .some(Boolean)
+    // One surface has one owner. Persisted tile routing is authoritative;
+    // hints and the last resolved owner are recovery fallbacks only. Resolve
+    // the precedence first so stale candidates never pin extra sockets.
+    const candidates: SessionOwnerScope[] = [
+      route,
+      getSessionOwnerHint(storedSessionId),
+      resolvedTileOwners.get(storedSessionId),
+      knownSessionProfile(sessions, storedSessionId)
+    ]
 
-    if (!known) {
-      addOwner(knownSessionProfile(sessions, storedSessionId))
+    for (const candidate of candidates) {
+      const key = ownerScopeKey(candidate)
+
+      if (key) {
+        scopes.add(key)
+
+        return
+      }
     }
   }
 
@@ -775,6 +783,21 @@ export const $sessionTiles = atom<SessionTile[]>(
     : [...(tilesByProfile[profileKey()] ?? []), ...(tilesByProfile[BOTS_TILE_BUCKET] ?? [])]
 )
 
+// A resume-resolved owner is useful only while that tile is mounted. Prune at
+// the atom boundary so close, profile switch, restore, and direct test/store
+// replacement all release the record; otherwise repeatedly opened one-off
+// tiles grow resolvedTileOwners forever and can revive stale ownership if a
+// stored id is reused later.
+$sessionTiles.subscribe(tiles => {
+  const mounted = new Set(tiles.map(tile => tile.storedSessionId))
+
+  for (const storedSessionId of resolvedTileOwners.keys()) {
+    if (!mounted.has(storedSessionId)) {
+      resolvedTileOwners.delete(storedSessionId)
+    }
+  }
+})
+
 function persistTiles() {
   // Shares the origin's storage; a secondary / browser pop-out holds no tiles,
   // so a write back would only wipe the primary's set.
@@ -846,6 +869,106 @@ export function knownOwnerForSession(sessionId: null | string | undefined): Sess
     getSessionOwnerHint(storedSessionId) ??
     knownSessionProfile($sessions.get(), storedSessionId)
   )
+}
+
+export type SessionEventOwnerRouteResolution =
+  { kind: 'ambiguous' } | { kind: 'known'; route: SessionProfileRoute } | { kind: 'unknown' }
+
+/**
+ * Resolve the authoritative owner route for one registry event. The registry
+ * tags events with the socket route (`profile`), while a persisted tile/hint
+ * may additionally name the backend `targetProfile` that owns its catalog.
+ * Match both the event source and session identity; never borrow an alias from
+ * another connection that happens to reuse the same runtime/stored id.
+ */
+export function sessionEventOwnerRoute(
+  runtimeSessionId: null | string | undefined,
+  storedSessionId: null | string | undefined,
+  source: Pick<SessionProfileRoute, 'connectionId' | 'profile'>
+): SessionEventOwnerRouteResolution {
+  const runtimeId = runtimeSessionId?.trim() || ''
+  const storedId = storedSessionId?.trim() || ''
+  const connectionId = source.connectionId.trim()
+  const profile = source.profile.trim() || 'default'
+
+  if (!connectionId || (!runtimeId && !storedId)) {
+    return { kind: 'unknown' }
+  }
+
+  const sourceMatches = (route: SessionProfileRoute | undefined) =>
+    route?.connectionId.trim() === connectionId && (route.profile.trim() || 'default') === profile
+
+  const distinctRouteResolution = (routes: SessionProfileRoute[]): SessionEventOwnerRouteResolution => {
+    const distinctRoutes = new Map<string, SessionProfileRoute>()
+
+    for (const route of routes) {
+      const routeProfile = route.profile.trim() || 'default'
+      const targetProfile = route.targetProfile?.trim() || routeProfile
+      distinctRoutes.set(JSON.stringify([route.connectionId.trim(), routeProfile, targetProfile]), route)
+    }
+
+    if (distinctRoutes.size > 1) {
+      return { kind: 'ambiguous' }
+    }
+
+    const route = distinctRoutes.values().next().value
+
+    return route ? { kind: 'known', route } : { kind: 'unknown' }
+  }
+
+  const sourceTiles = $sessionTiles
+    .get()
+    .filter((tile): tile is SessionTile & { ownerRoute: SessionProfileRoute } =>
+      Boolean(tile.ownerRoute && sourceMatches(tile.ownerRoute))
+    )
+
+  // Ownership confidence, strongest first:
+  // 1. An exact live runtime binding is authoritative even if compression has
+  //    rotated the stored id retained by the mounted tile.
+  const exactRuntimeResolution = distinctRouteResolution(
+    sourceTiles.filter(tile => Boolean(runtimeId && tile.runtimeId === runtimeId)).map(tile => tile.ownerRoute)
+  )
+
+  if (exactRuntimeResolution.kind !== 'unknown') {
+    return exactRuntimeResolution
+  }
+
+  const durableId = storedId || runtimeId
+
+  // 2. A durable-id match with a different explicit runtime is negative
+  //    ownership evidence. It globally blocks every lower-confidence candidate
+  //    (including stale hints) unless the exact-runtime rung above resolved.
+  const hasConflictingRuntime = Boolean(
+    runtimeId &&
+    durableId &&
+    sourceTiles.some(
+      tile => tile.storedSessionId === durableId && Boolean(tile.runtimeId && tile.runtimeId !== runtimeId)
+    )
+  )
+
+  if (hasConflictingRuntime) {
+    return { kind: 'ambiguous' }
+  }
+
+  // 3. Durable tile identity is eligible only when the event has no runtime or
+  //    the tile has not bound one yet.
+  const durableTileResolution = distinctRouteResolution(
+    sourceTiles
+      .filter(tile => Boolean(durableId && tile.storedSessionId === durableId && (!runtimeId || !tile.runtimeId)))
+      .map(tile => tile.ownerRoute)
+  )
+
+  if (durableTileResolution.kind !== 'unknown') {
+    return durableTileResolution
+  }
+
+  // 4. Hints are the final rung and are considered only after stronger tile
+  //    evidence has produced neither an owner nor a contradiction.
+  const hintRoutes = [...new Set([storedId, runtimeId].filter(Boolean))]
+    .map(id => getSessionOwnerHint(id, { connectionId, profile }))
+    .filter((route): route is SessionProfileRoute => Boolean(route))
+
+  return distinctRouteResolution(hintRoutes)
 }
 
 /**

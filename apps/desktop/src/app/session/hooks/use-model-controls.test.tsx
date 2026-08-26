@@ -301,6 +301,52 @@ describe('useModelControls', () => {
     expect(invalidate).toHaveBeenCalled()
   })
 
+  it('patches and invalidates only a remote tile owner catalog', async () => {
+    const queryClient = new QueryClient()
+    const ownerScope = { connectionId: 'remote-owner', profile: 'bot' }
+    const ownerKey = modelOptionsQueryKey(ownerScope, 'tile-runtime')
+    const ambientKey = modelOptionsQueryKey('default', 'tile-runtime')
+
+    const ambientCatalog = {
+      model: 'ambient-model',
+      provider: 'ambient-provider',
+      providers: [{ models: ['ambient-model'], name: 'Ambient', slug: 'ambient-provider' }]
+    }
+
+    queryClient.setQueryData(ownerKey, {
+      model: 'old-owner-model',
+      provider: 'owner-provider',
+      providers: [{ models: ['old-owner-model'], name: 'Owner', slug: 'owner-provider' }]
+    })
+    queryClient.setQueryData(ambientKey, ambientCatalog)
+
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+
+    const { result } = renderHook(() =>
+      useModelControls({
+        queryClient,
+        requestGateway: vi.fn(async () => ({ key: 'model', scope: 'session' }) as never)
+      })
+    )
+
+    await expect(
+      result.current.selectModel({
+        model: 'new-owner-model',
+        profile: ownerScope,
+        provider: 'owner-provider',
+        sessionId: 'tile-runtime'
+      })
+    ).resolves.toBe(true)
+
+    expect(queryClient.getQueryData(ownerKey)).toMatchObject({
+      model: 'new-owner-model',
+      provider: 'owner-provider'
+    })
+    expect(queryClient.getQueryData(ambientKey)).toEqual(ambientCatalog)
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ownerKey })
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ambientKey })
+  })
+
   it('keeps the pick when an OLDER gateway refuses a mid-turn switch', async () => {
     // Pre-deferral backends answer 4009 instead of parking the pick. Rolling
     // back would bounce the pill to the old model and toast an error at a user

@@ -824,9 +824,7 @@ export async function requestGatewayForAgent<T>(
  * composite key only; local/legacy entries also match on the bare profile —
  * the same key language pruneSecondaryGateways' keep-set speaks.
  */
-function foregroundPinned(entry: Secondary): boolean {
-  const scopes = g.config?.foregroundScopes?.()
-
+function foregroundPinned(entry: Secondary, scopes = g.config?.foregroundScopes?.()): boolean {
   if (!scopes) {
     return false
   }
@@ -1289,6 +1287,9 @@ function restoreActiveToPrimaryIfEvicted(): void {
 // doc).
 export function pruneSecondaryGateways(keep: Set<string>): void {
   const now = Date.now()
+  // foregroundSessionScopes walks mounted surfaces and owner maps. Snapshot
+  // it once for this decision pass rather than rebuilding it per secondary.
+  const foregroundScopes = g.config?.foregroundScopes?.()
 
   for (const [key, entry] of [...g.secondaries]) {
     if (
@@ -1302,7 +1303,7 @@ export function pruneSecondaryGateways(keep: Set<string>): void {
       relayRetained(entry) ||
       // A mounted tile / the primary thread is bound to a runtime on this
       // socket (#93892) — pinned for as long as that surface is mounted.
-      foregroundPinned(entry) ||
+      foregroundPinned(entry, foregroundScopes) ||
       // Mid-dial activation target: the profile being switched TO is not yet
       // active and has no live work, so without this lease any recompute
       // during its cold spawn disposed the entry and the click died silently

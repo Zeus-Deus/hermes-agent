@@ -103,6 +103,36 @@ describe('foregroundSessionScopes', () => {
     expect(foregroundSessionScopes()).toEqual(new Set(['bot']))
   })
 
+  it('pins only the persisted tile route when owner candidates disagree', () => {
+    setSessionOwnerHint('stored-disagree', {
+      connectionId: 'stale-hint',
+      mode: 'remote',
+      profile: 'bot'
+    })
+    recordTileOwner('stored-disagree', { connectionId: 'stale-resolved', profile: 'bot' })
+    $sessionTiles.set([
+      {
+        ownerRoute: { connectionId: 'authoritative-route', mode: 'remote', profile: 'bot' },
+        storedSessionId: 'stored-disagree'
+      }
+    ])
+
+    expect(foregroundSessionScopes()).toEqual(new Set(['conn:authoritative-route::bot']))
+  })
+
+  it('pins only the first valid recovery owner when route data is unavailable', () => {
+    setSessionOwnerHint('stored-fallback-disagree', {
+      connectionId: 'authoritative-hint',
+      mode: 'remote',
+      profile: 'bot'
+    })
+    recordTileOwner('stored-fallback-disagree', { connectionId: 'stale-resolved', profile: 'bot' })
+    setSessions([row({ id: 'stored-fallback-disagree', profile: 'stale-row' })])
+    $sessionTiles.set([{ storedSessionId: 'stored-fallback-disagree' }])
+
+    expect(foregroundSessionScopes()).toEqual(new Set(['conn:authoritative-hint::bot']))
+  })
+
   it('follows the tile set: closing the tile releases its scope', () => {
     $sessionTiles.set([
       { ownerRoute: { connectionId: 'local', mode: 'local', profile: 'bot' }, storedSessionId: 'stored-bot' }
@@ -111,5 +141,16 @@ describe('foregroundSessionScopes', () => {
 
     $sessionTiles.set([])
     expect(foregroundSessionScopes().has('conn:local::bot')).toBe(false)
+  })
+
+  it('forgets a resolved owner when its tile closes instead of reviving stale ownership', () => {
+    $sessionTiles.set([{ storedSessionId: 'stored-resolved' }])
+    recordTileOwner('stored-resolved', 'bot')
+    expect(foregroundSessionScopes()).toEqual(new Set(['bot']))
+
+    $sessionTiles.set([])
+    $sessionTiles.set([{ storedSessionId: 'stored-resolved' }])
+
+    expect(foregroundSessionScopes()).toEqual(new Set())
   })
 })

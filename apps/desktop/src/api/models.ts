@@ -31,7 +31,7 @@ export function getGlobalModelOptions(
     includeUnconfigured?: boolean
     explicitOnly?: boolean
   },
-  profile?: null | string
+  profile?: ProfileScope
 ): Promise<ModelOptionsResponse> {
   const params = new URLSearchParams()
 
@@ -47,8 +47,13 @@ export function getGlobalModelOptions(
     params.set('explicit_only', '1')
   }
 
-  return hermesApi<ModelOptionsResponse>({
-    ...profileScoped(profile),
+  // Unlike the global/active model-info read, catalog recovery may belong to
+  // a mounted surface on another (connection, profile) pair. An explicit
+  // ProfileScope must override BOTH ambient dimensions; capabilityScoped is
+  // the shared connection-aware REST routing seam that already enforces that
+  // invariant for skills/toolsets/MCP.
+  return window.hermesDesktop.api<ModelOptionsResponse>({
+    ...capabilityScoped(profile),
     path: params.size > 0 ? `/api/model/options?${params.toString()}` : '/api/model/options',
     timeoutMs: STARTUP_REQUEST_TIMEOUT_MS
   })

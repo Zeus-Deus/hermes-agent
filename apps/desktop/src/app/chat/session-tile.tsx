@@ -228,22 +228,20 @@ function TileChat({
   const { selectModel } = useModelControls({ queryClient, requestGateway: requestTileGateway })
   const activeGatewayProfile = useStore($activeGatewayProfile)
 
-  // Catalog profile for the model menu (#93892): the owner's for a local
-  // (or legacy profile) route, so the REST recovery read is scoped to the
-  // profile that owns this session. A remote route stays UNPINNED: the REST
-  // client scopes by the ACTIVE connection, so pinning the owner's profile
-  // name there would ask a stranger backend for a same-named profile. The
-  // owner-routed gateway read (requestTileGateway) is authoritative for it.
+  // Catalog scope for the model menu (#93892): an owner route pins BOTH the
+  // connection and backend profile. This matters when the owner-routed WS
+  // catalog is temporarily empty: REST recovery must not substitute the
+  // active connection's models. Explicit local is kept too, so an active
+  // remote connection cannot capture a local tile's fallback.
   const catalogProfile = useMemo(() => {
-    if (!ownerRoute?.connectionId) {
-      return ownerRoute?.profile || activeGatewayProfile
+    if (!ownerRoute) {
+      return activeGatewayProfile
     }
 
-    if (ownerRoute.mode === 'local' || ownerRoute.connectionId === 'local') {
-      return ownerRoute.targetProfile || ownerRoute.profile
+    return {
+      connectionId: ownerRoute.connectionId,
+      profile: ownerRoute.targetProfile || ownerRoute.profile
     }
-
-    return undefined
   }, [activeGatewayProfile, ownerRoute])
 
   const cwd = useStore(view.$cwd)

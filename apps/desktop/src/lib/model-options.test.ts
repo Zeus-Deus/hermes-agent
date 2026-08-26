@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { setApiRequestConnection, setApiRequestProfile } from '@/api/client'
 import { getGlobalModelOptions } from '@/hermes'
 
 import { manualPickRemoved, modelOptionsQueryKey, requestModelOptions } from './model-options'
@@ -120,6 +121,11 @@ describe('requestModelOptions', () => {
 })
 
 describe('modelOptionsQueryKey', () => {
+  afterEach(() => {
+    setApiRequestConnection(null)
+    setApiRequestProfile(null)
+  })
+
   it('isolates new-chat catalogs by active gateway profile', () => {
     expect(modelOptionsQueryKey('default')).toEqual(['model-options', 'default', 'global'])
     expect(modelOptionsQueryKey('compass')).toEqual(['model-options', 'compass', 'global'])
@@ -128,6 +134,53 @@ describe('modelOptionsQueryKey', () => {
 
   it('keeps session catalogs inside the owning profile namespace', () => {
     expect(modelOptionsQueryKey(' compass ', 'session-1')).toEqual(['model-options', 'compass', 'session-1'])
+  })
+
+  it('does not alias an explicit local catalog with an ambient remote catalog', () => {
+    setApiRequestConnection('remote-active')
+    setApiRequestProfile('bot')
+
+    const explicitLocal = modelOptionsQueryKey({ connectionId: 'local', profile: 'bot' }, 'session-1')
+    const ambientRemote = modelOptionsQueryKey('bot', 'session-1')
+
+    expect(explicitLocal).toEqual(['model-options', 'conn:local::bot', 'session-1'])
+    expect(ambientRemote).toEqual(['model-options', 'conn:remote-active::bot', 'session-1'])
+    expect(explicitLocal).not.toEqual(ambientRemote)
+  })
+
+  it('keeps an explicit local pin distinct from the legacy ambient-local namespace', () => {
+    const explicitLocal = modelOptionsQueryKey({ connectionId: 'local', profile: 'bot' }, 'session-1')
+    const ambientLocal = modelOptionsQueryKey('bot', 'session-1')
+
+    expect(explicitLocal).toEqual(['model-options', 'conn:local::bot', 'session-1'])
+    expect(ambientLocal).toEqual(['model-options', 'bot', 'session-1'])
+    expect(explicitLocal).not.toEqual(ambientLocal)
+  })
+
+  it('includes the effective active connection in ambient catalog keys', () => {
+    setApiRequestProfile('bot')
+    setApiRequestConnection('remote-a')
+    const remoteA = modelOptionsQueryKey(undefined, 'session-1')
+
+    setApiRequestConnection('remote-b')
+    const remoteB = modelOptionsQueryKey(undefined, 'session-1')
+
+    expect(remoteA).toEqual(['model-options', 'conn:remote-a::bot', 'session-1'])
+    expect(remoteB).toEqual(['model-options', 'conn:remote-b::bot', 'session-1'])
+    expect(remoteA).not.toEqual(remoteB)
+  })
+
+  it('keeps explicit remote owners isolated from ambient and same-profile peers', () => {
+    setApiRequestConnection('ambient')
+
+    const ownerA = modelOptionsQueryKey({ connectionId: 'owner-a', profile: 'bot' }, 'session-1')
+    const ownerB = modelOptionsQueryKey({ connectionId: 'owner-b', profile: 'bot' }, 'session-1')
+    const ambient = modelOptionsQueryKey('bot', 'session-1')
+
+    expect(new Set([JSON.stringify(ownerA), JSON.stringify(ownerB), JSON.stringify(ambient)])).toHaveProperty(
+      'size',
+      3
+    )
   })
 })
 
@@ -212,6 +265,36 @@ describe('requestModelOptions owner routing', () => {
     ).resolves.toEqual(restPayload)
 
     expect(getGlobalModelOptions).toHaveBeenCalledWith({ explicitOnly: true }, 'bot')
+  })
+
+  it("keeps a remote-owner tile's empty WS catalog pinned during REST recovery while another connection is active", async () => {
+    const ambientPayload = {
+      model: 'ambient-model',
+      provider: 'ambient',
+      providers: [{ models: ['ambient-model'], name: 'Ambient', slug: 'ambient' }]
+    }
+
+    const ownerPayload = {
+      model: 'owner-model',
+      provider: 'owner',
+      providers: [{ models: ['owner-model'], name: 'Owner', slug: 'owner' }]
+    }
+
+    const ownerScope = { connectionId: 'remote-owner', profile: 'backend-bot' }
+    const request = vi.fn(() => Promise.resolve({ model: 'owner-model', provider: 'owner', providers: [] }))
+
+    // Deterministically model the active-connection trap: an unpinned REST
+    // read returns the foreground connection's catalog; only the exact tile
+    // owner scope reaches the backend that owns the session.
+    vi.mocked(getGlobalModelOptions).mockImplementationOnce(async (_opts, scope) =>
+      JSON.stringify(scope as unknown) === JSON.stringify(ownerScope) ? ownerPayload : ambientPayload
+    )
+
+    await expect(
+      requestModelOptions({ profile: ownerScope as never, request: request as never, sessionId: 'tile-runtime' })
+    ).resolves.toEqual(ownerPayload)
+
+    expect(getGlobalModelOptions).toHaveBeenCalledWith({ explicitOnly: true }, ownerScope)
   })
 
   it('keeps the unpinned REST call shape when no profile is named', async () => {

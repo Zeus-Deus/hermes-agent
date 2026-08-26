@@ -97,6 +97,18 @@ afterEach(() => {
 })
 
 describe('foreground tile retention vs. the live-work pruner (#93892)', () => {
+  it('computes foreground scopes once for a whole prune pass', async () => {
+    const foregroundScopes = vi.fn(() => new Set<string>())
+
+    configureGatewayRegistry({ foregroundScopes, onEvent: vi.fn() })
+    await openGatewayForAgent('source-a', 'bot')
+    await openGatewayForAgent('source-b', 'bot')
+
+    pruneSecondaryGateways(idleKeepSet())
+
+    expect(foregroundScopes).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps an idle Bot Chat tile’s owner socket across prune recomputes', async () => {
     // The BOTS workspace dials the bot's own backend without activating it
     // (keepAllProfilesScope) and opens the canonical chat as a tile on that
