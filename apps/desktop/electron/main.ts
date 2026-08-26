@@ -45,6 +45,7 @@ import {
 } from './backend-claim'
 import { dashboardFallbackArgs, sourceDeclaresServe } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
+import { BackendDialClaims } from './backend-dial-claim'
 import { buildDesktopBackendEnv, hermesManagedNodePathEntries, normalizeHermesHomeRoot } from './backend-env'
 import {
   isReauthRequiredError,
@@ -131,8 +132,10 @@ import {
   migrateV1ToRegistry,
   normalizeConnectionInput,
   normalizeRegistry,
+  parseBackendScopeKey,
   reconcileAppliedGlobalConnection,
   reconcileRegistryDrift,
+  registrySourceOwnsPrimaryBackend,
   rememberSshEnumeration,
   removeConnection,
   resolvedConnectionId,
@@ -244,6 +247,7 @@ import {
 import { runNativeLogin } from './native-oauth-login'
 import { loadNativeTokenSet, type NativeTokenStoreIo, persistNativeTokenSet } from './native-token-store'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
+import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
 import { registerPetOverlayIpc } from './pet-overlay-ipc'
 import {
@@ -288,11 +292,13 @@ import { createQuickEntryShortcut, quickEntryWindowBounds, sanitizeQuickEntrySet
 import { type ActiveWork, mergeActiveWork, normalizeActiveWork, quitPromptFor } from './quit-guard'
 import * as remoteLifecycle from './remote-lifecycle'
 import {
+  attachPowerResumeRemoteRevalidation,
   ensureHealthyPooledRemoteBackendForDispatch,
   RemoteLivenessTracker,
   RemoteRevalidationCoordinator,
   revalidatePooledRemoteBackends,
-  revalidateRemoteConnection
+  revalidateRemoteConnection,
+  revalidateSuspectPooledRemoteBackends
 } from './remote-liveness'
 import {
   applyRemoteRequestHeaders,
@@ -1318,7 +1324,7 @@ function registerMediaProtocol() {
         method
       }),
     fetchRemoteWithCookies: (url, headers, method) => {
-      const oauthSession = getOauthSession()
+      const oauthSession = getOauthSessionForUrl(url)
 
       if (!oauthSession) {
         throw new Error('OAuth session partition is unavailable.')
@@ -1348,6 +1354,12 @@ const backendConnectionState = createBackendConnectionState<ReturnType<typeof sp
 const remoteLiveness = new RemoteLivenessTracker()
 const remoteRevalidation = new RemoteRevalidationCoordinator()
 const registryDispatchRevalidation = new RemoteRevalidationCoordinator()
+// Single-owner reconnect/dial claim (#90812): reconnectGateway()'s in-flight
+// lock is per-renderer, so two windows racing one wake can both invoke the
+// backend ensure IPC and double-dial a pooled SSH backend. Main owns backend
+// lifecycles, so concurrent dials for one (connectionId, profile) scope
+// coalesce here — the second caller awaits the first spawn's result.
+const backendDialClaims = new BackendDialClaims()
 // True while connection-config:apply soft-rehomes the primary — suppresses the
 // backend-exit toast so an intentional kill doesn't look like a crash.
 let softRehomeInProgress = false
@@ -6362,6 +6374,15 @@ function registerPowerResumeListeners() {
     powerMonitor.on('on-battery', () => broadcastBatteryState(true))
     powerMonitor.on('on-ac', () => broadcastBatteryState(false))
     onBatteryPower = powerMonitor.isOnBatteryPower()
+    // Pooled remote/SSH backends are also suspect after a wake (#93910): the
+    // renderer nudge above only re-drives the PRIMARY socket, while pooled
+    // tunnels have no renderer loop of their own. Bounded + coalesced inside;
+    // never a hot loop.
+    attachPowerResumeRemoteRevalidation({
+      log: rememberLog,
+      powerMonitor,
+      revalidate: () => revalidateSuspectPoolAfterResume()
+    })
   } catch {
     // powerMonitor is unavailable before app 'ready' on some platforms; the
     // caller registers after 'ready', so this should not normally throw.
@@ -6900,7 +6921,7 @@ function installMediaPermissions() {
 //     "is the user signed in at all?" gate / display signal.
 // ---------------------------------------------------------------------------
 
-const OAUTH_SESSION_PARTITION = 'persist:hermes-remote-oauth'
+const OAUTH_SESSION_PARTITION = LEGACY_OAUTH_PARTITION
 
 function getOauthSession() {
   if (oauthSession || !app.isReady()) {
@@ -6910,6 +6931,47 @@ function getOauthSession() {
   oauthSession = session.fromPartition(OAUTH_SESSION_PARTITION)
 
   return oauthSession
+}
+
+// Per-connection cookie jars (#92183). A NON-primary v2 registry remote with
+// cookie auth rides its own partition so two registered gateways can never
+// evict — or be handed — each other's session cookies (Chromium jars ignore
+// the port, so two dashboards on one VPN host used to collide in the shared
+// jar above). The primary / v1 remote / cloud / portal flows keep the legacy
+// shared partition; see oauth-partition.ts for the full rules.
+const oauthSessionsByPartition = new Map()
+
+function resolveOauthPartitionForUrl(url) {
+  try {
+    return resolveOauthPartition(url, {
+      registry: readDesktopConnectionsRegistry(),
+      v1RemoteUrl: readDesktopConnectionConfig()?.remote?.url
+    })
+  } catch {
+    // A broken registry read must never take cookie auth down with it.
+    return OAUTH_SESSION_PARTITION
+  }
+}
+
+function getOauthSessionForUrl(url) {
+  const partition = resolveOauthPartitionForUrl(url)
+
+  if (partition === OAUTH_SESSION_PARTITION) {
+    return getOauthSession()
+  }
+
+  if (!app.isReady()) {
+    return null
+  }
+
+  let sess = oauthSessionsByPartition.get(partition)
+
+  if (!sess) {
+    sess = session.fromPartition(partition)
+    oauthSessionsByPartition.set(partition, sess)
+  }
+
+  return sess
 }
 
 // Cold-start cookie-jar warm-up. A `persist:` partition materialized via
@@ -6925,19 +6987,23 @@ function getOauthSession() {
 // throwaway cookies.get(). The promise is memoized so every caller awaits the
 // same single warm-up. Best-effort — any error resolves so we fall back to the
 // live read (which then does its own bounded re-check).
-let oauthCookieWarmup: Promise<void> | null = null
+// Memoized per PARTITION: per-connection jars (#92183) hydrate independently.
+const oauthCookieWarmups = new Map()
 
-function warmOauthCookieStore() {
-  if (oauthCookieWarmup) {
-    return oauthCookieWarmup
+function warmOauthCookieStore(url?) {
+  const partition = resolveOauthPartitionForUrl(url)
+  const pending = oauthCookieWarmups.get(partition)
+
+  if (pending) {
+    return pending
   }
 
-  oauthCookieWarmup = (async () => {
-    const sess = getOauthSession()
+  const warmup = (async () => {
+    const sess = getOauthSessionForUrl(url)
 
     if (!sess) {
       // App not ready yet — don't memoize a no-op; let a later call retry.
-      oauthCookieWarmup = null
+      oauthCookieWarmups.delete(partition)
 
       return
     }
@@ -6953,7 +7019,9 @@ function warmOauthCookieStore() {
     }
   })()
 
-  return oauthCookieWarmup
+  oauthCookieWarmups.set(partition, warmup)
+
+  return warmup
 }
 
 // Bare + prefixed variants of the session cookies live in
@@ -6961,7 +7029,7 @@ function warmOauthCookieStore() {
 // that module for details.
 
 async function hasOauthSessionCookie(baseUrl) {
-  const sess = getOauthSession()
+  const sess = getOauthSessionForUrl(baseUrl)
 
   if (!sess) {
     return false
@@ -6994,7 +7062,7 @@ async function hasOauthSessionCookie(baseUrl) {
 // re-login every ~15 min. Used for the Settings "connected" indicator and as a
 // cheap early-out before attempting a network round-trip in resolveRemoteBackend.
 async function hasLiveOauthSession(baseUrl) {
-  const sess = getOauthSession()
+  const sess = getOauthSessionForUrl(baseUrl)
 
   if (!sess) {
     return false
@@ -7030,7 +7098,7 @@ async function hasLiveOauthSession(baseUrl) {
   // trusting a negative, force the store to hydrate and re-read a couple of
   // times with a short backoff. A genuinely signed-out user still resolves
   // false quickly (≤ ~180ms); a signed-in user racing the load now wins.
-  await warmOauthCookieStore()
+  await warmOauthCookieStore(baseUrl)
 
   for (const delayMs of [30, 60, 90]) {
     if (await readLive()) {
@@ -7044,7 +7112,7 @@ async function hasLiveOauthSession(baseUrl) {
 }
 
 async function clearOauthSession(baseUrl) {
-  const sess = getOauthSession()
+  const sess = getOauthSessionForUrl(baseUrl)
 
   if (!sess) {
     return
@@ -7091,7 +7159,7 @@ function openOauthLoginWindow(baseUrl, { silent = false } = {}) {
       return
     }
 
-    const sess = getOauthSession()
+    const sess = getOauthSessionForUrl(baseUrl)
 
     if (!sess) {
       reject(new Error('OAuth session partition is unavailable.'))
@@ -7224,7 +7292,7 @@ function openOauthLoginWindow(baseUrl, { silent = false } = {}) {
 // authed REST against a gated gateway, including minting WS tickets.
 function fetchJsonViaOauthSession(url, options: any = {}) {
   return new Promise((resolve, reject) => {
-    const sess = getOauthSession()
+    const sess = getOauthSessionForUrl(url)
 
     if (!sess) {
       reject(new Error('OAuth session partition is unavailable.'))
@@ -7475,7 +7543,7 @@ async function ensureNativeAccessToken(baseUrl: string): Promise<string | null> 
 // is cleared once the response headers arrive.
 function downloadViaOauthSessionToFile(url, ctx, options: any = {}) {
   return new Promise((resolve, reject) => {
-    const sess = getOauthSession()
+    const sess = getOauthSessionForUrl(url)
 
     if (!sess) {
       reject(new Error('OAuth session partition is unavailable.'))
@@ -8960,7 +9028,19 @@ function readDesktopConnectionsRegistry() {
     tightenSecretFileMode(DESKTOP_CONNECTIONS_REGISTRY_PATH)
     registry = normalizeRegistry(JSON.parse(fs.readFileSync(DESKTOP_CONNECTIONS_REGISTRY_PATH, 'utf8')))
   } catch {
+    // Whole-file corruption (truncated write, mangled hand-edit). The
+    // degraded local-only registry keeps boot working, but the file BYTES are
+    // the user's connection data — preserve them in a sidecar BEFORE any
+    // later write (drift reconcile, connection save) overwrites the file
+    // (#94246: recovery must never be data loss).
+    preserveCorruptRegistrySidecar()
     registry = normalizeRegistry(null)
+  }
+
+  if (registry?.quarantined?.length) {
+    rememberLog(
+      `[connections] ${registry.quarantined.length} malformed registry entr${registry.quarantined.length === 1 ? 'y was' : 'ies were'} quarantined (kept under "quarantined" in connections.json); healthy connections loaded normally.`
+    )
   }
 
   // Heal v1 -> v2 drift: the v1 global route names a remote this registry has
@@ -8989,6 +9069,31 @@ function readDesktopConnectionsRegistry() {
   connectionRegistryCacheMtime = mtime
 
   return registry
+}
+
+// Copy an unparseable connections.json aside (once per corruption event) so a
+// later registry write can never destroy the only copy of the user's saved
+// connections (#94246). Best effort: failure to preserve must not block boot.
+function preserveCorruptRegistrySidecar() {
+  try {
+    const rawText = fs.readFileSync(DESKTOP_CONNECTIONS_REGISTRY_PATH, 'utf8')
+
+    if (!rawText.trim()) {
+      return
+    }
+
+    const sidecar = `${DESKTOP_CONNECTIONS_REGISTRY_PATH}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`
+
+    if (!fs.existsSync(sidecar)) {
+      fs.writeFileSync(sidecar, rawText, { mode: 0o600 })
+    }
+
+    rememberLog(
+      `[connections] connections.json could not be parsed; preserved the original file at ${sidecar} and continuing with a local-only registry. No connection data was deleted.`
+    )
+  } catch {
+    // The read itself failed (missing file, permissions) — nothing to save.
+  }
 }
 
 function writeDesktopConnectionsRegistry(registry) {
@@ -9037,7 +9142,16 @@ function sanitizeConnectionsRegistry(registry = readDesktopConnectionsRegistry()
     launchMode: registry.launchMode,
     lastUsed: registry.lastUsed,
     secureTokenStorage,
-    connections: registry.connections.map(sanitizeRegistryConnection)
+    connections: registry.connections.map(sanitizeRegistryConnection),
+    // Surface quarantined-entry NOTICES only (reason + best-effort label) —
+    // the raw entries can carry token envelopes and stay in the file (#94246).
+    quarantined: (registry.quarantined || []).map(q => ({
+      reason: String(q?.reason || 'unknown'),
+      label:
+        q && q.entry && typeof q.entry === 'object' && typeof (q.entry as any).label === 'string'
+          ? (q.entry as any).label
+          : ''
+    }))
   }
 }
 
@@ -9094,6 +9208,14 @@ async function saveRegistryConnection(input: any = {}) {
   if (existing && connectionDialFieldsChanged(existing, entry)) {
     await stopRegistryConnectionBackends(entry.id)
     broadcastConnectionsChanged({ connectionId: entry.id, reason: 'updated' })
+  } else {
+    // Every OTHER successful save (a brand-new connection, a label rename)
+    // must still republish the registry snapshot, or windows that didn't
+    // perform the save — and the switcher menu fed by $connectionsRegistry —
+    // keep painting the stale list until reload (#95393). 'saved' is a pure
+    // registry-refresh signal: no sockets moved, so listeners must not
+    // dispose or redial anything for it.
+    broadcastConnectionsChanged({ connectionId: entry.id, reason: 'saved' })
   }
 
   return sanitizeRegistryConnection(entry)
@@ -9508,9 +9630,7 @@ async function sshProbeReuseProof(baseUrl, token, spawnNonce) {
   try {
     const proof: any = await fetchJson(`${baseUrl}/api/ssh/ownership`, token)
 
-    return proof?.ok === true && proof.sshOwnerNonce === spawnNonce && proof.protocolVersion === 1
-      ? 'authenticated-ok'
-      : 'authenticated-stale'
+    return remoteLifecycle.classifySshReuseProof(proof, spawnNonce)
   } catch (error: any) {
     if (/^(401|403|404):/.test(String(error?.message || ''))) {
       return 'authenticated-stale'
@@ -9979,7 +10099,31 @@ function globalRemoteActive() {
 
   const mode = readDesktopConnectionConfig().mode
 
-  return modeIsRemoteLike(mode) || mode === 'ssh'
+  if (modeIsRemoteLike(mode) || mode === 'ssh') {
+    return true
+  }
+
+  // Registry-primary transport (#91564/#90316): a registered remote/cloud/ssh
+  // gateway promoted to primary via connections.json makes the primary
+  // backend remote even while the v1 config.mode still says 'local'. Every
+  // consumer of this flag ("one remote host serves every profile") must see
+  // that, or the local-entry routes delegate into a primary that now dials
+  // remote — respawning the exact loopback children the resolver rung in
+  // desktop-remote-route.ts eliminates.
+  return registryPrimaryIsRemote()
+}
+
+// True when the v2 registry PRIMARY names a non-local connection. Mirrors the
+// registry fallback rung in resolveDesktopRemoteRoute.
+function registryPrimaryIsRemote() {
+  try {
+    const registry = readDesktopConnectionsRegistry()
+    const entry = registry.connections.find(c => c.id === registry.primary)
+
+    return Boolean(entry && (entry.kind === 'remote' || entry.kind === 'cloud' || entry.kind === 'ssh'))
+  } catch {
+    return false
+  }
 }
 
 // True when the PRIMARY profile's backend resolves to a remote/cloud host —
@@ -10336,7 +10480,7 @@ function sendConnectionApplied() {
 // scoped to that connection. Without this, a removed remote/cloud source keeps
 // its renderer WebSocket open and streaming as a ghost, and an edited one
 // keeps talking to the OLD endpoint until idle-reap.
-function broadcastConnectionsChanged(payload: { connectionId: string; reason: 'removed' | 'updated' }) {
+function broadcastConnectionsChanged(payload: { connectionId: string; reason: 'removed' | 'saved' | 'updated' }) {
   for (const win of BrowserWindow.getAllWindows()) {
     const { webContents } = win
 
@@ -10576,6 +10720,24 @@ async function ensureRegistryBackend(connectionId, profile) {
       ...primary,
       profile: profileKey,
       connectionId: id
+    }
+  }
+
+  // The v1 primary and the registry primary can describe the same remote
+  // backend beyond the SSH-fingerprint path above (cloud/url remotes have no
+  // ssh -G identity). Reuse the already-running primary when the registry
+  // resolves its live descriptor back to this exact source id; otherwise one
+  // Desktop window starts two isolated servers whose transient runtime ids
+  // are not interchangeable.
+  if (id === registry.primary && source.kind !== 'local' && source.kind !== 'ssh') {
+    const primaryDescriptor = await ensureBackend(profile)
+
+    if (registrySourceOwnsPrimaryBackend(registry, id, primaryDescriptor)) {
+      return {
+        ...primaryDescriptor,
+        profile: profileKey,
+        connectionId: id
+      }
     }
   }
 
@@ -13059,7 +13221,12 @@ function createWindow() {
 }
 
 ipcMain.handle('hermes:connection', async (_event, profile) => {
-  const connection = await ensureBackend(profile)
+  // Coalesce concurrent renderer dials for one profile scope (#90812): the
+  // renderer-side reconnect lock is per-window, so two windows waking at once
+  // both land here. The claim key mirrors ensureBackend()'s own profile
+  // normalization so every spelling of the primary coalesces onto one dial.
+  const profileKey = profile && String(profile).trim() ? String(profile).trim() : primaryProfileKey()
+  const connection = await backendDialClaims.run(backendScopeKey(null, profileKey), () => ensureBackend(profile))
   const connectionId = resolvedConnectionId(readDesktopConnectionsRegistry(), connection)
 
   return connectionId ? { ...connection, connectionId } : connection
@@ -13073,7 +13240,10 @@ ipcMain.handle('hermes:connection:for', async (_event, payload) => {
   const { connectionId, profile } = payload && typeof payload === 'object' ? (payload as any) : ({} as any)
   const registry = readDesktopConnectionsRegistry()
   const id = String(connectionId || '').trim() || registry.primary
-  const connection = await ensureRegistryBackend(id, profile)
+  // Same single-owner claim as 'hermes:connection', keyed by the composite
+  // (connectionId, profile) scope (#90812): concurrent registry dials for one
+  // scope share the first spawn instead of bootstrapping duplicate remotes.
+  const connection = await backendDialClaims.run(backendScopeKey(id, profile), () => ensureRegistryBackend(id, profile))
 
   return { ...connection, connectionId: id, registryScoped: true }
 })
@@ -13164,6 +13334,50 @@ function revalidatePool() {
     stopBackend: stopPoolBackend,
     tracker: remoteLiveness
   })
+}
+
+// Re-dial one retired pool key through the SAME claim-guarded ensure path a
+// renderer dial takes (#90812), so a resume-driven rebuild and a concurrent
+// renderer reconnect coalesce onto one spawn instead of racing.
+function redialPoolBackendAfterResume(poolKey: string) {
+  const { connectionId, profile } = parseBackendScopeKey(poolKey)
+
+  return backendDialClaims.run(poolKey, () =>
+    connectionId ? ensureRegistryBackend(connectionId, profile) : ensureBackend(profile)
+  )
+}
+
+// Identity for coalescing post-resume sweeps in the shared revalidation
+// coordinator: overlapping resume/unlock/network-restore kicks join the one
+// in-flight sweep instead of stacking probes.
+const suspectPoolSweepScope = {}
+
+// Sleep/wake recovery for POOLED remote/SSH backends (#93910). The primary
+// renderer socket already has wake-path probe/reconnect nudges, but pooled
+// descriptors (Bots pane, secondary connections) kept serving dead SSH
+// tunnels after macOS resume: no child 'exit' fires for a remote, and the
+// background failure-streak policy takes several rounds to drop one. On
+// resume every pooled remote is suspect — probe each once (bounded), tear
+// down the dead ones (pool entry + SSH bootstrap + tunnel/master) and rebuild
+// them through the claim-guarded dial path.
+function revalidateSuspectPoolAfterResume() {
+  return remoteRevalidation.run(suspectPoolSweepScope, () =>
+    revalidateSuspectPooledRemoteBackends({
+      entries: backendPool.entries(),
+      log: rememberLog,
+      probe: (connection, path, options) => fetchJsonForBackend(connection, path, options),
+      rebuild: poolKey => redialPoolBackendAfterResume(poolKey),
+      retire: async poolKey => {
+        await stopPoolBackend(poolKey)
+        // The pool key doubles as the SSH scope for registry SSH backends and
+        // resolves through sshScopeKey() for bare-profile remotes; both
+        // teardown calls no-op when the scope holds no SSH state.
+        await sshBootstrapCoordinator.cancelAndWait(poolKey)
+        await teardownSshConnection(poolKey)
+      },
+      tracker: remoteLiveness
+    })
+  )
 }
 
 ipcMain.handle('hermes:backend:touch', async (_event, profile) => {
