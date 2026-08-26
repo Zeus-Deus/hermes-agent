@@ -5830,20 +5830,45 @@ async function findExistingCanonicalChat(owner) {
  *  `setup.runtime_check`). When false the intro turn is suppressed in BOTH
  *  cases above — a prompt against a target that cannot serve a model only
  *  produces a misleading failed-chat error — and the user is still landed in
- *  the pinned chat; the provider-setup notice is shown by the caller. */
-function createCanonicalChat(owner, { kickoff = false, ready = true } = {}) {
+ *  the pinned chat; the provider-setup notice is shown by the caller.
+ *
+ *  `openingStillCurrent` (click-path opens): a staleness probe consulted
+ *  before every navigation — when the user has already moved on (opened a
+ *  group, clicked another bot), the create still completes registry-side
+ *  but never steals the workspace (#89834 family). */
+function createCanonicalChat(owner, { kickoff = false, ready = true, openingStillCurrent = null } = {}) {
   const { bot, name, key, route } = botOwner(owner)
   const inflight = canonicalCreations.get(key)
 
   if (inflight) {
-    return inflight
+    if (!openingStillCurrent) {
+      return inflight.run
+    }
+
+    return inflight.run.then(async sid => {
+      if (sid && openingStillCurrent() && typeof host.openSession === 'function') {
+        await host.openSession(sid, {
+          ...(route ? { route } : {}),
+          profile: name,
+          intent: 'main',
+          keepAllProfilesScope: route ? true : false,
+          workspaceMode: 'bots',
+          workspaceOwnerKey: botWorkspaceOwnerKey(bot),
+          tabTitle: CANONICAL_CHAT_TITLE
+        })
+      }
+      return sid
+    })
   }
+
+  const flight = { run: null }
+  const canNavigate = () => !openingStillCurrent || openingStillCurrent()
 
   const run = (async () => {
     const existing = await findExistingCanonicalChat(owner)
 
     if (existing?.id) {
-      if (typeof host.openSession === 'function') {
+      if (typeof host.openSession === 'function' && canNavigate()) {
         // The exact-lookup gateway reports the compression-lineage tip as
         // resolved_id; open the tip, the registry row stays the identity.
         await openStoredBotChat(owner, existing.resolved_id || existing.id, existing)
@@ -5908,13 +5933,16 @@ function createCanonicalChat(owner, { kickoff = false, ready = true } = {}) {
     // an unmounted session left the intro reply invisible until reopen.
     let opened = false
 
-    if (sid && typeof host.openSession === 'function') {
+    if (sid && typeof host.openSession === 'function' && canNavigate()) {
       try {
         await host.openSession(sid, {
           ...(route ? { route } : {}),
           profile: name,
           intent: 'main',
-          keepAllProfilesScope: route ? true : false
+          keepAllProfilesScope: route ? true : false,
+          ...(openingStillCurrent
+            ? { workspaceMode: 'bots', workspaceOwnerKey: botWorkspaceOwnerKey(bot), tabTitle: CANONICAL_CHAT_TITLE }
+            : {})
         })
         opened = true
       } catch {
@@ -5939,19 +5967,22 @@ function createCanonicalChat(owner, { kickoff = false, ready = true } = {}) {
         try {
           await requestForBot(bot, 'prompt.submit', { session_id: runtime, text: 'Hey, tell me about yourself!' })
 
-          if (!opened && sid && typeof host.openSession === 'function') {
+          if (!opened && sid && typeof host.openSession === 'function' && canNavigate()) {
             await host.openSession(sid, {
               ...(route ? { route } : {}),
               profile: name,
               intent: 'main',
-              keepAllProfilesScope: route ? true : false
+              keepAllProfilesScope: route ? true : false,
+              ...(openingStillCurrent
+                ? { workspaceMode: 'bots', workspaceOwnerKey: botWorkspaceOwnerKey(bot), tabTitle: CANONICAL_CHAT_TITLE }
+                : {})
             })
           }
         } catch {
           // The chat already exists under the canonical title — the next click
           // finds it by name instead of making a second Bot Chat.
         }
-      } else if (!opened && sid && typeof host.openSession === 'function') {
+      } else if (!opened && sid && typeof host.openSession === 'function' && canNavigate()) {
         // No intro turn (titled row, or provider not ready): still finish
         // mounting the chat when the first open raced the (now titled) row.
         try {
@@ -5959,7 +5990,10 @@ function createCanonicalChat(owner, { kickoff = false, ready = true } = {}) {
             ...(route ? { route } : {}),
             profile: name,
             intent: 'main',
-            keepAllProfilesScope: route ? true : false
+            keepAllProfilesScope: route ? true : false,
+            ...(openingStillCurrent
+              ? { workspaceMode: 'bots', workspaceOwnerKey: botWorkspaceOwnerKey(bot), tabTitle: CANONICAL_CHAT_TITLE }
+              : {})
           })
         } catch {
           // Titled row, or a lazy row on an older gateway with the intro
@@ -5969,9 +6003,14 @@ function createCanonicalChat(owner, { kickoff = false, ready = true } = {}) {
     }
 
     return sid || null
-  })().finally(() => canonicalCreations.delete(key))
+  })().finally(() => {
+    if (canonicalCreations.get(key) === flight) {
+      canonicalCreations.delete(key)
+    }
+  })
 
-  canonicalCreations.set(key, run)
+  flight.run = run
+  canonicalCreations.set(key, flight)
 
   return run
 }
@@ -5984,10 +6023,13 @@ function createCanonicalChat(owner, { kickoff = false, ready = true } = {}) {
  *  anywhere in this path — remote bots included. The owner route rides
  *  every RPC (requestForBot) and the open (openStoredBotChat), so a remote
  *  bot's chat opens without re-homing Desktop's chrome. */
-async function openBotCanonicalChat(owner) {
+async function openBotCanonicalChat(owner, openingStillCurrent = null) {
   const existing = await findExistingCanonicalChat(owner)
 
   if (existing?.id && typeof host.openSession === 'function') {
+    if (openingStillCurrent && !openingStillCurrent()) {
+      return null
+    }
     const openedId = existing.resolved_id || existing.id
     await openStoredBotChat(owner, openedId, existing)
     // Both identities matter downstream: the durable registry row names the
@@ -5997,7 +6039,7 @@ async function openBotCanonicalChat(owner) {
     return { registryId: String(existing.id), openedId: String(openedId) }
   }
 
-  const created = await createCanonicalChat(owner)
+  const created = await createCanonicalChat(owner, { openingStillCurrent })
   return created ? { registryId: String(created), openedId: String(created) } : null
 }
 
@@ -6055,12 +6097,39 @@ async function openRosterBot(bot) {
   // has actually fronted a new owner; a failed home open must not steal the
   // center from a group the user was reading.
   const previousGroup = $groupChatWorkspace.get()
+  const previousGroupRef = previousGroup
+    ? { group: previousGroup, roomId: String($groupChats.get()[previousGroup]?.roomId || '') }
+    : null
 
   haptic('tap')
   saveSelectedRosterBot(bot)
   setBotsWorkspaceOwner(botWorkspaceOwnerKey(bot), bot)
 
-  $groupChatWorkspace.set(null)
+  const dismissedGroup = bot.remoteSource ? null : dismissGroupChatForLocalBotOpen()
+
+  if (!dismissedGroup) {
+    $groupChatWorkspace.set(null)
+  }
+
+  const restorePreviousGroup = () => {
+    if (!previousGroupRef || $groupChatWorkspace.get()) {
+      return
+    }
+
+    const restoreRef = dismissedGroup || previousGroupRef
+    const rooms = $groupChats.get()
+    const currentGroup = restoreRef.roomId
+      ? Object.keys(rooms).find(name => !rooms[name]?.tombstone && String(rooms[name]?.roomId || '') === restoreRef.roomId)
+      : liveGroupChatNames().includes(restoreRef.group)
+        ? restoreRef.group
+        : null
+
+    if (!currentGroup) {
+      return
+    }
+
+    openGroupChat(currentGroup)
+  }
 
   if ($botUnread.get()[key]) {
     const next = { ...$botUnread.get() }
@@ -6075,9 +6144,7 @@ async function openRosterBot(bot) {
   } catch (error) {
     if (generation === botOpenGeneration) {
       $openBotChat.set(null)
-      if (previousGroup && !$groupChatWorkspace.get()) {
-        $groupChatWorkspace.set(previousGroup)
-      }
+      restorePreviousGroup()
       syncBotsHomeWorkspace()
 
       notifyBotOpenFailure(error, bot, `Could not reach ${bot.connectionLabel || 'the gateway'}`)
@@ -6091,7 +6158,7 @@ async function openRosterBot(bot) {
   }
 
   try {
-    const opened = await openBotCanonicalChat(bot)
+    const opened = await openBotCanonicalChat(bot, () => generation === botOpenGeneration)
 
     if (generation !== botOpenGeneration) {
       return false
@@ -6117,9 +6184,7 @@ async function openRosterBot(bot) {
   } catch (error) {
     if (generation === botOpenGeneration) {
       $openBotChat.set(null)
-      if (previousGroup && !$groupChatWorkspace.get()) {
-        $groupChatWorkspace.set(previousGroup)
-      }
+      restorePreviousGroup()
       syncBotsHomeWorkspace()
 
       notifyBotOpenFailure(error, bot, `Could not open ${displayName(bot, meta)}'s chat — try again`)
@@ -6132,9 +6197,7 @@ async function openRosterBot(bot) {
   // do not navigate the current workspace or create a draft on the wrong owner.
   if (typeof host.newChat !== 'function') {
     $openBotChat.set(null)
-    if (previousGroup && !$groupChatWorkspace.get()) {
-      $groupChatWorkspace.set(previousGroup)
-    }
+    restorePreviousGroup()
     syncBotsHomeWorkspace()
     return false
   }
@@ -14250,6 +14313,21 @@ function releaseStaleOpenBotChat(focusedStoredId) {
   if (stale) {
     $openBotChat.set(null)
   }
+}
+
+/** Bot-open handoff: capture the selected group and retire its registered
+ * main tab (or clear the in-panel selection) before async source prep /
+ * canonical open. */
+function dismissGroupChatForLocalBotOpen() {
+  const group = $groupChatWorkspace.get()
+
+  if (!group) {
+    return null
+  }
+
+  const roomId = String($groupChats.get()[group]?.roomId || '')
+  closeGroupChatMainTab(group)
+  return { group, roomId }
 }
 
 /** Main-window wrapper: seats the member roster reactively (live roster +
