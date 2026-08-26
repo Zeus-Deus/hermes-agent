@@ -90,11 +90,6 @@ const ID = 'hermes-bots'
  *  opens and, on its rising edge, yields the center to the chat. */
 const BOTS_HOME_PANE_ID = `plugin-workspace:${ID}:home`
 const ROSTER_KEY = [ID, 'roster']
-// Bounded retries. `retry: true` keeps React Query in isLoading until the
-// first success, so a stalled profiles.list (live state.db write lock, SSH
-// flap) leaves the Bots sidebar on a spinner with no error card. The 5s
-// refetchInterval and the gateway-open effect already recover drops.
-const ROSTER_QUERY_RETRY = 2
 const ROUTINES_KEY = [ID, 'routines']
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
 const BOT_META_V1_KEY = 'bot-meta'
@@ -327,6 +322,20 @@ async function preflightProviderReadiness(request, profile) {
   }
 }
 
+/** Preflight and surface the one creation-side effect that belongs to an
+ *  unready backend. Keeping this orchestration outside the dialog makes the
+ *  ordering contract executable: readiness is checked before any first-chat
+ *  decision, and the bot is badged on its owning target. */
+async function prepareBotFirstChat({ request, profile, ownerKey, hostLabel }) {
+  const readiness = await preflightProviderReadiness(request, profile)
+
+  if (!readiness.ready) {
+    noteProviderSetupNeeded(ownerKey, hostLabel, readiness.reason)
+  }
+
+  return readiness
+}
+
 // Bot Mode sessions are ALWAYS hidden from the global Sessions sidebar:
 // canonical Bot Chats are plugin-owned forever-chats and group-chat member
 // sessions are room plumbing — neither is a scratch conversation, and a
@@ -449,6 +458,7 @@ function fallbackFocusedBotOwner(profile = $focusedBotProfile.get?.()) {
   }
 }
 
+const hasFocusedSessionOwnerSupport = Boolean(host.state.focusedSessionOwner)
 const $focusedBotOwner = host.state.focusedSessionOwner || {
   get: () => fallbackFocusedBotOwner(),
   listen: listener => {
@@ -3667,18 +3677,23 @@ async function mcpRpc(method, params, request = null) {
   }
 }
 
-// Probe whether the new lifecycle RPCs exist on this gateway (cached per session).
-let _mcpRpcSupported = null
-async function mcpSetupSupported() {
-  if (_mcpRpcSupported !== null) {
-    return _mcpRpcSupported
+// Probe lifecycle support on the owning gateway. Capability is connection
+// state, so cache it by the stable owner/connection key supplied by callers;
+// never let whichever gateway happened to be active answer for every bot.
+const _mcpRpcSupportedByOwner = new Map()
+async function mcpSetupSupported(request, ownerKey) {
+  const key = String(ownerKey || '').trim()
+  if (key && _mcpRpcSupportedByOwner.has(key)) {
+    return _mcpRpcSupportedByOwner.get(key)
   }
-  const r = await mcpRpc('mcp.servers.list', {})
-  _mcpRpcSupported = !(r.ok === false && r.unsupported)
-  return _mcpRpcSupported
+  const probe = mcpRpc('mcp.servers.list', {}, request).then(r => !(r.ok === false && r.unsupported))
+  if (key) {
+    _mcpRpcSupportedByOwner.set(key, probe)
+  }
+  return probe
 }
 
-function McpSetupButton({ profile, entry, onDone, ensureProfile, request }) {
+function McpSetupButton({ profile, entry, onDone, ensureProfile, request, supportScope }) {
   // entry: { name, requires:[env keys], auth?, fromCatalog, installed }
   // profile may be null at first (New Bot: the profile isn't created yet).
   // ensureProfile() lazily creates it on the first setup action and returns the
@@ -3715,7 +3730,7 @@ function McpSetupButton({ profile, entry, onDone, ensureProfile, request }) {
 
   useEffect(() => {
     let alive = true
-    mcpSetupSupported().then(ok => {
+    mcpSetupSupported(request, supportScope).then(ok => {
       if (alive) setSupported(ok)
     })
     return () => {
@@ -4703,7 +4718,9 @@ function useRoster() {
     },
     refetchInterval: 5000,
     staleTime: 5000,
-    retry: ROSTER_QUERY_RETRY,
+    // Remote (SSH) gateways connect slowly and drop on sleep/wake; keep
+    // retrying instead of latching a terminal error card.
+    retry: true,
     retryDelay: attempt => Math.min(15000, 1000 * 2 ** attempt)
   })
 }
@@ -5360,55 +5377,10 @@ async function requestForBot(bot, method, params = {}) {
       throw new Error(`Cannot route ${method} for ${route.connectionId}::${route.profile}`)
     }
 
-    try {
-      return await host.requestProfile(route, method, scopedBotParams(route, method, params))
-    } catch (error) {
-      // React 19 formats query errors with `(error.name || '').trim()`. IPC /
-      // JSON-RPC rejections are often plain objects whose `name` is a number,
-      // which crashes the Routines pane and hides the original failure (#94471).
-      throw asRpcError(error, `Gateway request ${method} failed`)
-    }
+    return host.requestProfile(route, method, scopedBotParams(route, method, params))
   }
 
-  try {
-    return await host.request(method, params)
-  } catch (error) {
-    throw asRpcError(error, `Gateway request ${method} failed`)
-  }
-}
-
-/** Coerce an IPC/JSON-RPC rejection into an Error with a string `name`.
- *
- *  React Query stores whatever the queryFn throws. React 19 then formats it
- *  with `(e.name || '').trim()`, which throws TypeError when `name` is a
- *  number (JSON-RPC codes) or another non-string — the Routines pane crash
- *  in #94471. Real Error instances are returned as-is when already safe.
- */
-function asRpcError(value, fallback) {
-  // Duck-type across realms (plugin tests run the source in `vm`, and IPC
-  // can deliver Error-like objects whose prototype is not this realm's
-  // Error). React 19 only needs a string `name`. Never mutate the rejection:
-  // frozen/sealed objects make `name = 'Error'` a silent no-op in sloppy
-  // mode, so a non-string name always becomes a fresh Error with cause.
-  const isObject = value != null && typeof value === 'object'
-  const name = isObject ? value.name : undefined
-  const message = isObject ? value.message : undefined
-  const hasStringName = typeof name === 'string'
-  const hasStringMessage = typeof message === 'string'
-  const hasStack = isObject && typeof value.stack === 'string'
-
-  if (isObject && hasStringName && (hasStack || hasStringMessage)) {
-    return value
-  }
-
-  if (isObject) {
-    const text = hasStringMessage && String(message).trim() ? String(message) : fallback
-    const error = new Error(text)
-    error.cause = value
-    return error
-  }
-
-  return new Error(value == null || value === '' ? fallback : String(value))
+  return host.request(method, params)
 }
 
 /** Stable per-member identity inside a group room. Local members keep their
@@ -8739,6 +8711,20 @@ function resolveCloneSource(cloneFrom, { remoteTarget = false, targetProfiles = 
   return Array.isArray(targetProfiles) && targetProfiles.includes(cloneFrom) ? cloneFrom : 'default'
 }
 
+/** Route every New Bot backend request through the selected create target.
+ *  The default/active target preserves the ambient request path. */
+function requestForCreateTarget(hostApi, { remoteTarget, targetConnection }, method, params = {}) {
+  if (!remoteTarget) {
+    return hostApi.request(method, params)
+  }
+
+  return hostApi.requestProfile(
+    { connectionId: targetConnection, mode: 'remote', profile: 'default', targetProfile: 'default' },
+    method,
+    params
+  )
+}
+
 function ModelPicker({
   bot = null,
   value,
@@ -8943,6 +8929,9 @@ function AdvancedProfileConfig({ bot, state, setState }) {
   const botRoute = resolveBotConnectionRoute(bot).route
   const backendProfile = botRoute?.targetProfile || botRoute?.profile || bot.name
   const backendScope = botBackendProfileScope(botRoute, bot.name)
+  const mcpSupportScope = botRoute
+    ? `owner:${botOwner(bot).key}`
+    : `connection:${String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || 'active')}`
   const inheritLabel = botInheritLabel(bot)
   // Every mutation from this editor rides the bot's OWN (connection, profile)
   // route; requestForBot rewrites `profile` to the backend name.
@@ -9225,6 +9214,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
                                       profile: bot.name,
                                       entry: m,
                                       request: requestForThisBot,
+                                      supportScope: mcpSupportScope,
                                       onDone: () => toggleMcp(m.name, true)
                                     })
                                   : null,
@@ -9850,13 +9840,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
   /** Gateway RPC on the create target: the picked connection's default
    *  backend for remote targets, the active gateway otherwise. */
   const requestForTarget = (method, params = {}) =>
-    remoteTarget
-      ? host.requestProfile(
-          { connectionId: targetConnection, mode: 'remote', profile: 'default', targetProfile: 'default' },
-          method,
-          params
-        )
-      : host.request(method, params)
+    requestForCreateTarget(host, { remoteTarget, targetConnection }, method, params)
 
   // Clone sources belong to the TARGET backend. For a remote target, list
   // that machine's profiles over the routed RPC (null while loading, [] when
@@ -9871,12 +9855,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
 
     let cancelled = false
 
-    host
-      .requestProfile(
-        { connectionId: targetConnection, mode: 'remote', profile: 'default', targetProfile: 'default' },
-        'profiles.list',
-        { include_sessions: false }
-      )
+    requestForTarget('profiles.list', { include_sessions: false })
       .then(res => {
         if (!cancelled) {
           setTargetProfiles(cloneSourcesFromProfileList(res))
@@ -10162,13 +10141,14 @@ function CreateAgentDialog({ open, onClose, roster }) {
       // init failed" and reads as a failed creation (#94071). Credentials are
       // never copied across machines — the target must be able to serve a
       // model itself.
-      const readiness = await preflightProviderReadiness(requestForTarget, slug)
+      const readiness = await prepareBotFirstChat({
+        request: requestForTarget,
+        profile: slug,
+        ownerKey,
+        hostLabel
+      })
       reset()
       onClose()
-
-      if (!readiness.ready) {
-        noteProviderSetupNeeded(ownerKey, hostLabel, readiness.reason)
-      }
 
       if (wasRemote) {
         // The bot lives on another machine: it appears in the roster via the
@@ -10643,6 +10623,9 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                                             entry: m,
                                                             ensureProfile: ensureAgentCreated,
                                                             request: requestForTarget,
+                                                            supportScope: remoteTarget
+                                                              ? `connection:${targetConnection}`
+                                                              : `connection:${activeConnectionId || 'active'}`,
                                                             onDone: () => {
                                                               // Setup done: mark installed so the row's
                                                               // checkbox un-disables, and enable it.
@@ -11446,7 +11429,7 @@ function CreateRoutineDialog({ bot, open, onClose }) {
               'Send results to',
               pickerSelect(target, setTarget, [
                 { id: 'history', label: 'Run history only' },
-                { id: 'bot-chat', label: `${displayName(typeof bot === 'string' ? { name: bot } : bot, botRosterMeta(bot, $botMeta.get()))}\u2019s chat (bot responds)` }
+                { id: 'bot-chat', label: `${displayName({ name: bot }, $botMeta.get()[bot])}\u2019s chat (bot responds)` }
               ])
             ),
             jsxs('label', {
@@ -11519,38 +11502,29 @@ function bindProfileSync(ownerStore) {
 }
 
 function resolveRoutineOwner(roster, focusedOwner, selected) {
-  // A null focused owner is NOT a failure: the SDK fails closed to null
-  // whenever the focused session has no unique bot owner (a normal chat,
-  // ambiguous owner hints) — the common case while the user browses the
-  // Bots pane. Fall through to the roster-clicked bot (the previously
-  // working scope) instead of dead-ending the pane on the unavailable
-  // placeholder for every agent (#94516).
-  const selectedBot = roster.find(bot => botSelectionKey(bot) === selected)
+  if (hasFocusedSessionOwnerSupport && !focusedOwner) {
+    return null
+  }
+
   const focusedBot = focusedOwner
     ? roster.find(bot => isActiveRosterBot(bot, focusedOwner))
     : null
 
   if (focusedOwner?.authoritative) {
-    // An authoritative focused owner wins, but only through its exact roster
-    // row. If that row is absent, fail closed instead of routing cron
-    // reads/mutations through a stale selection or an unscoped profile name.
     return focusedBot || null
   }
 
+  const selectedBot = roster.find(bot => botSelectionKey(bot) === selected)
   return focusedBot || selectedBot || (focusedOwner ? { name: focusedOwner.name } : null)
 }
 
 function RoutinesPane() {
   const selected = useValue($selectedBot)
   const focusedOwner = focusedRosterOwner(useValue($focusedBotOwner))
-  // Subscribe instead of a bare read: BotsHomeView owns the roster fetch and
-  // can hydrate (or replace) rows after this pane mounted, so a .get()
-  // snapshot captured while the roster was still empty pinned the pane on
-  // "unavailable" until some unrelated atom happened to re-render it (#94483).
-  // A complete focused owner is still authoritative. If its exact roster row
-  // is absent, fail closed rather than routing cron reads/mutations through a
+  // A complete focused owner is authoritative. If its exact roster row is
+  // absent, fail closed instead of routing cron reads/mutations through a
   // stale selection or an unscoped profile name.
-  const owner = resolveRoutineOwner(useValue($lastRoster), focusedOwner, selected)
+  const owner = resolveRoutineOwner($lastRoster.get(), focusedOwner, selected)
   const bot = String(owner?.name || focusedOwner?.name || 'default').trim() || 'default'
   const allMeta = useValue($botMeta)
   const meta = owner ? botRosterMeta(owner, allMeta) : null
