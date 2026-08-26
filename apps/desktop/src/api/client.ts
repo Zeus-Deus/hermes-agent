@@ -113,10 +113,15 @@ export function hermesApi<T>(request: HermesApiRequest): Promise<T> {
 //     connection tag (connectionScoped, same contract the cron helpers adopted
 //     in #87882). Without the tag, a window activated onto a registered remote
 //     gateway read the LOCAL pool's skills/tools/MCP — the wrong machine.
-//   - `{ connectionId, profile }` → explicit pin. `''`/`'local'` connection
-//     ids mean the local pool and deliberately DROP the ambient connection
-//     tag, so a local-profile pick made while a remote gateway is active still
-//     routes to the local machine.
+//   - `{ connectionId, profile }` → explicit pin. A `'local'` connection id
+//     means THIS machine and is emitted verbatim: the main process keeps an
+//     explicit `local` registry-pinned (hermes:api's registry branch spawns a
+//     forced-local child when the v1 route is remote), which is the only way
+//     a local-profile pick made while a remote gateway is active reaches the
+//     local machine. Dropping it left the request on the legacy profile
+//     route, which follows the ACTIVE remote — so a "This device" bot's
+//     skills/tools/MCP 404'd there with "Profile 'x' does not exist" (#94071).
+//     An empty id keeps the ambient-free legacy route (no pin at all).
 export type ProfileScope = undefined | null | string | { connectionId?: null | string; profile?: null | string }
 
 export function capabilityScoped(scope?: ProfileScope): { connectionId?: string; profile?: string } {
@@ -126,22 +131,28 @@ export function capabilityScoped(scope?: ProfileScope): { connectionId?: string;
 
     return {
       ...(profile ? { profile } : {}),
-      ...(connectionId && connectionId !== 'local' ? { connectionId } : {})
+      ...(connectionId ? { connectionId } : {})
     }
   }
 
   return { ...profileScoped(scope), ...connectionScoped() }
 }
 
-/** Stable cache-key for a capability scope: `profile` for the local/legacy
- *  path, `connectionId::profile` for an explicit remote pin. Mirrors
- *  normalizeProfileKey for plain strings so existing keys stay byte-identical. */
+/** Stable cache-key for a capability scope: `profile` for the legacy path
+ *  (string scope / empty connection id), `connectionId::profile` for ANY
+ *  explicit pin — `'local'` included. capabilityScoped routes an explicit
+ *  `'local'` pin to THIS machine while the legacy path follows the active
+ *  gateway, so the two must never share a cache row: with a remote gateway
+ *  active, a "This device" bot's editor would otherwise read (and write) the
+ *  remote same-named profile's skills/toolsets/config from the query cache
+ *  (#94071). Mirrors normalizeProfileKey for plain strings so existing keys
+ *  stay byte-identical. */
 export function profileScopeKey(scope?: ProfileScope): string {
   if (scope && typeof scope === 'object') {
     const profile = (scope.profile ?? '').trim() || 'default'
     const connectionId = (scope.connectionId ?? '').trim()
 
-    return connectionId && connectionId !== 'local' ? `${connectionId}::${profile}` : profile
+    return connectionId ? `${connectionId}::${profile}` : profile
   }
 
   return (scope ?? '').trim() || 'default'

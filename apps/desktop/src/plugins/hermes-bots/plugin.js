@@ -231,7 +231,11 @@ function attentionReasonFromError(errorTextOrReason) {
     return null
   }
 
-  if (/no llm provider|no access token|not configured|no api key|missing api key/.test(text)) {
+  if (
+    /no (?:llm|hermes|inference) provider|no usable credentials|no access token|not configured|no api key|missing api key/.test(
+      text
+    )
+  ) {
     return 'missing_config'
   }
 
@@ -284,6 +288,58 @@ function clearBotAttention(key) {
 
 /** Last good cron list, same idea as the roster snapshot. */
 const $lastJobs = atom([])
+
+/** A bot was created on a backend that cannot serve a model yet (#94071):
+ *  badge it as missing_config and tell the user WHERE to fix it — the bot's
+ *  own machine, never the window's active gateway. The creation itself is
+ *  kept; only the automatic first turn is withheld. */
+function noteProviderSetupNeeded(key, hostLabel, reason) {
+  const detail = String(reason || 'No inference provider is configured.').trim()
+
+  noteBotAttention(key, 'missing_config')
+  host.notify({
+    kind: 'info',
+    message: `Configure a model on ${hostLabel} before this bot's first chat — ${detail} Use the bot's editor (Model) or run \`hermes model\` on ${hostLabel}.`
+  })
+}
+
+/** Provider readiness for a profile on a backend WITHOUT starting a turn:
+ *  setup.runtime_check runs the same resolve_runtime_provider() the agent
+ *  uses at session build. `profile` scopes the check to that profile's home
+ *  on the backend (newer gateways; older ones answer for their launch
+ *  profile, whose credentials a new bot mirrors). Fail-open: a gateway that
+ *  predates the RPC, or a transport blip, reads as ready so the intro turn
+ *  still runs there and reports its own error. */
+async function preflightProviderReadiness(request, profile) {
+  try {
+    const result = await request('setup.runtime_check', { profile })
+
+    if (result && result.ok === false) {
+      return {
+        ready: false,
+        reason: String(result.error || 'No inference provider is configured.').trim()
+      }
+    }
+
+    return { ready: true, reason: null }
+  } catch {
+    return { ready: true, reason: null }
+  }
+}
+
+/** Preflight and surface the one creation-side effect that belongs to an
+ *  unready backend. Keeping this orchestration outside the dialog makes the
+ *  ordering contract executable: readiness is checked before any first-chat
+ *  decision, and the bot is badged on its owning target. */
+async function prepareBotFirstChat({ request, profile, ownerKey, hostLabel }) {
+  const readiness = await preflightProviderReadiness(request, profile)
+
+  if (!readiness.ready) {
+    noteProviderSetupNeeded(ownerKey, hostLabel, readiness.reason)
+  }
+
+  return readiness
+}
 
 // Bot Mode sessions are ALWAYS hidden from the global Sessions sidebar:
 // canonical Bot Chats are plugin-owned forever-chats and group-chat member
@@ -3685,11 +3741,16 @@ function BotFace({ shape, color, image, size = 36, name = 'agent', mood = 'idle'
 // and the row falls back to the "run hermes mcp / Settings" hint. profile is
 // the target bot's profile name (its config is what we write).
 
-async function mcpRpc(method, params) {
+async function mcpRpc(method, params, request = null) {
   // Returns { ok, result } or { ok:false, unsupported:true } when the gateway
-  // doesn't know the method (older backend) vs a real error.
+  // doesn't know the method (older backend) vs a real error. `request` routes
+  // the call to the bot's OWNING backend (requestForBot / the create target);
+  // without it the active gateway answers — wrong for a bot that lives on
+  // another connection (its profile does not exist here → 404, #94071).
+  const send = typeof request === 'function' ? request : (m, p) => host.request(m, p)
+
   try {
-    const res = await host.request(method, params)
+    const res = await send(method, params)
     return { ok: true, result: res }
   } catch (err) {
     const msg = String((err && err.message) || err || '')
@@ -3700,18 +3761,23 @@ async function mcpRpc(method, params) {
   }
 }
 
-// Probe whether the new lifecycle RPCs exist on this gateway (cached per session).
-let _mcpRpcSupported = null
-async function mcpSetupSupported() {
-  if (_mcpRpcSupported !== null) {
-    return _mcpRpcSupported
+// Probe lifecycle support on the owning gateway. Capability is connection
+// state, so cache it by the stable owner/connection key supplied by callers;
+// never let whichever gateway happened to be active answer for every bot.
+const _mcpRpcSupportedByOwner = new Map()
+async function mcpSetupSupported(request, ownerKey) {
+  const key = String(ownerKey || '').trim()
+  if (key && _mcpRpcSupportedByOwner.has(key)) {
+    return _mcpRpcSupportedByOwner.get(key)
   }
-  const r = await mcpRpc('mcp.servers.list', {})
-  _mcpRpcSupported = !(r.ok === false && r.unsupported)
-  return _mcpRpcSupported
+  const probe = mcpRpc('mcp.servers.list', {}, request).then(r => !(r.ok === false && r.unsupported))
+  if (key) {
+    _mcpRpcSupportedByOwner.set(key, probe)
+  }
+  return probe
 }
 
-function McpSetupButton({ profile, entry, onDone, ensureProfile }) {
+function McpSetupButton({ profile, entry, onDone, ensureProfile, request, supportScope }) {
   // entry: { name, requires:[env keys], auth?, fromCatalog, installed }
   // profile may be null at first (New Bot: the profile isn't created yet).
   // ensureProfile() lazily creates it on the first setup action and returns the
@@ -3722,6 +3788,8 @@ function McpSetupButton({ profile, entry, onDone, ensureProfile }) {
   const [message, setMessage] = useState('')
   const pollRef = useRef(null)
   const profileRef = useRef(profile || null)
+  // Every lifecycle RPC rides the owning backend's route (see mcpRpc).
+  const rpc = (method, params) => mcpRpc(method, params, request)
 
   useEffect(() => {
     if (profile) {
@@ -3746,7 +3814,7 @@ function McpSetupButton({ profile, entry, onDone, ensureProfile }) {
 
   useEffect(() => {
     let alive = true
-    mcpSetupSupported().then(ok => {
+    mcpSetupSupported(request, supportScope).then(ok => {
       if (alive) setSupported(ok)
     })
     return () => {
@@ -3771,7 +3839,7 @@ function McpSetupButton({ profile, entry, onDone, ensureProfile }) {
       return
     }
     if (entry.fromCatalog && !entry.installed) {
-      const add = await mcpRpc('mcp.servers.add', { profile, name: entry.name, preset: entry.name })
+      const add = await rpc('mcp.servers.add', { profile, name: entry.name, preset: entry.name })
       if (!add.ok) {
         setPhase('error')
         setMessage(add.error || 'Could not add server')
@@ -3794,7 +3862,7 @@ function McpSetupButton({ profile, entry, onDone, ensureProfile }) {
       if (!val) {
         continue
       }
-      const r = await mcpRpc('mcp.servers.set_api_key', { profile, name: entry.name, env_var: k, value: val })
+      const r = await rpc('mcp.servers.set_api_key', { profile, name: entry.name, env_var: k, value: val })
       if (!r.ok) {
         setPhase('error')
         setMessage(r.error || ('Failed to set ' + k))
@@ -3802,7 +3870,7 @@ function McpSetupButton({ profile, entry, onDone, ensureProfile }) {
       }
     }
     // Verify via test.
-    const t = await mcpRpc('mcp.servers.test', { profile, name: entry.name })
+    const t = await rpc('mcp.servers.test', { profile, name: entry.name })
     if (t.ok && t.result && (t.result.ok || (t.result.result && t.result.result.ok))) {
       setPhase('done')
       host.notify({ kind: 'success', message: entry.name + ' configured' })
@@ -3829,14 +3897,14 @@ function McpSetupButton({ profile, entry, onDone, ensureProfile }) {
       return
     }
     if (entry.fromCatalog && !entry.installed) {
-      const add = await mcpRpc('mcp.servers.add', { profile, name: entry.name, preset: entry.name })
+      const add = await rpc('mcp.servers.add', { profile, name: entry.name, preset: entry.name })
       if (!add.ok) {
         setPhase('error')
         setMessage(add.error || 'Could not add server')
         return
       }
     }
-    const start = await mcpRpc('mcp.servers.oauth.start', { profile, name: entry.name })
+    const start = await rpc('mcp.servers.oauth.start', { profile, name: entry.name })
     const payload = start.result && (start.result.result || start.result)
     const authUrl = payload && (payload.auth_url || payload.verification_url)
     const sessionId = payload && payload.session_id
@@ -3860,7 +3928,7 @@ function McpSetupButton({ profile, entry, onDone, ensureProfile }) {
     setPhase('oauth')
     setMessage('Complete sign-in in your browser...')
     pollRef.current = setInterval(async () => {
-      const poll = await mcpRpc('mcp.servers.oauth.poll', { profile, name: entry.name, session_id: sessionId })
+      const poll = await rpc('mcp.servers.oauth.poll', { profile, name: entry.name, session_id: sessionId })
       const pd = poll.result && (poll.result.result || poll.result)
       const status = pd && pd.status
       if (status === 'approved') {
@@ -5748,8 +5816,14 @@ async function findExistingCanonicalChat(owner) {
  *  persistence job is done by the eager session.title write below on modern
  *  gateways; older gateways that reject the eager write keep a narrow
  *  compat kickoff, else the pruner reaps the empty lazy session and the
- *  chat never survives its own creation. */
-function createCanonicalChat(owner, { kickoff = false } = {}) {
+ *  chat never survives its own creation.
+ *
+ *  `ready` (default true): the target's provider preflight (#94071,
+ *  `setup.runtime_check`). When false the intro turn is suppressed in BOTH
+ *  cases above — a prompt against a target that cannot serve a model only
+ *  produces a misleading failed-chat error — and the user is still landed in
+ *  the pinned chat; the provider-setup notice is shown by the caller. */
+function createCanonicalChat(owner, { kickoff = false, ready = true } = {}) {
   const { bot, name, key, route } = botOwner(owner)
   const inflight = canonicalCreations.get(key)
 
@@ -5827,8 +5901,10 @@ function createCanonicalChat(owner, { kickoff = false } = {}) {
       // COMPAT persistence write when the eager title failed — an old gateway
       // prunes the zero-message lazy session, so without some first prompt
       // the chat never survives its own creation. A titled row needs neither:
-      // the user speaks first.
-      const submitIntro = kickoff || !titled
+      // the user speaks first. Either way, never against a target whose
+      // provider preflight failed (`ready === false`, #94071): the turn
+      // cannot be served and would only surface as a failed-chat error.
+      const submitIntro = ready && (kickoff || !titled)
 
       if (submitIntro) {
         await new Promise(resolve => window.setTimeout(resolve, 400))
@@ -5849,8 +5925,8 @@ function createCanonicalChat(owner, { kickoff = false } = {}) {
           // finds it by name instead of making a second Bot Chat.
         }
       } else if (!opened && sid && typeof host.openSession === 'function') {
-        // No intro turn: still finish mounting the chat when the first open
-        // raced the (now titled) row.
+        // No intro turn (titled row, or provider not ready): still finish
+        // mounting the chat when the first open raced the (now titled) row.
         try {
           await host.openSession(sid, {
             ...(route ? { route } : {}),
@@ -5859,7 +5935,8 @@ function createCanonicalChat(owner, { kickoff = false } = {}) {
             keepAllProfilesScope: route ? true : false
           })
         } catch {
-          /* row is titled and persistent — the next click opens it by name */
+          // Titled row, or a lazy row on an older gateway with the intro
+          // suppressed — the next click finds it by name.
         }
       }
     }
@@ -8755,7 +8832,62 @@ function useModelOptions(bot = null) {
  * same data the core model picker shows. `value = {provider, model}`;
  * onChange receives the merged patch.
  */
-function ModelPicker({ bot = null, value, onChange, placeholderModel = 'gateway default' }) {
+/** "Inherit" means the launch/default profile of the bot's OWNING backend —
+ *  name that machine so a multi-connection roster never reads as inheriting
+ *  from whatever gateway the window is on. */
+function botInheritLabel(bot) {
+  const label = String(bot?.connectionLabel || '').trim()
+
+  return label ? `Inherit from default on ${label}` : 'Inherit (launch profile)'
+}
+
+/** Clone-source names from a profiles.list reply (either the {profiles}
+ *  envelope or a bare array). `default` always leads: every backend has it,
+ *  and it is the picker's fallback when a pick does not exist there. */
+function cloneSourcesFromProfileList(res) {
+  const rows = Array.isArray(res?.profiles) ? res.profiles : Array.isArray(res) ? res : []
+  const names = rows.map(row => String(row?.name || '').trim()).filter(Boolean)
+
+  return ['default', ...names.filter(name => name !== 'default')]
+}
+
+/** clone_from for profiles.create: null = fresh profile. A remote pick must
+ *  name a profile of the TARGET backend — the picker's roster is the local
+ *  one — so anything not in that machine's list (or an unloaded list) falls
+ *  back to its default rather than a name the remote box doesn't have. */
+function resolveCloneSource(cloneFrom, { remoteTarget = false, targetProfiles = null } = {}) {
+  if (cloneFrom === '__none__') {
+    return null
+  }
+
+  if (!remoteTarget) {
+    return cloneFrom
+  }
+
+  return Array.isArray(targetProfiles) && targetProfiles.includes(cloneFrom) ? cloneFrom : 'default'
+}
+
+/** Route every New Bot backend request through the selected create target.
+ *  The default/active target preserves the ambient request path. */
+function requestForCreateTarget(hostApi, { remoteTarget, targetConnection }, method, params = {}) {
+  if (!remoteTarget) {
+    return hostApi.request(method, params)
+  }
+
+  return hostApi.requestProfile(
+    { connectionId: targetConnection, mode: 'remote', profile: 'default', targetProfile: 'default' },
+    method,
+    params
+  )
+}
+
+function ModelPicker({
+  bot = null,
+  value,
+  onChange,
+  placeholderModel = 'gateway default',
+  inheritLabel = 'Inherit (launch profile)'
+}) {
   const { data, isLoading, error } = useModelOptions(bot)
 
   // Hooks are ALWAYS declared up front, before any conditional return.
@@ -8868,7 +9000,7 @@ function ModelPicker({ bot = null, value, onChange, placeholderModel = 'gateway 
             jsx(SelectTrigger, { className: 'h-8 rounded-md', children: jsx(SelectValue, {}) }),
             jsxs(SelectContent, {
               children: [
-                jsx(SelectItem, { value: NONE, children: 'Inherit (launch profile)' }),
+                jsx(SelectItem, { value: NONE, children: inheritLabel }),
                 ...providers.map(p =>
                   jsx(
                     SelectItem,
@@ -8953,6 +9085,13 @@ function AdvancedProfileConfig({ bot, state, setState }) {
   const botRoute = resolveBotConnectionRoute(bot).route
   const backendProfile = botRoute?.targetProfile || botRoute?.profile || bot.name
   const backendScope = botBackendProfileScope(botRoute, bot.name)
+  const mcpSupportScope = botRoute
+    ? `owner:${botOwner(bot).key}`
+    : `connection:${String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || 'active')}`
+  const inheritLabel = botInheritLabel(bot)
+  // Every mutation from this editor rides the bot's OWN (connection, profile)
+  // route; requestForBot rewrites `profile` to the backend name.
+  const requestForThisBot = (method, params) => requestForBot(bot, method, params)
 
   if (!loaded) {
     setLoaded(true)
@@ -9046,6 +9185,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
       children: [
         jsx(ModelPicker, {
           bot,
+          inheritLabel,
           value: { provider: state.provider, model: state.model },
           onChange: patch => setState(prev => ({ ...prev, dirtyModel: true, ...patch }))
         }),
@@ -9079,6 +9219,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
       children: [
         jsx(ModelPicker, {
           bot,
+          inheritLabel,
           value: { provider: state.provider, model: state.model },
           onChange: patch => setState(prev => ({ ...prev, dirtyModel: true, ...patch }))
         }),
@@ -9103,6 +9244,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
     children: [
       jsx(ModelPicker, {
         bot,
+        inheritLabel,
         value: { provider: state.provider, model: state.model },
         onChange: patch => setState(prev => ({ ...prev, dirtyModel: true, ...patch }))
       }),
@@ -9123,7 +9265,8 @@ function AdvancedProfileConfig({ bot, state, setState }) {
               children: jsx(CheckList, { items: visibleSkills, onToggle: toggleSkill, columns: 2 })
             }),
             jsx(HubSkillsSection, {
-              forProfile: backendScope,
+              forProfile: bot.name,
+              request: requestForThisBot,
               onInstalled: name =>
                 setState(prev =>
                   prev.skills.some(s => s.name === name)
@@ -9224,8 +9367,10 @@ function AdvancedProfileConfig({ bot, state, setState }) {
                                   : null,
                                 needsSetup
                                   ? jsx(McpSetupButton, {
-                                      profile: backendScope,
+                                      profile: bot.name,
                                       entry: m,
+                                      request: requestForThisBot,
+                                      supportScope: mcpSupportScope,
                                       onDone: () => toggleMcp(m.name, true)
                                     })
                                   : null,
@@ -9268,7 +9413,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
 const HUB_ORIGIN = 'https://hermes-agent.nousresearch.com'
 const HUB_PICKER_URL = HUB_ORIGIN + '/docs/skills?embed=picker'
 
-function HubSkillsSection({ forProfile, onInstalled }) {
+function HubSkillsSection({ forProfile, onInstalled, request }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState(null)
   const [searching, setSearching] = useState(false)
@@ -9277,6 +9422,10 @@ function HubSkillsSection({ forProfile, onInstalled }) {
   const [browseHub, setBrowseHub] = useState(false)
   const installRef = useRef(null)
   const frameRef = useRef(null)
+  // Search + install ride the OWNING backend (an edited bot's connection, or
+  // the create target) via `request`; without it the active gateway answers,
+  // which is the wrong machine for a bot that lives elsewhere (#94071).
+  const send = typeof request === 'function' ? request : (method, params) => host.request(method, params)
 
   // Picker messages from the embedded hub page. Origin- AND source-checked —
   // only OUR frame may ask for an install (the hub origin alone would let any
@@ -9331,7 +9480,7 @@ function HubSkillsSection({ forProfile, onInstalled }) {
     setResults(null)
 
     try {
-      const res = await host.request('skills.manage', { action: 'search', query: q })
+      const res = await send('skills.manage', { action: 'search', query: q })
       setResults(res.results || [])
     } catch {
       setResults([])
@@ -9353,7 +9502,7 @@ function HubSkillsSection({ forProfile, onInstalled }) {
       // With forProfile the install lands in that bot's skills dir
       // (gateway skills.manage profile scoping); null = launch profile,
       // which is right at create time — the new bot clones/copies from it.
-      await host.request('skills.manage', {
+      await send('skills.manage', {
         action: 'install',
         query: name,
         ...(forProfile ? { profile: forProfile } : {})
@@ -9847,13 +9996,50 @@ function CreateAgentDialog({ open, onClose, roster }) {
   /** Gateway RPC on the create target: the picked connection's default
    *  backend for remote targets, the active gateway otherwise. */
   const requestForTarget = (method, params = {}) =>
-    remoteTarget
-      ? host.requestProfile(
-          { connectionId: targetConnection, mode: 'remote', profile: 'default', targetProfile: 'default' },
-          method,
-          params
-        )
-      : host.request(method, params)
+    requestForCreateTarget(host, { remoteTarget, targetConnection }, method, params)
+
+  // Clone sources belong to the TARGET backend. For a remote target, list
+  // that machine's profiles over the routed RPC (null while loading, [] when
+  // the listing failed) so the picker offers the same origin choices as a
+  // local create — fresh, or a clone of any profile that exists THERE.
+  const [targetProfiles, setTargetProfiles] = useState(null)
+
+  useEffect(() => {
+    if (!open || !remoteTarget) {
+      return undefined
+    }
+
+    let cancelled = false
+
+    requestForTarget('profiles.list', { include_sessions: false })
+      .then(res => {
+        if (!cancelled) {
+          setTargetProfiles(cloneSourcesFromProfileList(res))
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setTargetProfiles([])
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [open, remoteTarget, targetConnection])
+
+  const cloneChoices = remoteTarget
+    ? Array.isArray(targetProfiles) && targetProfiles.length
+      ? targetProfiles
+      : ['default']
+    : roster.map(b => b.name)
+  const cloneSource = resolveCloneSource(cloneFrom, { remoteTarget, targetProfiles })
+  // The machine whose default profile the new bot shares credentials with
+  // and inherits its model from — always the CREATE TARGET, never the
+  // window's active gateway.
+  const credentialHostLabel = remoteTarget
+    ? targetLabel
+    : (connections || []).find(c => c.id === (activeConnectionId || 'local'))?.label || 'this device'
 
   // Set once ensureAgentCreated() materializes the profile for the live
   // Capabilities tab (SkillsView needs a real backend to point at). State —
@@ -9924,6 +10110,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
     setDirtyCaps({ skills: false, toolsets: false, mcp: false })
     setCapFilter('')
     setTargetConnection('')
+    setTargetProfiles(null)
     setBusy(false)
     setError(null)
     createdRef.current = null
@@ -9932,14 +10119,14 @@ function CreateAgentDialog({ open, onClose, roster }) {
 
   // Capability catalog for the tabs: the profile doesn't exist yet, so show
   // what it WILL have — the clone source's catalog, else the main profile's.
-  const capSource = cloneFrom === '__none__' ? 'default' : cloneFrom
+  const capSource = cloneSource || 'default'
   const ensureCaps = () => {
     if ((caps && caps.source === capSource) || capsFailed) {
       return
     }
 
     Promise.all([
-      requestForTarget('profiles.describe', { name: remoteTarget ? 'default' : capSource }),
+      requestForTarget('profiles.describe', { name: capSource }),
       requestForTarget('mcp.catalog', {}).catch(() => null)
     ])
       .then(([res, cat]) => {
@@ -10007,11 +10194,11 @@ function CreateAgentDialog({ open, onClose, roster }) {
       await requestForTarget('profiles.create', {
         name: slug,
         description: descriptionText,
-        // Clone sources are profiles of the TARGET backend. The picker's
-        // roster is the local one, so a remote create always starts from the
-        // remote machine's default (or fresh) — never a local profile name
-        // the remote box doesn't have.
-        clone_from: cloneFrom === '__none__' ? null : remoteTarget ? 'default' : cloneFrom,
+        // Clone sources are profiles of the TARGET backend: a remote pick is
+        // validated against that machine's own list (resolveCloneSource) —
+        // never a local profile name the remote box doesn't have. null =
+        // fresh profile, exactly as for a local create.
+        clone_from: cloneSource,
         no_skills: noSkills,
         // Shared (not copied) auth keeps ONE OAuth/token pool with the main
         // profile, so refreshes can't invalidate each other. Older gateways
@@ -10103,6 +10290,19 @@ function CreateAgentDialog({ open, onClose, roster }) {
           : `Bot "${displayName({ name: slug, title })}" created`
       })
       const wasRemote = remoteTarget
+      const ownerKey = botRosterKey({ name: slug, connectionId: wasRemote ? targetConnection : activeConnectionId })
+      const hostLabel = credentialHostLabel
+      // Provider readiness on the CREATE TARGET before any automatic turn:
+      // the bot exists either way, but a doomed intro surfaces as "agent
+      // init failed" and reads as a failed creation (#94071). Credentials are
+      // never copied across machines — the target must be able to serve a
+      // model itself.
+      const readiness = await prepareBotFirstChat({
+        request: requestForTarget,
+        profile: slug,
+        ownerKey,
+        hostLabel
+      })
       reset()
       onClose()
 
@@ -10122,8 +10322,10 @@ function CreateAgentDialog({ open, onClose, roster }) {
         // Creates, pins, opens, and kicks off the intro in one flow. This is
         // the ONE caller allowed to request the intro turn — genuine New
         // Agent creation. Click-path resolution (openBotCanonicalChat) mints
-        // silently so a resolution miss never burns a turn (ScottFive).
-        const sid = await createCanonicalChat(slug, { kickoff: true })
+        // silently so a resolution miss never burns a turn (ScottFive). The
+        // intro is still withheld when the target cannot serve a model yet
+        // (`ready`, #94071 provider preflight).
+        const sid = await createCanonicalChat(slug, { kickoff: true, ready: readiness.ready })
 
         if (!sid && typeof host.newChat === 'function') {
           host.newChat(slug)
@@ -10210,6 +10412,10 @@ function CreateAgentDialog({ open, onClose, roster }) {
                     value: targetConnection || activeConnectionId || 'local',
                     onValueChange: value => {
                       setTargetConnection(value === (activeConnectionId || 'local') ? '' : value)
+                      // A clone pick names a profile of the OLD target; start the
+                      // new one from its default until its list arrives.
+                      setCloneFrom('default')
+                      setTargetProfiles(null)
                       // The capability catalog and clone list belong to the
                       // target backend — refetch for the new home. The live
                       // Capabilities tab re-pins to it via fixedConnection on
@@ -10346,8 +10552,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                             labeled(
                               remoteTarget ? `Clone from profile (on ${targetLabel})` : 'Clone from profile',
                               jsxs(Select, {
-                                disabled: remoteTarget,
-                                value: remoteTarget ? 'default' : cloneFrom,
+                                value: remoteTarget ? cloneSource || '__none__' : cloneFrom,
                                 onValueChange: value => {
                                   setCloneFrom(value)
                                   setCaps(null)
@@ -10364,13 +10569,20 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                         value: '__none__',
                                         children: 'Fresh profile (bundled skills)'
                                       }),
-                                      ...roster.map(b => jsx(SelectItem, { value: b.name, children: b.name }, b.name))
+                                      ...cloneChoices.map(name => jsx(SelectItem, { value: name, children: name }, name))
                                     ]
                                   })
                                 ]
                               })
                             ),
+                            remoteTarget && Array.isArray(targetProfiles) && !targetProfiles.length
+                              ? jsx('div', {
+                                  className: 'text-[0.7rem] leading-5 text-(--ui-text-tertiary)',
+                                  children: `Could not list profiles on ${targetLabel} — clone sources fall back to its default profile.`
+                                })
+                              : null,
                             jsx(ModelPicker, {
+                              inheritLabel: `Inherit from default on ${credentialHostLabel}`,
                               value: { provider, model },
                               onChange: patch => {
                                 if ('provider' in patch) {
@@ -10380,7 +10592,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                   setModel(patch.model)
                                 }
                               },
-                              placeholderModel: 'inherited from launch profile'
+                              placeholderModel: `inherited from default on ${credentialHostLabel}`
                             }),
                             labeled(
                               'SOUL.md (optional — replaces the generated persona)',
@@ -10399,13 +10611,12 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                   checked: shareAuth,
                                   onCheckedChange: value => setShareAuth(Boolean(value))
                                 }),
-                                'Share keys & accounts with the main profile'
+                                `Share keys & accounts with the default profile on ${credentialHostLabel}`
                               ]
                             }),
                             jsx('div', {
                               className: 'pl-6 pt-0.5 text-[0.7rem] leading-5 text-(--ui-text-tertiary)',
-                              children:
-                                'Subscriptions, OAuth logins, and API keys stay shared (not copied), so token refreshes never invalidate each other. Uncheck for an isolated snapshot copy.'
+                              children: `Scoped to ${credentialHostLabel}: subscriptions, OAuth logins, and API keys stay shared (not copied) with that machine's default profile, so token refreshes never invalidate each other. Credentials are never copied between machines. Uncheck for an isolated snapshot copy there.`
                             }),
                             jsxs('label', {
                               className: 'flex items-center gap-2 text-xs text-(--ui-text-secondary)',
@@ -10498,6 +10709,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                     }),
                                     jsx(HubSkillsSection, {
                                       forProfile: null,
+                                      request: requestForTarget,
                                       onInstalled: name =>
                                         setCaps(prev =>
                                           !prev || prev.skills.some(s => s.name === name)
@@ -10570,6 +10782,10 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                                             profile: createdRef.current,
                                                             entry: m,
                                                             ensureProfile: ensureAgentCreated,
+                                                            request: requestForTarget,
+                                                            supportScope: remoteTarget
+                                                              ? `connection:${targetConnection}`
+                                                              : `connection:${activeConnectionId || 'active'}`,
                                                             onDone: () => {
                                                               // Setup done: mark installed so the row's
                                                               // checkbox un-disables, and enable it.
