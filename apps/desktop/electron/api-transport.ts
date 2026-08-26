@@ -97,6 +97,14 @@ function isTransientTransportError(error) {
   return msg.includes('socket hang up') || msg.includes('read ECONNRESET')
 }
 
+/** Preserve the HTTP status as structured error metadata for auth/retry callers. */
+function httpStatusError(statusCode: number, detail: string): Error & { statusCode: number } {
+  const error = new Error(`${statusCode}: ${detail}`) as Error & { statusCode: number }
+  error.statusCode = statusCode
+
+  return error
+}
+
 /**
  * The verb-gated retry decision.
  *
@@ -170,6 +178,7 @@ async function withRetry(makeAttempt, options: any = {}) {
 export {
   destroyKeepaliveAgents,
   downloadAgentFor,
+  httpStatusError,
   isIdempotentMethod,
   isTransientTransportError,
   jsonAgentFor,

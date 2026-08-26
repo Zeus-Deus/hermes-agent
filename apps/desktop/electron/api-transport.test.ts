@@ -19,12 +19,22 @@ import { afterAll, describe, expect, it } from 'vitest'
 import {
   destroyKeepaliveAgents,
   downloadAgentFor,
+  httpStatusError,
   isIdempotentMethod,
   isTransientTransportError,
   jsonAgentFor,
   shouldRetryRequest,
   withRetry
 } from './api-transport'
+
+describe('httpStatusError', () => {
+  it('keeps the HTTP status available to downstream auth classification', () => {
+    const error = httpStatusError(401, 'session expired')
+
+    expect(error.message).toBe('401: session expired')
+    expect(error.statusCode).toBe(401)
+  })
+})
 
 function errWithCode(code: string, message = code): NodeJS.ErrnoException {
   const e: NodeJS.ErrnoException = new Error(message)
