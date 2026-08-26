@@ -1089,6 +1089,343 @@ def _begin_tool_execution(
             pass
 
 
+@dataclass
+class PreparedToolCall:
+    """One model-emitted tool call resolved to the tool Hermes will run.
+
+    Separate from :func:`execute_one_tool` because both dispatchers need the
+    resolved name before execution starts — the concurrent path to plan its
+    batch and log it, the sequential path to pick the tool's display mode.
+    """
+
+    tool_call: Any
+    tool_call_id: str
+    function_name: str
+    function_args: dict[str, Any]
+    middleware_trace: list[dict[str, Any]]
+    scope_block: Optional[str] = None
+    malformed_result: Optional[str] = None
+
+
+@dataclass
+class ToolExecutionOutcome:
+    """One tool call's result after every Hermes wrapper has run."""
+
+    tool_call: Any
+    tool_call_id: str
+    function_name: str
+    function_args: dict[str, Any]
+    result: Any
+    duration: float
+    is_error: bool
+    blocked: bool
+    cancelled: bool
+    malformed: bool
+    middleware_trace: list[dict[str, Any]]
+
+
+def _flatten_probe_schema_error(probe_error: str) -> str:
+    """Flatten a deferred-call probe payload into one plain string.
+
+    A ``scope_block`` is re-wrapped as ``{"error": ...}`` downstream, so the
+    probe's own JSON payload cannot be passed through verbatim without
+    nesting one JSON document inside another.
+    """
+    try:
+        probe = json.loads(probe_error)
+        return (
+            f"{probe.get('error', '')} Parameters schema: "
+            f"{json.dumps(probe.get('parameters', {}), ensure_ascii=False)}. "
+            f"{probe.get('hint', '')}"
+        ).strip()
+    except Exception:
+        return probe_error
+
+
+def prepare_tool_call(agent, tool_call) -> PreparedToolCall:
+    """Parse a tool call's arguments and resolve the tool it really targets."""
+    function_name = tool_call.function.name
+    function_args, malformed_args_result = _parse_tool_arguments(
+        tool_call.function.arguments
+    )
+    prepared = PreparedToolCall(
+        tool_call=tool_call,
+        tool_call_id=getattr(tool_call, "id", "") or "",
+        function_name=function_name,
+        function_args=function_args,
+        middleware_trace=[],
+    )
+    if malformed_args_result is not None:
+        prepared.malformed_result = malformed_args_result
+        return prepared
+
+    # ── Tool Search unwrap ────────────────────────────────────────────
+    # When the model invokes the tool_call bridge, peel it open so every
+    # downstream check (checkpointing, guardrails, plugin pre-tool-call
+    # hooks, the display/activity feed, the post-call callback) sees the
+    # underlying tool — not the bridge. This is the OpenClaw lesson: hooks
+    # must observe the real tool name.
+    #
+    # The original tool_call entry on ``tool_call.function`` is left
+    # untouched so the conversation transcript and the matching
+    # tool_call_id are preserved exactly as the model emitted them.
+    #
+    # Scope gate: the unwrap dispatches the underlying tool directly
+    # (bypassing the bridge branch in handle_function_call and its scope
+    # check), so we enforce session toolset scope HERE. A tool the session
+    # was not granted is rejected before any checkpoint, hook, or dispatch
+    # fires.
+    try:
+        from tools import tool_search as _ts
+        if function_name == _ts.TOOL_CALL_NAME:
+            _underlying, _underlying_args, _err = _ts.resolve_underlying_call(function_args)
+            if not _err and _underlying:
+                if _underlying in _tool_search_scoped_names(agent):
+                    # Probe-validate before unwrapping (ironclaw#5149):
+                    # missing required args return the parameter schema
+                    # instead of dispatching into an opaque failure.
+                    _probe_err = _ts.validate_deferred_call_args(_underlying, _underlying_args)
+                    if _probe_err is not None:
+                        prepared.scope_block = _flatten_probe_schema_error(_probe_err)
+                    else:
+                        prepared.function_name = _underlying
+                        prepared.function_args = _underlying_args
+                else:
+                    prepared.scope_block = (
+                        f"'{_underlying}' is not available in this session. "
+                        "Use tool_search to find tools you can call."
+                    )
+    except Exception:
+        pass
+
+    return prepared
+
+
+def _tool_dispatcher(agent, prepared: PreparedToolCall, effective_task_id: str,
+                     messages: Optional[list], state: dict):
+    """Build the single dispatch callback for one prepared tool call.
+
+    Everything except the context-engine tools routes through
+    ``AIAgent._invoke_tool``, which owns the one agent-level/registry
+    dispatch ladder and fires the terminal ``post_tool_call`` hook for the
+    branches ``handle_function_call`` does not cover.  Context-engine tools
+    are not in the registry and need the live message list, so they are
+    dispatched here and their hook is emitted by :func:`execute_one_tool`
+    (``state["inline_post_hook"]``).
+    """
+    function_name = prepared.function_name
+
+    context_engine_names = getattr(agent, "_context_engine_tool_names", None)
+    if context_engine_names and function_name in context_engine_names:
+        state["inline_post_hook"] = True
+
+        def _execute_context_engine(next_args: dict) -> Any:
+            try:
+                return agent.context_compressor.handle_tool_call(
+                    function_name, next_args, messages=messages,
+                )
+            except Exception as tool_error:
+                logger.error(
+                    "context_engine.handle_tool_call raised for %s: %s",
+                    function_name, tool_error, exc_info=True,
+                )
+                return json.dumps(
+                    {"error": f"Context engine tool '{function_name}' failed: {tool_error}"}
+                )
+
+        return _execute_context_engine
+
+    def _execute(next_args: dict) -> Any:
+        try:
+            return agent._invoke_tool(
+                function_name,
+                next_args,
+                effective_task_id,
+                prepared.tool_call_id,
+                messages=messages,
+                pre_tool_block_checked=True,
+                skip_tool_request_middleware=True,
+                skip_tool_execution_middleware=True,
+                tool_request_middleware_trace=list(prepared.middleware_trace),
+            )
+        except Exception as tool_error:
+            memory_manager = getattr(agent, "_memory_manager", None)
+            if memory_manager is not None and memory_manager.has_tool(function_name):
+                # Memory-provider tools have no registry error wrapper; the
+                # executor is the only layer that can stop a provider fault
+                # from aborting the whole turn.
+                logger.error(
+                    "memory_manager.handle_tool_call raised for %s: %s",
+                    function_name, tool_error, exc_info=True,
+                )
+                state["inline_post_hook"] = True
+                return json.dumps(
+                    {"error": f"Memory tool '{function_name}' failed: {tool_error}"}
+                )
+            from agent.agent_runtime_helpers import AGENT_RUNTIME_POST_HOOK_TOOL_NAMES
+            if function_name in AGENT_RUNTIME_POST_HOOK_TOOL_NAMES:
+                raise
+            logger.error(
+                "handle_function_call raised for %s: %s",
+                function_name, tool_error, exc_info=True,
+            )
+            return f"Error executing tool '{function_name}': {tool_error}"
+
+    return _execute
+
+
+def execute_one_tool(
+    agent,
+    tool_call,
+    effective_task_id: str,
+    *,
+    messages: Optional[list] = None,
+    prepared: Optional[PreparedToolCall] = None,
+    display_index: Optional[int] = None,
+    begin_execution=None,
+    authorization_gate: Optional[_ConcurrentToolAuthorizationGate] = None,
+) -> ToolExecutionOutcome:
+    """Run one tool call through the whole Hermes tool lifecycle.
+
+    This is the only sanctioned entry point for executing a model tool call.
+    Calling ``model_tools.handle_function_call`` directly skips every wrapper
+    applied here: argument parsing, Tool Search unwrap and session-scope
+    gating, Relay rewrites, the tool request/execution middleware chain,
+    plugin ``pre_tool_call`` blocks, user approvals, before-call guardrails,
+    file checkpoints, tool-start display and progress callbacks, environment
+    routing through ``effective_task_id`` (local / Docker / SSH / Modal /
+    Daytona / Singularity), dispatch, and the terminal ``post_tool_call``
+    hook.
+
+    Callers keep scheduling, display, transcript mutation, output budgets,
+    and the after-call tail (:func:`finalize_tool_outcome`) — those are
+    per-path concerns that cannot be shared without changing behavior.
+
+    ``begin_execution`` and ``authorization_gate`` are the concurrent path's
+    start-ordering and approval-serialization hooks; both are optional.
+    """
+    prep = prepared if prepared is not None else prepare_tool_call(agent, tool_call)
+
+    if prep.malformed_result is not None:
+        return ToolExecutionOutcome(
+            tool_call=prep.tool_call,
+            tool_call_id=prep.tool_call_id,
+            function_name=prep.function_name,
+            function_args=prep.function_args,
+            result=prep.malformed_result,
+            duration=0.0,
+            is_error=True,
+            blocked=True,
+            cancelled=False,
+            malformed=True,
+            middleware_trace=prep.middleware_trace,
+        )
+
+    state = {"inline_post_hook": False}
+    execute = _tool_dispatcher(agent, prep, effective_task_id, messages, state)
+    start = time.time()
+
+    try:
+        managed = _run_agent_tool_execution_middleware(
+            agent,
+            function_name=prep.function_name,
+            function_args=prep.function_args,
+            effective_task_id=effective_task_id,
+            tool_call_id=prep.tool_call_id,
+            execute=execute,
+            scope_block=prep.scope_block,
+            display_index=display_index,
+            middleware_trace=prep.middleware_trace,
+            begin_execution=begin_execution,
+            authorization_gate=authorization_gate,
+        )
+    except KeyboardInterrupt:
+        result = _emit_cancelled_terminal_post_tool_call(
+            agent,
+            function_name=prep.function_name,
+            function_args=prep.function_args,
+            effective_task_id=effective_task_id,
+            tool_call_id=prep.tool_call_id,
+            start_time=start,
+            middleware_trace=list(prep.middleware_trace),
+        )
+        try:
+            agent.interrupt("keyboard interrupt")
+        except Exception:
+            pass
+        return ToolExecutionOutcome(
+            tool_call=prep.tool_call,
+            tool_call_id=prep.tool_call_id,
+            function_name=prep.function_name,
+            function_args=prep.function_args,
+            result=result,
+            duration=time.time() - start,
+            is_error=True,
+            blocked=False,
+            cancelled=True,
+            malformed=False,
+            middleware_trace=prep.middleware_trace,
+        )
+
+    result, function_args, middleware_trace, blocked, dispatched = _managed_values(managed)
+    duration = time.time() - start
+    is_error, _ = _detect_tool_failure(prep.function_name, result)
+
+    if state["inline_post_hook"] and not blocked and dispatched:
+        _emit_terminal_post_tool_call(
+            agent,
+            function_name=prep.function_name,
+            function_args=function_args,
+            result=result,
+            effective_task_id=effective_task_id,
+            tool_call_id=prep.tool_call_id,
+            duration_ms=int(duration * 1000),
+            middleware_trace=list(middleware_trace),
+        )
+
+    return ToolExecutionOutcome(
+        tool_call=prep.tool_call,
+        tool_call_id=prep.tool_call_id,
+        function_name=prep.function_name,
+        function_args=function_args,
+        result=result,
+        duration=duration,
+        is_error=is_error,
+        blocked=blocked,
+        cancelled=False,
+        malformed=False,
+        middleware_trace=middleware_trace,
+    )
+
+
+def finalize_tool_outcome(agent, outcome: ToolExecutionOutcome) -> Any:
+    """Apply the after-call guardrail observation and file-mutation record.
+
+    Kept out of :func:`execute_one_tool` because the concurrent path runs it
+    on the collection thread in tool-call order — ``ToolGuardrails.after_call``
+    and the turn-end file-mutation verifier are single-threaded state that a
+    worker pool must not touch. Blocked calls never ran, so a guardrail block
+    counts as neither a failure nor a success.
+    """
+    if outcome.blocked:
+        return outcome.result
+
+    result = agent._append_guardrail_observation(
+        outcome.function_name,
+        outcome.function_args,
+        outcome.result,
+        failed=outcome.is_error,
+        tool_call_id=outcome.tool_call_id,
+    )
+    try:
+        agent._record_file_mutation_result(
+            outcome.function_name, outcome.function_args, result, outcome.is_error,
+        )
+    except Exception as _ver_err:
+        logging.debug("file-mutation verifier record failed: %s", _ver_err)
+    return result
+
+
 def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0, *, finalize: bool = True) -> None:
     """Execute multiple tool calls concurrently using a thread pool.
 
@@ -2916,6 +3253,11 @@ def execute_tool_calls_segmented(agent, assistant_message, messages: list, effec
 
 
 __all__ = [
+    "PreparedToolCall",
+    "ToolExecutionOutcome",
+    "prepare_tool_call",
+    "execute_one_tool",
+    "finalize_tool_outcome",
     "execute_tool_calls_concurrent",
     "execute_tool_calls_sequential",
     "execute_tool_calls_segmented",
