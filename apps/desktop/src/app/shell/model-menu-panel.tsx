@@ -5,7 +5,7 @@ import { useState } from 'react'
 import { useSessionView } from '@/app/chat/session-view'
 import { Codicon } from '@/components/ui/codicon'
 import { DropdownMenuItem, dropdownMenuRow } from '@/components/ui/dropdown-menu'
-import type { HermesGateway, ProfileScope } from '@/hermes'
+import type { HermesGateway } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { currentPickerSelection } from '@/lib/model-status-label'
@@ -29,9 +29,6 @@ export { ModelMenuCloseContext } from './model-catalog-menu'
 
 export interface ModelSelection {
   model: string
-  /** Catalog owner scope for cache patching/invalidation. A tile carries its
-   * exact connection/profile owner; primary/legacy callers stay ambient. */
-  profile?: ProfileScope
   provider: string
   /** Runtime id of the surface that opened the menu. When set, the switch
    *  targets that session (a tile) instead of the primary `$activeSessionId`. */
@@ -41,12 +38,7 @@ export interface ModelSelection {
 interface ModelMenuPanelProps {
   gateway?: HermesGateway
   onSelectModel: (selection: ModelSelection) => Promise<boolean> | void
-  /** Owner scope whose catalog this is. Omitted → the active API scope. */
-  profile?: ProfileScope
-  /** THIS surface's dispatcher — owner-routed for a tile. Catalog reads go
-   *  through it too, not only writes: `model.options` resolves the session in
-   *  the answering backend's own process, so the ambient socket returns the
-   *  wrong profile's catalog for a cross-profile tile (#93892). */
+  profile?: string
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
 }
 
@@ -56,7 +48,7 @@ interface ModelMenuPanelProps {
  * surface's session, remember the pick as a global preset, keep the optimistic
  * stores honest, and roll back on a failed gateway write.
  */
-export function ModelMenuPanel({ gateway, onSelectModel, profile, requestGateway }: ModelMenuPanelProps) {
+export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', requestGateway }: ModelMenuPanelProps) {
   const { t } = useI18n()
   const copy = t.shell.modelMenu
   const [refreshing, setRefreshing] = useState(false)
@@ -209,13 +201,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile, requestGateway
     // scopes the switch to that session; with none it's UI state shipped on the
     // next session.create. Always stamp sessionId from this surface so a tile
     // switch never hits the primary (busy) session by accident.
-    select: (model, provider) =>
-      onSelectModel({
-        model,
-        ...(profile !== undefined ? { profile } : {}),
-        provider,
-        sessionId: activeSessionId || null
-      }),
+    select: (model, provider) => onSelectModel({ model, provider, sessionId: activeSessionId || null }),
 
     setOptions: (patch, row) => {
       // Editing always records the model's global preset (keyed by
@@ -259,7 +245,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile, requestGateway
       gateway={gateway}
       includeMoa
       profile={profile}
-      requestGateway={requestGateway}
+      request={requestGateway}
       sessionId={activeSessionId}
     />
   )

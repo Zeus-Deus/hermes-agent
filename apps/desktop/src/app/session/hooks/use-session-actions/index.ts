@@ -22,12 +22,7 @@ import { setSessionYolo } from '@/lib/yolo-session'
 import { $clarifyRequests } from '@/store/clarify'
 import { migrateSessionDraft } from '@/store/composer'
 import { clearQueuedPrompts, migrateQueuedPrompts } from '@/store/composer-queue'
-import {
-  openGatewayForAgent,
-  openGatewayForProfile,
-  requestGatewayForAgent,
-  retainGatewayForAgent
-} from '@/store/gateway'
+import { openGatewayForAgent, openGatewayForProfile, requestGatewayForAgent } from '@/store/gateway'
 import { $gatewaySwitching } from '@/store/gateway-switch'
 import { $pinnedSessionIds } from '@/store/layout'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
@@ -35,12 +30,13 @@ import {
   $activeGatewayProfile,
   $gatewaySwapTarget,
   $newChatProfile,
+  $newChatRoute,
+  $profiles,
   $showAllProfiles,
   type AgentProfileRoute,
   ensureGatewayAgent,
   ensureGatewayProfile,
-  normalizeProfileKey,
-  resolveNewChatOwnerRoute
+  normalizeProfileKey
 } from '@/store/profile'
 import {
   $projectScope,
@@ -83,8 +79,6 @@ import {
   setResumeExhaustedSessionId,
   setResumeFailedSessionId,
   setSelectedStoredSessionId,
-  setSessionOwnerHint,
-  setSessions,
   setSessionStartedAt,
   setTurnStartedAt,
   setWorkspaceCwdOwner,
@@ -99,11 +93,9 @@ import {
   $sessionTiles,
   closeSessionTile,
   dropSessionState,
-  holdSessionOwnerUntilForeground,
   openSessionTile,
   patchSessionTile,
   publishSessionState,
-  releaseSessionOwnerHold,
   type SessionTileWorkspaceScope,
   type TileDock
 } from '@/store/session-states'
@@ -127,6 +119,8 @@ import {
   type BranchMessage,
   chatMessageArraysEquivalent,
   dedupeInflightUserAgainstTranscript,
+  dropListedSession,
+  findListedSession,
   goneSessionVerdict,
   isSessionGoneError,
   overlayConcurrentMessageChanges,
@@ -137,6 +131,7 @@ import {
   resolveResumedBusy,
   resolveSessionProfile,
   resolveStoredSession,
+  restoreListedSession,
   selectBranchMessages,
   sessionMatchesStoredId,
   sessionShouldHaveTranscript,
@@ -222,7 +217,7 @@ function reconcileAuthoritativeMessages(
 // never the profile default (that lives in Settings → Model).
 async function desktopSessionCreateParams(
   cwd: string,
-  capturedRoute = resolveNewChatOwnerRoute()
+  capturedRoute = $newChatRoute.get()
 ): Promise<Record<string, unknown>> {
   // Treat Send as the linearization point for the visible selector state. The
   // profile handshake below can yield long enough for background config/model
@@ -478,60 +473,19 @@ export function useSessionActions({
               ? workspaceTarget.trim()
               : $currentCwd.get().trim() || resolveNewSessionCwd()
 
-        // The EXACT owner for this create: an explicit agent route, else the
-        // (registry source, profile) pair the draft was made on. Read ONCE at
-        // the send linearization point and threaded through the create RPC,
-        // the owner hint, the optimistic row and the failure cleanup, so the
-        // profile-rail path (selectProfile clears $newChatRoute) can no longer
-        // reduce the owner to a bare profile name that later RPCs dial on a
-        // different socket than the one that minted the runtime.
-        const capturedRoute = resolveNewChatOwnerRoute()
+        const capturedRoute = $newChatRoute.get()
         const params = await desktopSessionCreateParams(cwd, capturedRoute)
 
-        // Lease the owner socket for the whole create → owner-publication
-        // sequence (#93602 primitive). The per-request lease inside
-        // requestGatewayForAgent ends when session.create returns; the
-        // foreground hold below takes over from that point until the created
-        // chat is selected. Between the two, nothing may close the socket
-        // that just minted the runtime.
-        const releaseCreateLease = capturedRoute
-          ? await retainGatewayForAgent(capturedRoute.connectionId, capturedRoute.profile)
-          : () => undefined
+        const created = capturedRoute
+          ? await requestGatewayForAgent<SessionCreateResponse>(
+              capturedRoute.connectionId,
+              capturedRoute.profile,
+              'session.create',
+              params
+            )
+          : await requestGateway<SessionCreateResponse>('session.create', params)
 
-        let created: SessionCreateResponse
-        let stored: null | string
-
-        try {
-          created = capturedRoute
-            ? await requestGatewayForAgent<SessionCreateResponse>(
-                capturedRoute.connectionId,
-                capturedRoute.profile,
-                'session.create',
-                params
-              )
-            : await requestGateway<SessionCreateResponse>('session.create', params)
-
-          stored = created.stored_session_id ?? null
-
-          // Record the EXACT owner the moment a routed create returns a stored
-          // id — before the drift check, the optimistic row, navigation, or any
-          // session-scoped RPC can resolve this session's owner. The route is
-          // the only authority: in All-profiles / Bot routing the ambient
-          // $activeGatewayProfile stays on `default` while the session lives on
-          // `capturedRoute` (e.g. local::omar). Without this hint the optimistic
-          // row (stamped from ambient) was the only owner record, so the first
-          // turn ran on omar and every later session-scoped RPC resolved the row
-          // as `default` and 4001'd "session not found".
-          if (stored && capturedRoute) {
-            setSessionOwnerHint(stored, capturedRoute)
-            // Pin the owner socket until the foreground publication (route →
-            // $selectedStoredSessionId) covers it, so a prune or lease release
-            // in that gap cannot close the runtime before the first prompt.
-            holdSessionOwnerUntilForeground(stored, capturedRoute)
-          }
-        } finally {
-          releaseCreateLease()
-        }
+        const stored = created.stored_session_id ?? null
 
         // Only a genuine move to a DIFFERENT chat mid-create should orphan the
         // session we just minted. The active runtime ref is deliberately not a
@@ -551,21 +505,7 @@ export function useSessionActions({
 
         if (drift) {
           console.warn('[submit-drift-abort]', drift, { phase: 'mid-create' })
-
-          // Close on the backend that minted the session: the ambient socket
-          // is a different machine/profile for a routed create and would
-          // 4001 while the orphan lives on (and later ws-orphan-reaps) there.
-          const closeCreated = capturedRoute
-            ? requestGatewayForAgent(capturedRoute.connectionId, capturedRoute.profile, 'session.close', {
-                session_id: created.session_id
-              })
-            : requestGateway('session.close', { session_id: created.session_id })
-
-          await closeCreated.catch(() => undefined)
-
-          if (stored) {
-            releaseSessionOwnerHold(stored)
-          }
+          await requestGateway('session.close', { session_id: created.session_id }).catch(() => undefined)
 
           return null
         }
@@ -581,9 +521,7 @@ export function useSessionActions({
           // reads meaningfully while the turn is in flight, instead of flashing
           // "Untitled session" until the turn persists and auto-title runs. The
           // server later returns its own preview/title and supersedes this.
-          // The row carries the create route's exact owner (backend profile +
-          // connection), never the ambient profile — see upsertOptimisticSession.
-          upsertOptimisticSession(created, stored, null, preview?.trim() || null, null, undefined, capturedRoute)
+          upsertOptimisticSession(created, stored, null, preview?.trim() || null)
           navigate(sessionRoute(stored), { replace: true })
           // Other windows (e.g. the main window when this is the pop-out) can't
           // see this session until they re-pull the shared list.
@@ -673,7 +611,7 @@ export function useSessionActions({
         // `options?.cwd || resolve…` is wrong for Home: null is falsy and used
         // to fall through into the last project folder while main chat was
         // occupied (openTab path for "New session in Home").
-        const capturedRoute = options?.route === undefined ? resolveNewChatOwnerRoute() : options.route
+        const capturedRoute = options?.route === undefined ? $newChatRoute.get() : options.route
         const workspaceScope = options?.workspaceScope ?? { workspaceMode: 'sessions' }
 
         const cwd =
@@ -684,38 +622,16 @@ export function useSessionActions({
           ...(workspaceScope.workspaceMode === 'bots' ? { hidden: true } : {})
         }
 
-        // Same lease chain as createBackendSessionForSend: owner socket held
-        // across the create, then the foreground hold carries it until the
-        // tile is mounted ($sessionTiles names the owner from then on).
-        const releaseCreateLease = capturedRoute
-          ? await retainGatewayForAgent(capturedRoute.connectionId, capturedRoute.profile)
-          : () => undefined
+        const created = capturedRoute
+          ? await requestGatewayForAgent<SessionCreateResponse>(
+              capturedRoute.connectionId,
+              capturedRoute.profile,
+              'session.create',
+              params
+            )
+          : await requestGateway<SessionCreateResponse>('session.create', params)
 
-        let created: SessionCreateResponse
-        let stored: string | undefined
-
-        try {
-          created = capturedRoute
-            ? await requestGatewayForAgent<SessionCreateResponse>(
-                capturedRoute.connectionId,
-                capturedRoute.profile,
-                'session.create',
-                params
-              )
-            : await requestGateway<SessionCreateResponse>('session.create', params)
-
-          stored = created.stored_session_id
-
-          if (stored && capturedRoute) {
-            // Same ownership transition as createBackendSessionForSend: the
-            // route that minted the session is its exact owner from this
-            // moment on, and its socket stays pinned until the tile mounts.
-            setSessionOwnerHint(stored, capturedRoute)
-            holdSessionOwnerUntilForeground(stored, capturedRoute)
-          }
-        } finally {
-          releaseCreateLease()
-        }
+        const stored = created.stored_session_id
 
         if (!stored) {
           const closeCreated = capturedRoute
@@ -737,7 +653,7 @@ export function useSessionActions({
         // unlisted (draft) tab stays out of the session list until its first
         // turn persists and a refresh surfaces it.
         if (listed) {
-          upsertOptimisticSession(created, stored, null, null, null, undefined, capturedRoute)
+          upsertOptimisticSession(created, stored, null, null)
         }
 
         // A tile lives in its OWN worktree, so it must not run the full
@@ -901,7 +817,8 @@ export function useSessionActions({
       // gateway can be untagged, so retain the captured ambient connection too.
       // Either way, route by the composite (connection, profile), never by a
       // same-named profile alone.
-      const sessionOwner: SessionOwnerScope = ownerRoute ||
+      const sessionOwner: SessionOwnerScope =
+        ownerRoute ||
         (resolvedConnectionId
           ? {
               connectionId: resolvedConnectionId,
@@ -988,16 +905,14 @@ export function useSessionActions({
           sessionStateByRuntimeIdRef.current.delete(cachedRuntimeId)
           dropSessionState(cachedRuntimeId)
         } else {
-          // Paint the warm cache immediately, but also refresh the persisted
-          // transcript in parallel. A resumed runtime carries the agent's
-          // compression projection, which can have the same row count as the
-          // stored conversation while containing different rows. Trusting that
-          // projection alone made completed prompts disappear after an app
-          // restart whenever this warm path short-circuited the cold REST
-          // prefetch. Watch mirrors stay live-only by design.
-          const persistedTranscriptPromise = isWatchWindow()
-            ? null
-            : getLatestSessionMessages(storedSessionId, sessionRestScope).catch(() => null)
+          // Paint the warm cache immediately. The persisted transcript still
+          // needs a refresh because a resumed runtime may carry only the
+          // agent's compressed projection, but that read must start after
+          // session.activate reattaches the live transport. Otherwise a turn
+          // can finish between the early REST snapshot and the reattach: its
+          // terminal events go to the detached socket while the stale snapshot
+          // leaves Desktop showing only the pre-disconnect partial answer.
+          const shouldRefreshPersistedTranscript = !isWatchWindow()
 
           setFreshDraftReady(false)
           clearNotifications()
@@ -1115,6 +1030,49 @@ export function useSessionActions({
                   ? activated.turn_started_at * 1000
                   : null
 
+              // Settle the activation snapshot before transcript hydration.
+              // Once the attached transport reports a later terminal event,
+              // that live state is authoritative and must not be overwritten
+              // by the older `running` value after the REST request resolves.
+              const activatedLivenessState = updateSessionState(
+                cachedRuntimeId,
+                state => ({
+                  ...state,
+                  ...(runtimeInfo ?? {}),
+                  busy: running,
+                  awaitingResponse: running && !pendingClarify,
+                  // Resumed onto an already-running turn — that IS backend
+                  // proof the turn is live (no message.start will replay).
+                  turnLive: state.turnLive || running,
+                  needsInput:
+                    pendingApproval ||
+                    Boolean(pendingClarify) ||
+                    (clarifyAuthoritativelyAbsent ? false : state.needsInput),
+                  // Adopting someone else's turn: we'll stream its reply
+                  // without ever having received its prompt, so the settle
+                  // path must not take the "I saw it all" shortcut.
+                  adoptedRunningTurn: state.adoptedRunningTurn || running,
+                  turnStartedAt: running ? (activatedTurnStartedAt ?? state.turnStartedAt ?? Date.now()) : null
+                }),
+                storedSessionId
+              )
+
+              busyRef.current = running
+              setBusy(running)
+              setAwaitingResponse(running && !pendingClarify)
+              syncSessionStateToView(cachedRuntimeId, activatedLivenessState)
+
+              // session.activate is the ordering barrier for reconnect recovery:
+              // it atomically rebinds a running turn before returning. If the
+              // turn is already terminal, this post-barrier REST read sees its
+              // durable final row; if it is still running, later deltas/finish
+              // events arrive on the newly attached transport. Hydration below
+              // reconciles only messages, so those events also retain liveness
+              // authority while the request is pending.
+              const persistedTranscriptPromise = shouldRefreshPersistedTranscript
+                ? getLatestSessionMessages(storedSessionId, sessionRestScope).catch(() => null)
+                : null
+
               // The persisted REST transcript is the display authority: a live
               // runtime may carry only the agent's compressed context projection,
               // which is intentionally smaller than the user-visible conversation.
@@ -1199,22 +1157,7 @@ export function useSessionActions({
                 cachedRuntimeId,
                 state => ({
                   ...state,
-                  ...(runtimeInfo ?? {}),
                   messages: visibleActivatedMessages,
-                  busy: running,
-                  awaitingResponse: running,
-                  // Resumed onto an already-running turn — that IS backend
-                  // proof the turn is live (no message.start will replay).
-                  turnLive: state.turnLive || running,
-                  needsInput:
-                    pendingApproval ||
-                    Boolean(pendingClarify) ||
-                    (clarifyAuthoritativelyAbsent ? false : state.needsInput),
-                  // Adopting someone else's turn: we'll stream its reply
-                  // without ever having received its prompt, so the settle
-                  // path must not take the "I saw it all" shortcut.
-                  adoptedRunningTurn: state.adoptedRunningTurn || running,
-                  turnStartedAt: running ? (activatedTurnStartedAt ?? state.turnStartedAt ?? Date.now()) : null,
                   ...(pendingClarifyProjection
                     ? {
                         awaitingResponse: false,
@@ -1224,16 +1167,13 @@ export function useSessionActions({
                     : {}),
                   ...(clearedClarifyProjection
                     ? {
-                        streamId: running ? (clearedClarifyProjection.streamId ?? state.streamId) : null
+                        streamId: state.busy ? (clearedClarifyProjection.streamId ?? state.streamId) : null
                       }
                     : {})
                 }),
                 storedSessionId
               )
 
-              busyRef.current = running
-              setBusy(running)
-              setAwaitingResponse(running && !pendingClarify)
               syncSessionStateToView(cachedRuntimeId, activatedState)
               // Cache backend transcript truth only. The pending/running bit and
               // any synthetic clarify row are a live resume projection and must
@@ -2025,14 +1965,34 @@ export function useSessionActions({
     async (storedSessionId: string) => {
       clearNotifications()
 
-      // The row may live in the main list OR the archived view's own store
-      // (archived rows are excluded from $sessions by design). Resolve from
-      // both so deleting from the Archived filter evicts the row instead of
-      // leaving a ghost that resumes into a dead id (infinite spinner).
-      const removedFromMain = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
+      // The row may live in the main list, the messaging/cron sidebar slices,
+      // OR the archived view's own store (archived rows are excluded from
+      // $sessions by design). Resolve from all of them so deleting a
+      // messaging/cron row (or from the Archived filter) evicts the row
+      // instead of leaving a ghost that resumes into a dead id.
+      const listed = findListedSession(storedSessionId)
 
       const removed =
-        removedFromMain ?? $archivedSessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
+        listed?.session ?? $archivedSessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
+
+      // Messaging/cron rows frequently arrive without an inline profile; fall
+      // back to the stored-session ownership lookup so their DELETE routes to
+      // the owning profile instead of the ambient one.
+      const stampedProfile = removed?.profile?.trim()
+      const profile = stampedProfile || (await resolveSessionProfile(storedSessionId))
+
+      // Listed profile-less row + multiple profiles + unresolved owner:
+      // never fall through to the primary backend (fake already_absent).
+      if (
+        listed &&
+        !stampedProfile &&
+        !profile?.trim() &&
+        $profiles.get().filter(item => item.name.trim()).length > 1
+      ) {
+        notifyError(new Error('Session ownership could not be resolved'), copy.deleteFailed)
+
+        return
+      }
 
       const wasSelected = selectedStoredSessionId === storedSessionId
       const closingRuntimeId = wasSelected ? activeSessionId : null
@@ -2044,7 +2004,7 @@ export function useSessionActions({
             connectionId: removed.connection_id,
             profile: removed.profile || 'default'
           }
-        : removed?.profile
+        : profile
 
       const previousArchived = $archivedSessions.get()
       // Pins are keyed on the durable lineage-root id; the stored id may be the
@@ -2052,7 +2012,7 @@ export function useSessionActions({
       const removedPinId = removed ? sessionPinId(removed) : storedSessionId
       const removedIds = [storedSessionId, removed?.id, removed?._lineage_root_id]
 
-      setSessions(prev => prev.filter(session => !sessionMatchesStoredId(session, storedSessionId)))
+      dropListedSession(storedSessionId)
       $archivedSessions.set(previousArchived.filter(session => !sessionMatchesStoredId(session, storedSessionId)))
       // Evict from the project tree's optimistic layer too (the backend snapshot
       // still lists it until its next refresh), so grouped + flat views drop the
@@ -2080,7 +2040,7 @@ export function useSessionActions({
         dropTranscriptTail(storedSessionId)
         // Only after the RPC lands — the optimistic eviction above can roll
         // back, and a rolled-back row must keep its watermark/marker.
-        forgetSessionUnread(removedIds, removed?.profile)
+        forgetSessionUnread(removedIds, profile)
         clearQueuedPrompts(storedSessionId)
 
         if (closingRuntimeId) {
@@ -2099,8 +2059,8 @@ export function useSessionActions({
           dropSessionState(tiledRuntimeId)
         }
       } catch (err) {
-        if (removedFromMain) {
-          setSessions(prev => [removedFromMain, ...prev])
+        if (listed?.session) {
+          restoreListedSession(listed.session, listed.slice)
         }
 
         // Restore the archived-view row too (no-op when it wasn't archived).
@@ -2113,7 +2073,7 @@ export function useSessionActions({
           setFreshDraftReady(false)
           setSelectedStoredSessionId(storedSessionId)
           selectedStoredSessionIdRef.current = storedSessionId
-          const stored = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
+          const stored = findListedSession(storedSessionId)?.session
 
           if (stored) {
             applyStoredUsage(stored)
@@ -2154,7 +2114,22 @@ export function useSessionActions({
     async (storedSessionId: string) => {
       clearNotifications()
 
-      const archived = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
+      const listed = findListedSession(storedSessionId)
+      const archived = listed?.session
+      const stampedProfile = archived?.profile?.trim()
+      const profile = stampedProfile || (await resolveSessionProfile(storedSessionId))
+
+      if (
+        listed &&
+        !stampedProfile &&
+        !profile?.trim() &&
+        $profiles.get().filter(item => item.name.trim()).length > 1
+      ) {
+        notifyError(new Error('Session ownership could not be resolved'), copy.archiveFailed)
+
+        return
+      }
+
       const wasSelected = selectedStoredSessionId === storedSessionId
       const previousPinned = $pinnedSessionIds.get()
       // Pins are keyed on the durable lineage-root id; the stored id may be the
@@ -2162,8 +2137,8 @@ export function useSessionActions({
       const archivedPinId = archived ? sessionPinId(archived) : storedSessionId
       const archivedIds = [storedSessionId, archived?.id, archived?._lineage_root_id]
 
-      // Soft-hide: drop from the sidebar immediately, keep the data.
-      setSessions(prev => prev.filter(session => !sessionMatchesStoredId(session, storedSessionId)))
+      // Soft-hide: drop from every sidebar slice immediately, keep the data.
+      dropListedSession(storedSessionId)
       tombstoneSessions(archivedIds)
       beginSessionMutation(archivedIds)
       $pinnedSessionIds.set(previousPinned.filter(id => id !== storedSessionId && id !== archivedPinId))
@@ -2173,10 +2148,10 @@ export function useSessionActions({
       }
 
       try {
-        await setSessionArchived(storedSessionId, true, archived?.profile)
+        await setSessionArchived(storedSessionId, true, profile)
         // Archived rows never reach the sidebar, so their persisted unread can
         // only rot. Dropped after the RPC so a failed archive keeps it.
-        forgetSessionUnread(archivedIds, archived?.profile)
+        forgetSessionUnread(archivedIds, profile)
         // An archived session is hidden from the sidebar; its tile must go too.
         const tiledRuntimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
         closeSessionTile(storedSessionId)
@@ -2190,7 +2165,7 @@ export function useSessionActions({
         notify({ durationMs: 2_000, kind: 'success', message: copy.archived })
       } catch (err) {
         if (archived) {
-          setSessions(prev => [archived, ...prev.filter(session => !sessionMatchesStoredId(session, storedSessionId))])
+          restoreListedSession(archived, listed?.slice)
         }
 
         untombstoneSessions(archivedIds)

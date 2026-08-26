@@ -132,6 +132,25 @@ describe('useSessionTileDelegate resumeTile', () => {
     expect(requestGateway).not.toHaveBeenCalled()
   })
 
+  it('carries a session row connection owner into a same-named tile resume', async () => {
+    setSessions([row({ connection_id: 'source-b', id: 'stored-shared', profile: 'default' })])
+
+    const ambientRequest = vi.fn(async () => ({}) as never)
+    vi.mocked(requestGatewayForAgent).mockResolvedValueOnce({ session_id: 'runtime-shared' } as never)
+
+    renderTile(ambientRequest)
+    const runtimeId = await sessionTileDelegate()!.resumeTile('stored-shared')
+
+    expect(runtimeId).toBe('runtime-shared')
+    expect(requestGatewayForAgent).toHaveBeenCalledWith('source-b', 'default', 'session.resume', {
+      session_id: 'stored-shared',
+      cols: 96,
+      omit_messages: true,
+      profile: 'default'
+    })
+    expect(ambientRequest).not.toHaveBeenCalled()
+  })
+
   it('routes a Bot tile prefetch and resume through its exact connection owner', async () => {
     const route = {
       connectionId: 'barry',
@@ -206,6 +225,31 @@ describe('useSessionTileDelegate resumeTile', () => {
     )
   })
 
+  it('hydrates the tile model and provider from resume info', async () => {
+    setSessions([row({ id: 'stored-model', profile: 'default' })])
+
+    const updateSessionState = vi.fn()
+
+    vi.mocked(requestGatewayForProfile).mockResolvedValueOnce({
+      info: { fast: true, model: 'gpt-5', provider: 'openai', reasoning_effort: 'high', running: false },
+      session_id: 'runtime-model'
+    } as never)
+
+    renderTile(vi.fn(), { updateSessionState })
+    const runtimeId = await sessionTileDelegate()!.resumeTile('stored-model')
+
+    expect(runtimeId).toBe('runtime-model')
+    expect(updateSessionState).toHaveBeenCalled()
+
+    const updater = updateSessionState.mock.calls[0][1] as (state: { messages: unknown[] }) => Record<string, unknown>
+    const next = updater({ messages: [] })
+
+    expect(next.model).toBe('gpt-5')
+    expect(next.provider).toBe('openai')
+    expect(next.reasoningEffort).toBe('high')
+    expect(next.fast).toBe(true)
+  })
+
   it('invalidateRuntimeBindings clears the stored→runtime map so tiles re-resume after reconnect', async () => {
     setSessions([row({ id: 'stored-c', profile: 'default' })])
 
@@ -229,58 +273,42 @@ describe('useSessionTileDelegate resumeTile', () => {
   })
 })
 
-describe('useSessionTileDelegate resumeTile runtime info (#93892)', () => {
-  beforeEach(() => {
-    setSessions([])
-  })
-
-  afterEach(() => {
-    setSessions([])
-  })
-
-  const resumeWithInfo = async (info: Record<string, unknown>, cached: Record<string, unknown>) => {
-    setSessions([row({ id: 'stored-info', profile: 'bot' })])
-    vi.mocked(requestGatewayForProfile).mockResolvedValueOnce({ info, session_id: 'runtime-info' } as never)
+describe('useSessionTileDelegate retireBusyClaim', () => {
+  it('retires a stale busy claim through the session-state write path (#93059)', () => {
+    const busyState = { awaitingResponse: true, busy: true, messages: [{ id: 'm1' }], storedSessionId: 'stored-d' }
+    const sessionStateByRuntimeIdRef = { current: new Map([['runtime-dead', busyState]]) }
     const updateSessionState = vi.fn()
 
     renderTile(
       vi.fn(async () => ({}) as never),
-      { updateSessionState }
-    )
-    await sessionTileDelegate()!.resumeTile('stored-info')
-
-    const [runtimeId, updater] = updateSessionState.mock.calls[0] as [string, (state: unknown) => unknown]
-    expect(runtimeId).toBe('runtime-info')
-
-    return updater({ busy: false, messages: [], model: '', provider: '', ...cached }) as Record<string, unknown>
-  }
-
-  it('lands the resume response’s model/provider in tile state so the pill never waits on session.info', async () => {
-    // The owner socket can churn before a `session.info` ever arrives; the
-    // resume response already names the model, so a cold tile paints it now.
-    const next = await resumeWithInfo({ model: 'nous/hermes-4', provider: 'nous', running: false }, {})
-
-    expect(next.model).toBe('nous/hermes-4')
-    expect(next.provider).toBe('nous')
-    expect(next.busy).toBe(false)
-  })
-
-  it('fills gaps only — a model a session.info already published stays authoritative', async () => {
-    const next = await resumeWithInfo(
-      { model: 'profile-default', provider: '', running: true },
-      { model: 'session/picked', provider: 'openai' }
+      { sessionStateByRuntimeIdRef, updateSessionState }
     )
 
-    expect(next.model).toBe('session/picked')
-    expect(next.provider).toBe('openai')
-    expect(next.busy).toBe(true)
+    expect(sessionTileDelegate()!.retireBusyClaim!('runtime-dead')).toBe(true)
+    expect(updateSessionState).toHaveBeenCalledWith('runtime-dead', expect.any(Function))
+
+    // The updater is the downgrade: busy/awaiting off, everything else intact.
+    const updater = updateSessionState.mock.calls[0][1] as (state: typeof busyState) => typeof busyState
+
+    expect(updater(busyState)).toEqual({ ...busyState, awaitingResponse: false, busy: false })
   })
 
-  it('ignores an empty or missing model in the resume response', async () => {
-    const next = await resumeWithInfo({ model: '   ', running: false }, {})
+  it('reports a miss instead of minting a cache entry for a runtime it never held', () => {
+    // No phantoms: updateSessionState mints a state for any id it is handed,
+    // and prune never collects a transcript-less entry — so a miss must not
+    // reach the write path; the store retires its own mirror instead.
+    const idle = { awaitingResponse: false, busy: false, messages: [{ id: 'm1' }], storedSessionId: 'stored-e' }
+    const sessionStateByRuntimeIdRef = { current: new Map([['runtime-idle', idle]]) }
+    const updateSessionState = vi.fn()
 
-    expect(next.model).toBe('')
-    expect(next.provider).toBe('')
+    renderTile(
+      vi.fn(async () => ({}) as never),
+      { sessionStateByRuntimeIdRef, updateSessionState }
+    )
+
+    expect(sessionTileDelegate()!.retireBusyClaim!('runtime-unknown')).toBe(false)
+    expect(sessionTileDelegate()!.retireBusyClaim!('runtime-idle')).toBe(false)
+    expect(updateSessionState).not.toHaveBeenCalled()
   })
 })
 

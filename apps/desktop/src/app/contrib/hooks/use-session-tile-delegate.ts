@@ -2,29 +2,19 @@ import { useEffect } from 'react'
 
 import { getLatestSessionMessages, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS } from '@/hermes'
 import { toChatMessages } from '@/lib/chat-messages'
-import { $sessions, getSessionOwnerHint, knownSessionOwner } from '@/store/session'
+import { $sessions, knownSessionOwner } from '@/store/session'
 import { requestForSessionProfile, type SessionOwnerScope } from '@/store/session-request-router'
-import {
-  publishSessionState,
-  recordTileOwner,
-  sessionTileOwnerRoute,
-  setSessionTileDelegate
-} from '@/store/session-states'
+import { publishSessionState, sessionTileOwnerRoute, setSessionTileDelegate } from '@/store/session-states'
 import type { SessionResumeResponse } from '@/types/hermes'
 
 import type { usePromptActions } from '../../session/hooks/use-prompt-actions'
 import { singleFlightSessionResume } from '../../session/hooks/use-prompt-actions/single-flight-resume'
 import { markSessionRecentlyInterrupted, withSessionNotFoundResume } from '../../session/hooks/use-prompt-actions/utils'
-import { resolveSessionOwner } from '../../session/hooks/use-session-actions/utils'
+import { resolveSessionProfile } from '../../session/hooks/use-session-actions/utils'
 import type { useSessionStateCache } from '../../session/hooks/use-session-state-cache'
 import type { GatewayRequester } from '../types'
 
 type SessionStateCache = ReturnType<typeof useSessionStateCache>
-
-/** A non-empty string field off `session.resume`'s `info`, else undefined. */
-function resumedInfoField(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value : undefined
-}
 
 interface SessionTileDelegateParams {
   archiveSession: (storedSessionId: string) => Promise<unknown>
@@ -84,15 +74,11 @@ export function useSessionTileDelegate({
       }
     }
 
-    // Same ladder as the window's session-RPC dispatcher: exact hint → tile
-    // route → the row's owner (exact when connection-tagged, else profile) →
-    // the async cross-profile probe (exact when the resolved row is tagged).
     const ownerForStoredSession = async (storedSessionId: string): Promise<SessionOwnerScope> => {
       const owner =
-        getSessionOwnerHint(storedSessionId) ??
         sessionTileOwnerRoute(storedSessionId) ??
         knownSessionOwner($sessions.get(), storedSessionId) ??
-        (await resolveSessionOwner(storedSessionId))
+        (await resolveSessionProfile(storedSessionId))
 
       return owner
     }
@@ -132,6 +118,21 @@ export function useSessionTileDelegate({
             runtimeIdByStoredSessionIdRef.current.delete(storedSessionId)
           }
         }
+      },
+      // Reconnect reconcile (#93059): retire an orphaned runtime's busy claim
+      // through updateSessionState so the cache, focused view, busyRef and
+      // tile mirrors settle together. A runtime this cache never held reports
+      // false instead of minting an entry; the store downgrades its mirror.
+      retireBusyClaim: runtimeId => {
+        const cached = sessionStateByRuntimeIdRef.current.get(runtimeId)
+
+        if (!cached || (!cached.busy && !cached.awaitingResponse)) {
+          return false
+        }
+
+        updateSessionState(runtimeId, state => ({ ...state, awaitingResponse: false, busy: false }))
+
+        return true
       },
       interruptSession: async runtimeId => {
         // Same cooldown as the primary chat's Stop (#83855): the gateway may
@@ -184,10 +185,6 @@ export function useSessionTileDelegate({
         // the same cross-profile bleed the recovery resumes had (#67603).
         const owner = await ownerForStoredSession(storedSessionId)
 
-        // Name the socket this resume is about to mint its runtime on, so the
-        // gateway registry keeps it for as long as the tile is open (#93892).
-        recordTileOwner(storedSessionId, owner)
-
         const restScope =
           owner && typeof owner === 'object'
             ? { connectionId: owner.connectionId, profile: owner.targetProfile || owner.profile }
@@ -211,25 +208,21 @@ export function useSessionTileDelegate({
           throw new Error('resume returned no session id')
         }
 
-        // The resume response already names the session's model/provider.
-        // Land them in tile state now instead of waiting on a `session.info`
-        // event that never arrives when the owner socket churns — a tile with
-        // an empty model rendered the pill's loader with no end (#93892). Fill
-        // only: a value a `session.info` already published stays authoritative.
-        const resumedModel = resumedInfoField(resumed?.info?.model)
-        const resumedProvider = resumedInfoField(resumed?.info?.provider)
+        const info = resumed?.info
 
         updateSessionState(
           runtimeId,
           state => ({
             ...state,
-            busy: Boolean(resumed?.info?.running),
+            busy: Boolean(info?.running),
+            // Persist the session's own model/provider from resume so the tile
+            // pill does not wait on a chrome-scoped catalog read (#93892).
+            ...(typeof info?.model === 'string' ? { model: info.model } : {}),
+            ...(typeof info?.provider === 'string' ? { provider: info.provider } : {}),
+            ...(typeof info?.reasoning_effort === 'string' ? { reasoningEffort: info.reasoning_effort } : {}),
+            ...(typeof info?.fast === 'boolean' ? { fast: info.fast } : {}),
             messages:
-              state.messages.length > 0
-                ? state.messages
-                : toChatMessages(prefetch?.messages ?? resumed?.messages ?? []),
-            ...(resumedModel && !state.model ? { model: resumedModel } : {}),
-            ...(resumedProvider && !state.provider ? { provider: resumedProvider } : {})
+              state.messages.length > 0 ? state.messages : toChatMessages(prefetch?.messages ?? resumed?.messages ?? [])
           }),
           storedSessionId
         )

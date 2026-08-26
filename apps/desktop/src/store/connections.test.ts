@@ -70,7 +70,6 @@ vi.mock('@/store/profile', () => ({
   $activeGatewayProfile,
   $newChatProfile,
   $showAllProfiles,
-  captureNewChatSource: vi.fn(),
   ensureGatewayAgent,
   normalizeProfileKey: (name: null | string | undefined) => (name ?? '').trim() || 'default',
   openGatewayAgent,

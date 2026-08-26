@@ -6,11 +6,11 @@ import type { ContextSuggestion } from '@/app/types'
 import type { HermesConnection } from '@/global'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { activeConnectionScopeSuffix, rescopeConnectionScopedStores } from '@/lib/connection-scoped'
-import { persistBoolean, persistString, readJson, storedBoolean, storedString, writeJson } from '@/lib/storage'
+import { persistBoolean, persistString, storedBoolean, storedString } from '@/lib/storage'
 import { syncCronModelImpactConnection } from '@/store/cron-model-impact-scope'
 import type { SessionInfo, UsageStats } from '@/types/hermes'
 
-import { type SessionOwnerRoute, sessionOwnerRouteFromRow, type SessionOwnerScope } from './session-request-router'
+import type { SessionProfileRoute } from './session-request-router'
 import { clearUnreadOnOpen } from './session-unread-remote'
 
 type Updater<T> = T | ((current: T) => T)
@@ -126,37 +126,46 @@ export function sessionBelongsToProfile(
  * often the only sync source.
  */
 export function knownSessionProfile(sessions: readonly SessionInfo[], sessionId: null | string): string | undefined {
-  if (!sessionId) {
-    return undefined
-  }
+  const owner = knownSessionOwner(sessions, sessionId)
 
-  const owner = sessions.find(session => sessionMatchesStoredId(session, sessionId))?.profile?.trim()
-
-  if (owner) {
-    return owner
-  }
-
-  const hint = getSessionOwnerHint(sessionId)
-
-  return (hint?.targetProfile ?? hint?.profile)?.trim() || undefined
+  return typeof owner === 'string' ? owner : (owner?.targetProfile ?? owner?.profile)?.trim() || undefined
 }
 
 /**
- * The owner a session ROW names: the EXACT route when the row is
- * connection-tagged (an optimistic row from a routed create, a foreign
- * registry row from the unified-list splice, or a tag mergeSessionPage carried
- * across a refresh), else the bare profile ladder of knownSessionProfile. The
- * exact rung is what lets a session's owner be reconstructed after the
- * bounded, transient hint map has evicted it or the app relaunched.
+ * The complete known owner of a session, including its registry connection
+ * when the row or an open-time hint carries one. Session-scoped RPC callers
+ * must use this instead of `knownSessionProfile`: two sources can expose the
+ * same profile name, so returning only that name silently collapses the route
+ * back to the local/profile-only path.
  */
-export function knownSessionOwner(sessions: readonly SessionInfo[], sessionId: null | string): SessionOwnerScope {
+export function knownSessionOwner(
+  sessions: readonly SessionInfo[],
+  sessionId: null | string
+): SessionProfileRoute | string | undefined {
   if (!sessionId) {
     return undefined
   }
 
-  const row = sessions.find(session => sessionMatchesStoredId(session, sessionId))
+  const session = sessions.find(candidate => sessionMatchesStoredId(candidate, sessionId))
+  const profile = session?.profile?.trim()
+  const connectionId = session?.connection_id?.trim()
+  const hint = getSessionOwnerHint(sessionId)
 
-  return sessionOwnerRouteFromRow(row) ?? knownSessionProfile(sessions, sessionId)
+  if (connectionId) {
+    return { connectionId, profile: profile || 'default' }
+  }
+
+  const hintProfiles = new Set([hint?.profile.trim() || 'default', hint?.targetProfile?.trim() || 'default'])
+
+  if (hint && (!profile || hintProfiles.has(profile || 'default'))) {
+    return hint
+  }
+
+  if (profile) {
+    return profile
+  }
+
+  return hint
 }
 
 /**
@@ -166,7 +175,7 @@ export function knownSessionOwner(sessions: readonly SessionInfo[], sessionId: n
  *
  * Do NOT use this to ROUTE a session-scoped RPC: the active-profile fallback is
  * exactly what sends a hidden/unlisted session's RPC to a backend that never
- * owned it. Routing must use `knownSessionProfile` + a cross-profile probe and
+ * owned it. Routing must use `knownSessionOwner` + a cross-profile probe and
  * surface an error instead of falling back. This remains for the navigation
  * keying it was written for.
  */
@@ -217,9 +226,7 @@ export type NewChatWorkspaceTarget = null | string | undefined
 
 export const getConfiguredDefaultProjectDir = (): string => configuredDefaultProjectDir
 
-export async function syncConfiguredDefaultProjectDir(
-  shouldPublish: () => boolean = () => true
-): Promise<string> {
+export async function syncConfiguredDefaultProjectDir(shouldPublish: () => boolean = () => true): Promise<string> {
   const settings = window.hermesDesktop?.settings?.getDefaultProjectDir
 
   if (!settings) {
@@ -450,24 +457,6 @@ export function resolveComposerSessionKey(
  *  either its live `id` or its `_lineage_root_id`. Optimistic deletes/archives
  *  drop the row from `previous` (and unpin it), so a removed session can't be
  *  resurrected here. */
-const profileKeyOf = (profile: null | string | undefined): string => (profile ?? '').trim() || 'default'
-
-function carriedConnectionId(prev: SessionInfo | undefined, incoming: SessionInfo): string | undefined {
-  if (incoming.connection_id?.trim()) {
-    return incoming.connection_id
-  }
-
-  const carried = prev?.connection_id?.trim()
-
-  if (!carried) {
-    return undefined
-  }
-
-  return !incoming.profile?.trim() || profileKeyOf(incoming.profile) === profileKeyOf(prev?.profile)
-    ? carried
-    : undefined
-}
-
 export function mergeSessionPage(
   previous: SessionInfo[],
   incoming: SessionInfo[],
@@ -491,19 +480,8 @@ export function mergeSessionPage(
     // (last_active = MAX(messages.timestamp)). Keep the fresher of the two.
     const last_active = Math.max(prev?.last_active ?? 0, session.last_active ?? 0)
     const title = session.title?.trim() ? session.title : prev?.title?.trim() ? prev.title : session.title
-    // Carry the owning connection onto a row that arrives untagged. The
-    // primary aggregate serves a `local` registry source's rows as plain
-    // local rows (the unified-list splice tags only NON-local sources), so
-    // the first refresh after a routed create used to replace the optimistic
-    // row's exact owner (connection_id + profile) with a bare profile — after
-    // which only the transient owner hint knew which socket held the runtime.
-    // A refresh is new information layered over what we know, not a clobber;
-    // the tag is kept only while the row still names the same profile.
-    const connection_id = carriedConnectionId(prev, session)
 
-    return last_active === session.last_active && title === session.title && connection_id === session.connection_id
-      ? session
-      : { ...session, last_active, title, ...(connection_id ? { connection_id } : {}) }
+    return last_active === session.last_active && title === session.title ? session : { ...session, last_active, title }
   })
 
   if (keep.size === 0) {
@@ -679,53 +657,31 @@ export const $awaitingResponse = atom(false)
 // Null whenever the active route has a healthy (or in-flight) resume.
 export const $resumeFailedSessionId = atom<string | null>(null)
 export interface SessionResumeRequest {
-  ownerRoute?: SessionOwnerRoute
+  ownerRoute?: SessionProfileRoute
   sequence: number
   sessionId: string
 }
 let sessionResumeRequestSequence = 0
 export const $sessionResumeRequest = atom<SessionResumeRequest | null>(null)
-// ── Exact session owner hints ───────────────────────────────────────────────
-// The (connectionId, profile[, targetProfile, mode]) route a session was
-// created / resumed / opened on, keyed by stored id. Bounded LRU and
-// PERSISTED (best-effort, same origin storage as the tiles): the runtime a
-// routed create minted lives on one concrete socket, and after the sidebar
-// refresh replaced the optimistic row, or after a relaunch, this record is
-// how the exact owner is reconstructed for that session's next RPC instead of
-// degrading to a bare profile name that dials a different socket. Connection
-// ids are stable registry identities (`local`, registry uuids), so a hint
-// stays valid across restarts; forgetSessionOwnerHintsForConnection drops
-// them when a connection is removed from the registry.
 const SESSION_OWNER_HINT_LIMIT = 256
-const SESSION_OWNER_HINTS_KEY = 'hermes.desktop.sessionOwnerHints.v1'
-const sessionOwnerHints = new Map<string, { id: string; route: SessionOwnerRoute }>()
+const sessionOwnerHints = new Map<string, { id: string; route: SessionProfileRoute }>()
 
-function sessionOwnerHintKey(sessionId: string, route: Pick<SessionOwnerRoute, 'connectionId' | 'profile'>): string {
+function sessionOwnerHintKey(sessionId: string, route: Pick<SessionProfileRoute, 'connectionId' | 'profile'>): string {
   return JSON.stringify([route.connectionId.trim(), route.profile.trim() || 'default', sessionId])
 }
 
-function normalizeOwnerRoute(route: SessionOwnerRoute): SessionOwnerRoute {
-  return {
+export function setSessionOwnerHint(sessionId: string, route: SessionProfileRoute): void {
+  const id = sessionId.trim()
+
+  const normalized = {
     ...route,
     connectionId: route.connectionId.trim(),
     profile: route.profile.trim() || 'default',
     ...(route.targetProfile ? { targetProfile: route.targetProfile.trim() || 'default' } : {})
   }
-}
-
-function persistSessionOwnerHints(): void {
-  writeJson(
-    SESSION_OWNER_HINTS_KEY,
-    sessionOwnerHints.size === 0 ? null : [...sessionOwnerHints.values()].map(entry => [entry.id, entry.route])
-  )
-}
-
-function rememberSessionOwnerHint(sessionId: string, route: SessionOwnerRoute): boolean {
-  const id = sessionId.trim()
-  const normalized = normalizeOwnerRoute(route)
 
   if (!id || !normalized.connectionId) {
-    return false
+    return
   }
 
   const key = sessionOwnerHintKey(id, normalized)
@@ -741,89 +697,9 @@ function rememberSessionOwnerHint(sessionId: string, route: SessionOwnerRoute): 
 
     sessionOwnerHints.delete(oldest)
   }
-
-  return true
 }
 
-/** Load persisted hints (oldest first, so LRU order survives). Malformed or
- *  foreign-shaped entries are skipped; nothing here can throw. */
-export function hydrateSessionOwnerHints(): void {
-  const raw = readJson<unknown>(SESSION_OWNER_HINTS_KEY)
-
-  if (!Array.isArray(raw)) {
-    return
-  }
-
-  for (const entry of raw) {
-    if (!Array.isArray(entry) || entry.length !== 2) {
-      continue
-    }
-
-    const [id, route] = entry as [unknown, unknown]
-
-    if (
-      typeof id !== 'string' ||
-      !route ||
-      typeof route !== 'object' ||
-      typeof (route as SessionOwnerRoute).connectionId !== 'string' ||
-      typeof (route as SessionOwnerRoute).profile !== 'string'
-    ) {
-      continue
-    }
-
-    const candidate = route as SessionOwnerRoute
-
-    rememberSessionOwnerHint(id, {
-      connectionId: candidate.connectionId,
-      profile: candidate.profile,
-      ...(typeof candidate.targetProfile === 'string' ? { targetProfile: candidate.targetProfile } : {}),
-      ...(candidate.mode === 'local' || candidate.mode === 'remote' ? { mode: candidate.mode } : {})
-    })
-  }
-}
-
-hydrateSessionOwnerHints()
-
-export function setSessionOwnerHint(sessionId: string, route: SessionOwnerRoute): void {
-  if (rememberSessionOwnerHint(sessionId, route)) {
-    persistSessionOwnerHints()
-  }
-}
-
-/** Drop every hint naming `connectionId` — the registry no longer has it, so
- *  nothing can dial that route again (fail-closed would otherwise pin those
- *  sessions to a dead source forever). */
-export function forgetSessionOwnerHintsForConnection(connectionId: string): void {
-  const id = connectionId.trim()
-
-  if (!id) {
-    return
-  }
-
-  let changed = false
-
-  for (const [key, entry] of [...sessionOwnerHints]) {
-    if (entry.route.connectionId === id) {
-      sessionOwnerHints.delete(key)
-      changed = true
-    }
-  }
-
-  if (changed) {
-    persistSessionOwnerHints()
-  }
-}
-
-/** @internal Tests: forget every in-memory hint (storage untouched unless asked). */
-export function _resetSessionOwnerHintsForTests({ storage = false }: { storage?: boolean } = {}): void {
-  sessionOwnerHints.clear()
-
-  if (storage) {
-    writeJson(SESSION_OWNER_HINTS_KEY, null)
-  }
-}
-
-export function getSessionOwnerHints(sessionId: string): SessionOwnerRoute[] {
+export function getSessionOwnerHints(sessionId: string): SessionProfileRoute[] {
   const id = sessionId.trim()
 
   return [...sessionOwnerHints.values()].filter(entry => entry.id === id).map(entry => ({ ...entry.route }))
@@ -831,8 +707,8 @@ export function getSessionOwnerHints(sessionId: string): SessionOwnerRoute[] {
 
 export function getSessionOwnerHint(
   sessionId: string,
-  scope?: Pick<SessionOwnerRoute, 'connectionId' | 'profile'>
-): SessionOwnerRoute | undefined {
+  scope?: Pick<SessionProfileRoute, 'connectionId' | 'profile'>
+): SessionProfileRoute | undefined {
   const id = sessionId.trim()
 
   if (scope) {
@@ -1020,7 +896,7 @@ export const setMessages = (next: Updater<ChatMessage[]>) => updateAtom($message
 export const setFreshDraftReady = (next: Updater<boolean>) => updateAtom($freshDraftReady, next)
 export const setResumeFailedSessionId = (next: Updater<string | null>) => updateAtom($resumeFailedSessionId, next)
 
-export const requestSessionResume = (sessionId: string, ownerRoute?: SessionOwnerRoute) => {
+export const requestSessionResume = (sessionId: string, ownerRoute?: SessionProfileRoute) => {
   const id = sessionId.trim()
 
   if (!id) {

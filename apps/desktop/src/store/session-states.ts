@@ -16,7 +16,7 @@
  * itself here as the delegate so tile UI stays dependency-light.
  */
 
-import { registryBackendScopeKey } from '@hermes/shared'
+import { LOCAL_CONNECTION_ID, registryBackendScopeKey } from '@hermes/shared'
 import { atom, computed } from 'nanostores'
 
 import type { ClientSessionState } from '@/app/types'
@@ -38,25 +38,21 @@ import { $activeGatewayProfile, normalizeProfileKey } from './profile'
 import { clearAllProviderWaits, clearSessionProviderWait } from './provider-wait'
 import {
   $activeSessionId,
+  $connection,
   $lastReadAtBySessionId,
   $selectedStoredSessionId,
   $sessions,
   clearReadBaseline,
-  getSessionOwnerHint,
   knownSessionOwner,
   lineageAliases,
   markSessionRead,
   sessionMatchesStoredId,
   setActiveSessionStoredIdRotation,
+  setAwaitingResponse,
+  setBusy,
   setSessions
 } from './session'
-import { assertSessionOwnerResolved } from './session-owner-resolution'
-import {
-  requestForSessionProfile,
-  type SessionOwnerRoute,
-  type SessionOwnerScope,
-  type SessionProfileRoute
-} from './session-request-router'
+import { requestForSessionProfile, type SessionOwnerScope, type SessionProfileRoute } from './session-request-router'
 import { ackStoredSessionId, markSessionUnreadFinished } from './session-unread'
 import { isBrowserWindow, isSecondaryWindow } from './windows'
 
@@ -105,196 +101,41 @@ export function liveSessionScopes(): Set<string> {
   return scopes
 }
 
-// Owner a tile's resume actually resolved (use-session-tile-delegate), keyed
-// by stored id. A route-less local Bot Chat — legacy roster row, primary
-// active — has no ownerRoute, no owner hint and no sidebar row, so without
-// this record foregroundSessionScopes could not name its socket (#93892).
-const resolvedTileOwners = new Map<string, SessionOwnerScope>()
-
-export function recordTileOwner(storedSessionId: string, owner: SessionOwnerScope): void {
-  if (!storedSessionId || !owner) {
-    return
-  }
-
-  resolvedTileOwners.set(storedSessionId, owner)
-}
-
-// ── Owner hold across the create → foreground gap ───────────────────────────
-// A routed session.create returns a stored id on the owner's socket, but the
-// surface that will PIN that socket (the selected primary thread, or a tile)
-// is published later and asynchronously: navigate → route effect →
-// $selectedStoredSessionId, or openSessionTile → $sessionTiles. In that gap
-// the entry has no active request, is not yet foreground-bound and, if the
-// user switched source meanwhile, is not the active key either — so the
-// live-work pruner or a refcount-0 lease release could close the socket that
-// holds the just-minted runtime before the first prompt.submit. The hold
-// names the owner in foregroundSessionScopes from the moment the create
-// returns until the foreground publication takes over (the stored id becomes
-// selected or tiled), the caller releases it (failed create / drift close),
-// or a bounded TTL expires — nothing latches.
-const SESSION_OWNER_HOLD_TTL_MS = 60_000
-
-const sessionOwnerHolds = new Map<
-  string,
-  { owner: SessionOwnerScope; timer: ReturnType<typeof setTimeout>; until: number }
->()
-
-export const $sessionOwnerHoldRevision = atom(0)
-
-function bumpSessionOwnerHoldRevision(): void {
-  $sessionOwnerHoldRevision.set($sessionOwnerHoldRevision.get() + 1)
-}
-
-function forgetSessionOwnerHold(storedSessionId: string, publish: boolean): boolean {
-  const hold = sessionOwnerHolds.get(storedSessionId)
-
-  if (!hold) {
-    return false
-  }
-
-  clearTimeout(hold.timer)
-  sessionOwnerHolds.delete(storedSessionId)
-
-  if (publish) {
-    bumpSessionOwnerHoldRevision()
-  }
-
-  return true
-}
-
-export function holdSessionOwnerUntilForeground(storedSessionId: string, owner: SessionOwnerScope): () => void {
-  const id = storedSessionId.trim()
-
-  if (!id || !owner) {
-    return () => undefined
-  }
-
-  forgetSessionOwnerHold(id, false)
-  const until = Date.now() + SESSION_OWNER_HOLD_TTL_MS
-  const timer = setTimeout(() => releaseSessionOwnerHold(id), SESSION_OWNER_HOLD_TTL_MS)
-
-  sessionOwnerHolds.set(id, { owner, timer, until })
-  bumpSessionOwnerHoldRevision()
-
-  return () => releaseSessionOwnerHold(id)
-}
-
-export function releaseSessionOwnerHold(storedSessionId: string): void {
-  forgetSessionOwnerHold(storedSessionId.trim(), true)
-}
-
-/** @internal Tests. */
-export function _resetSessionOwnerHoldsForTests(): void {
-  const hadHolds = sessionOwnerHolds.size > 0
-
-  for (const hold of sessionOwnerHolds.values()) {
-    clearTimeout(hold.timer)
-  }
-
-  sessionOwnerHolds.clear()
-
-  if (hadHolds) {
-    bumpSessionOwnerHoldRevision()
-  }
-}
-
 /**
- * Scopes a FOREGROUND surface is bound to right now — every mounted session
- * tile's owner plus the primary thread's — the foreground half of the
- * gateway registry's dispose guard (its `foregroundScopes` hook, #93892).
- * Live work alone (liveSessionScopes) is not enough: an idle tile still
- * holds a resumed runtime on its owner's socket. Closing that socket makes
- * the backend detach and orphan-reap the runtime, whose `session.reclaimed`
- * unbinds the tile, whose resume effect binds a fresh runtime on a fresh
- * socket, which the next dispose decision closes again — a spinner loop with
- * no terminal state.
+ * Registry scopes owned by an open foreground surface, when known.
  *
- * Owners are named by authoritative precedence (persisted tile route, owner
- * hint, the owner the delegate recorded), falling back to the session row's
- * profile. Route-owned surfaces map to their composite (connectionId,
- * profile) scope; profile-owned ones to the bare profile key the local/legacy
- * pool entries match on. The set follows `$sessionTiles` /
- * `$selectedStoredSessionId`, so closing the tile (or navigating away)
- * releases the socket — nothing latches. Cost, deliberately: every open
- * tile (including a background Bot Chat tab) keeps its owner's socket and
- * backend alive for as long as it is open.
+ * The secondary-gateway pruner normally keeps only busy/needs-input work. A
+ * source switch briefly changes the active gateway before an idle conversation
+ * is cleared, so the primary runtime must survive that handoff. Open panes have
+ * the same ownership contract: a non-focused idle tile is still user-visible
+ * state and must not be evicted just because another pane has focus. Prefer the
+ * live event scope, with the tile's persisted route as the pre-bind fallback.
  */
 export function foregroundSessionScopes(): Set<string> {
   const scopes = new Set<string>()
-  const sessions = $sessions.get()
 
-  const ownerScopeKey = (owner: SessionOwnerScope): string | undefined => {
-    if (!owner) {
-      return undefined
-    }
+  const addRuntimeScope = (runtimeId: string | undefined) => {
+    const scope = runtimeId ? sessionScopeByRuntimeId.get(runtimeId) : undefined
 
-    if (typeof owner === 'string') {
-      return normalizeProfileKey(owner)
-    }
-
-    if (!owner.connectionId.trim()) {
-      return undefined
-    }
-
-    return registryBackendScopeKey(owner.connectionId, normalizeProfileKey(owner.profile))
-  }
-
-  const addStoredSession = (storedSessionId: string, route: SessionProfileRoute | undefined) => {
-    // One surface has one owner. Persisted tile routing is authoritative;
-    // hints and the last resolved owner are recovery fallbacks only. Resolve
-    // the precedence first so stale candidates never pin extra sockets.
-    const candidates: SessionOwnerScope[] = [
-      route,
-      getSessionOwnerHint(storedSessionId),
-      resolvedTileOwners.get(storedSessionId),
-      knownSessionOwner(sessions, storedSessionId)
-    ]
-
-    for (const candidate of candidates) {
-      const key = ownerScopeKey(candidate)
-
-      if (key) {
-        scopes.add(key)
-
-        return
-      }
+    if (scope) {
+      scopes.add(scope)
     }
   }
 
-  const tiles = $sessionTiles.get()
+  const addRouteScope = (route: SessionProfileRoute | undefined) => {
+    const connectionId = route?.connectionId?.trim()
+    const profile = route?.profile?.trim()
 
-  for (const tile of tiles) {
-    addStoredSession(tile.storedSessionId, tile.ownerRoute)
+    if (connectionId && profile) {
+      scopes.add(registryBackendScopeKey(connectionId, profile))
+    }
   }
 
-  const selected = $selectedStoredSessionId.get()
+  addRuntimeScope($activeSessionId.get() ?? undefined)
 
-  if (selected) {
-    addStoredSession(selected, sessionTileOwnerRoute(selected))
-  }
-
-  // Create → foreground holds. A hold whose session is now selected or tiled
-  // is covered by the rungs above and retires; an expired one retires too.
-  const now = Date.now()
-
-  for (const [storedSessionId, hold] of [...sessionOwnerHolds]) {
-    if (
-      hold.until <= now ||
-      storedSessionId === selected ||
-      tiles.some(tile => tile.storedSessionId === storedSessionId)
-    ) {
-      // This recompute was already triggered by the selected/tile publication
-      // (or is itself observing expiry), so avoid recursively publishing.
-      forgetSessionOwnerHold(storedSessionId, false)
-
-      continue
-    }
-
-    const key = ownerScopeKey(hold.owner)
-
-    if (key) {
-      scopes.add(key)
-    }
+  for (const tile of $sessionTiles.get()) {
+    addRuntimeScope(tile.runtimeId)
+    addRouteScope(tile.ownerRoute)
   }
 
   return scopes
@@ -602,7 +443,17 @@ export function clearAllSessionStates() {
  *  answer, and post-reconnect refresh re-asserts or retires it via its own
  *  path. Transition side-effects run through publishSessionState, so
  *  watchdogs disarm, stall hints drop, and settle/unread bookkeeping stays
- *  consistent. */
+ *  consistent.
+ *
+ *  The downgrade goes through the delegate's `retireBusyClaim` (the wiring
+ *  cache's updateSessionState), not straight into this mirror: the claim has
+ *  four holders — wiring cache, mirror, the focused view's draft latches,
+ *  busyRef — and retiring only the mirror left Send silently no-oping behind
+ *  a stale busy until restart (#93059). The mirror publish stays as the
+ *  fallback for runtimes the cache never held (background-sync rows, no
+ *  wiring mounted). A PRIMARY reconcile also clears the focused draft
+ *  latches, which outlive the state they mirrored; a scoped one leaves them
+ *  alone — a background socket says nothing about the primary composer. */
 export function reconcileBusyStatesOnReconnect(scope?: string) {
   const states = $sessionStates.get()
 
@@ -617,7 +468,19 @@ export function reconcileBusyStatesOnReconnect(scope?: string) {
       continue
     }
 
-    publishSessionState(runtimeId, { ...state, awaitingResponse: false, busy: false })
+    sessionTileDelegate()?.retireBusyClaim?.(runtimeId)
+
+    // Re-read — the write path may have republished (and released) this entry.
+    const published = $sessionStates.get()[runtimeId]
+
+    if (published?.busy || published?.awaitingResponse) {
+      publishSessionState(runtimeId, { ...published, awaitingResponse: false, busy: false })
+    }
+  }
+
+  if (scope === undefined) {
+    setBusy(false)
+    setAwaitingResponse(false)
   }
 }
 
@@ -745,13 +608,13 @@ export interface SessionTile {
   /** Exact opaque owner key for Bot Mode tabs. */
   workspaceOwnerKey?: string
   /** Credential-free exact route used to resume this tab after relaunch. */
-  ownerRoute?: SessionOwnerRoute
+  ownerRoute?: SessionProfileRoute
   /** Stable title for hidden relationship chats absent from the Sessions list. */
   workspaceTabTitle?: string
 }
 
 export interface SessionTileWorkspaceScope {
-  ownerRoute?: SessionOwnerRoute
+  ownerRoute?: SessionProfileRoute
   workspaceMode: WorkspaceMode
   workspaceOwnerKey?: string
   workspaceTabTitle?: string
@@ -894,21 +757,6 @@ export const $sessionTiles = atom<SessionTile[]>(
     : [...(tilesByProfile[profileKey()] ?? []), ...(tilesByProfile[BOTS_TILE_BUCKET] ?? [])]
 )
 
-// A resume-resolved owner is useful only while that tile is mounted. Prune at
-// the atom boundary so close, profile switch, restore, and direct test/store
-// replacement all release the record; otherwise repeatedly opened one-off
-// tiles grow resolvedTileOwners forever and can revive stale ownership if a
-// stored id is reused later.
-$sessionTiles.subscribe(tiles => {
-  const mounted = new Set(tiles.map(tile => tile.storedSessionId))
-
-  for (const storedSessionId of resolvedTileOwners.keys()) {
-    if (!mounted.has(storedSessionId)) {
-      resolvedTileOwners.delete(storedSessionId)
-    }
-  }
-})
-
 function persistTiles() {
   // Shares the origin's storage; a secondary / browser pop-out holds no tiles,
   // so a write back would only wipe the primary's set.
@@ -954,20 +802,50 @@ export function patchSessionTile(storedSessionId: string, patch: Partial<Session
   saveTiles($sessionTiles.get().map(t => (t.storedSessionId === storedSessionId ? { ...t, ...patch } : t)))
 }
 
-export function sessionTileOwnerRoute(storedSessionId: string): SessionOwnerRoute | undefined {
+export function sessionTileOwnerRoute(storedSessionId: string): SessionProfileRoute | undefined {
   return $sessionTiles.get().find(tile => tile.storedSessionId === storedSessionId)?.ownerRoute
+}
+
+/**
+ * Gateway keep-set scopes for currently open tiles. Bot chats (and any other
+ * owner-routed tile) hold a secondary socket even while chrome stays on the
+ * launch profile; without these keys, idle prune closes that socket and the
+ * tile's resume/unbind loop spins forever. Local routes contribute both the
+ * bare profile (openGatewayForProfile) and the explicit `conn:local::…` key
+ * (openGatewayForAgent). Remote routes contribute only the composite key so
+ * a homelab tile cannot pin another source's same-named profile.
+ */
+export function openTileGatewayScopes(): Set<string> {
+  const scopes = new Set<string>()
+
+  for (const tile of $sessionTiles.get()) {
+    const route = tile.ownerRoute
+
+    if (!route) {
+      continue
+    }
+
+    const profile = normalizeProfileKey(route.profile)
+    const connectionId = String(route.connectionId ?? '').trim()
+    const localRoute = !connectionId || connectionId === LOCAL_CONNECTION_ID || route.mode === 'local'
+
+    if (localRoute) {
+      scopes.add(profile)
+    }
+
+    if (connectionId) {
+      scopes.add(registryBackendScopeKey(connectionId, profile))
+    }
+  }
+
+  return scopes
 }
 
 /**
  * Sync owner resolution for a session id that may be a RUNTIME or a STORED id.
  * Tile route first (exact connectionId+profile, survives relaunch), then the
- * exact unique owner hint (stamped when a routed create returns / at open
- * time; persisted), then the session row's owner (an exact route when the row
- * is connection-tagged, else its bare profile, else the hint's profile). The
- * hint outranks the row for the same reason as contrib/wiring's ladder: a
- * row can be stamped from the ambient profile and carries no connection.
- * Returns undefined when no owner is known — the caller fails closed
- * (assertSessionOwnerResolved), never falls to "active".
+ * known session owner (row or open-time hint). Returns undefined when no
+ * owner is known — the caller falls back to ambient, never to "active".
  */
 export function knownOwnerForSession(sessionId: null | string | undefined): SessionOwnerScope {
   if (!sessionId) {
@@ -976,121 +854,36 @@ export function knownOwnerForSession(sessionId: null | string | undefined): Sess
 
   const storedSessionId = storedSessionIdForRuntimeId(sessionId) ?? sessionId
 
-  return (
-    sessionTileOwnerRoute(storedSessionId) ??
-    getSessionOwnerHint(storedSessionId) ??
-    knownSessionOwner($sessions.get(), storedSessionId)
-  )
+  return sessionTileOwnerRoute(storedSessionId) ?? knownSessionOwner($sessions.get(), storedSessionId)
 }
 
-export type SessionEventOwnerRouteResolution =
-  { kind: 'ambiguous' } | { kind: 'known'; route: SessionProfileRoute } | { kind: 'unknown' }
-
 /**
- * Resolve the authoritative owner route for one registry event. The registry
- * tags events with the socket route (`profile`), while a persisted tile/hint
- * may additionally name the backend `targetProfile` that owns its catalog.
- * Match both the event source and session identity; never borrow an alias from
- * another connection that happens to reuse the same runtime/stored id.
+ * Whether the connection that OWNS `sessionId` is remote — never the ambient
+ * `$connection`. A session tied to a registered secondary connection (Bot
+ * Mode, the unified Sessions list) can differ from whichever connection the
+ * window currently shows; its RPCs already route to their own owner via
+ * `requestForSessionProfile`, but a caller that instead reads ambient mode to
+ * decide image.attach vs image.attach_bytes ships a client-local path to a
+ * remote backend that can't resolve it (#94640). A bare profile name (no
+ * connectionId) is a pool profile of the ambient connection, so ambient mode
+ * still applies there.
  */
-export function sessionEventOwnerRoute(
-  runtimeSessionId: null | string | undefined,
-  storedSessionId: null | string | undefined,
-  source: Pick<SessionProfileRoute, 'connectionId' | 'profile'>
-): SessionEventOwnerRouteResolution {
-  const runtimeId = runtimeSessionId?.trim() || ''
-  const storedId = storedSessionId?.trim() || ''
-  const connectionId = source.connectionId.trim()
-  const profile = source.profile.trim() || 'default'
+export function isSessionRemote(sessionId: null | string | undefined): boolean {
+  const owner = knownOwnerForSession(sessionId)
 
-  if (!connectionId || (!runtimeId && !storedId)) {
-    return { kind: 'unknown' }
+  if (owner && typeof owner === 'object' && owner.mode) {
+    return owner.mode === 'remote'
   }
 
-  const sourceMatches = (route: SessionProfileRoute | undefined) =>
-    route?.connectionId.trim() === connectionId && (route.profile.trim() || 'default') === profile
-
-  const distinctRouteResolution = (routes: SessionProfileRoute[]): SessionEventOwnerRouteResolution => {
-    const distinctRoutes = new Map<string, SessionProfileRoute>()
-
-    for (const route of routes) {
-      const routeProfile = route.profile.trim() || 'default'
-      const targetProfile = route.targetProfile?.trim() || routeProfile
-      distinctRoutes.set(JSON.stringify([route.connectionId.trim(), routeProfile, targetProfile]), route)
-    }
-
-    if (distinctRoutes.size > 1) {
-      return { kind: 'ambiguous' }
-    }
-
-    const route = distinctRoutes.values().next().value
-
-    return route ? { kind: 'known', route } : { kind: 'unknown' }
-  }
-
-  const sourceTiles = $sessionTiles
-    .get()
-    .filter((tile): tile is SessionTile & { ownerRoute: SessionProfileRoute } =>
-      Boolean(tile.ownerRoute && sourceMatches(tile.ownerRoute))
-    )
-
-  // Ownership confidence, strongest first:
-  // 1. An exact live runtime binding is authoritative even if compression has
-  //    rotated the stored id retained by the mounted tile.
-  const exactRuntimeResolution = distinctRouteResolution(
-    sourceTiles.filter(tile => Boolean(runtimeId && tile.runtimeId === runtimeId)).map(tile => tile.ownerRoute)
-  )
-
-  if (exactRuntimeResolution.kind !== 'unknown') {
-    return exactRuntimeResolution
-  }
-
-  const durableId = storedId || runtimeId
-
-  // 2. A durable-id match with a different explicit runtime is negative
-  //    ownership evidence. It globally blocks every lower-confidence candidate
-  //    (including stale hints) unless the exact-runtime rung above resolved.
-  const hasConflictingRuntime = Boolean(
-    runtimeId &&
-    durableId &&
-    sourceTiles.some(
-      tile => tile.storedSessionId === durableId && Boolean(tile.runtimeId && tile.runtimeId !== runtimeId)
-    )
-  )
-
-  if (hasConflictingRuntime) {
-    return { kind: 'ambiguous' }
-  }
-
-  // 3. Durable tile identity is eligible only when the event has no runtime or
-  //    the tile has not bound one yet.
-  const durableTileResolution = distinctRouteResolution(
-    sourceTiles
-      .filter(tile => Boolean(durableId && tile.storedSessionId === durableId && (!runtimeId || !tile.runtimeId)))
-      .map(tile => tile.ownerRoute)
-  )
-
-  if (durableTileResolution.kind !== 'unknown') {
-    return durableTileResolution
-  }
-
-  // 4. Hints are the final rung and are considered only after stronger tile
-  //    evidence has produced neither an owner nor a contradiction.
-  const hintRoutes = [...new Set([storedId, runtimeId].filter(Boolean))]
-    .map(id => getSessionOwnerHint(id, { connectionId, profile }))
-    .filter((route): route is SessionProfileRoute => Boolean(route))
-
-  return distinctRouteResolution(hintRoutes)
+  return $connection.get()?.mode === 'remote'
 }
 
 /**
  * Dispatch a session-scoped RPC through the OWNER of `sessionId` (tile route →
- * hint → connection-tagged row / known profile). This is the client half of
- * #91684: approval.respond (and siblings) sent on the ambient socket land on
- * whatever backend is active, which for a cross-profile session is a backend
- * that never held the approval. An UNKNOWN owner fails closed with an
- * explicit SessionOwnerResolutionError unless the ambient gateway is provably
- * the only backend (legacy single-profile, no registry source).
+ * known profile), falling back to the ambient dispatcher only when no owner is
+ * known. This is the client half of #91684: approval.respond (and siblings)
+ * sent on the ambient socket land on whatever backend is active, which for a
+ * cross-profile session is a backend that never held the approval.
  */
 export function requestForOwnedSession<T>(
   sessionId: null | string | undefined,
@@ -1105,15 +898,7 @@ export function requestForOwnedSession<T>(
   timeoutMs?: number,
   signal?: AbortSignal
 ): Promise<T> {
-  const owner = knownOwnerForSession(sessionId)
-
-  try {
-    assertSessionOwnerResolved(owner, { method, sessionId })
-  } catch (error) {
-    return Promise.reject(error)
-  }
-
-  return requestForSessionProfile<T>(owner, ambientRequest, method, params, timeoutMs, signal)
+  return requestForSessionProfile<T>(knownOwnerForSession(sessionId), ambientRequest, method, params, timeoutMs, signal)
 }
 
 /** Resolve a session id THAT MAY BE A RUNTIME ID to the stored id its tile
@@ -1141,14 +926,7 @@ export function storedSessionIdForRuntimeId(sessionId: string): null | string {
     }
   }
 
-  // The per-runtime state mirror carries the stored id the wiring cache bound
-  // (ensureSessionState / a resume). This is how a MAIN-PANE runtime id — an
-  // approval.respond from a native notification, a queued send — finds its
-  // durable identity, and through it the exact owner (hint / tagged row).
-  // Without this rung such ids fell straight to the ambient socket.
-  const mirrored = $sessionStates.get()[sessionId]?.storedSessionId?.trim()
-
-  return mirrored || null
+  return null
 }
 
 export function setSessionTileWorkspaceScope(storedSessionId: string, scope: SessionTileWorkspaceScope): boolean {
@@ -1298,6 +1076,12 @@ export interface SessionTileDelegate {
   /** Bind a live runtime id for a stored session (resume without touching
    *  the main view). Returns the runtime id, or throws. */
   resumeTile(storedSessionId: string): Promise<string>
+  /** Retire one runtime's busy/awaiting claim through the wiring cache
+   *  (updateSessionState), so cache, focused view, busyRef, and tile mirrors
+   *  settle together. Returns false when the cache holds no busy state for
+   *  it — the caller downgrades the mirror itself. Reconnect-time twin of
+   *  invalidateRuntimeBindings (#93059). */
+  retireBusyClaim?(runtimeId: string): boolean
   /** Submit a prompt to a tile's live session. */
   submitToSession(runtimeId: string, text: string): Promise<void>
   /** THE session-state write path — routes through the wiring cache so the

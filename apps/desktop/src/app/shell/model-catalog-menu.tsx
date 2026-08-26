@@ -18,9 +18,9 @@ import {
 import { HighlightMatches } from '@/components/ui/highlight-matches'
 import { usePointerQuiet } from '@/components/ui/keyboard-first'
 import { Skeleton } from '@/components/ui/skeleton'
-import type { HermesGateway, ProfileScope } from '@/hermes'
+import type { HermesGateway } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { type ModelOptionsDispatch, modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
+import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
 import { DEFAULT_REASONING_EFFORT, reasoningEffortLabel } from '@/lib/reasoning-effort'
 import { normalize } from '@/lib/text'
@@ -93,18 +93,13 @@ interface ModelCatalogMenuProps {
   /** Rows appended under the catalog (Refresh Models, Edit Models, …). */
   footer?: ReactNode
   gateway?: HermesGateway
+  /** Owner-routed RPC for catalog reads. Preferred over `gateway.request` so
+   *  a tile's menu queries the session owner's backend, not chrome's. */
+  request?: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
   /** Render the virtual `moa` provider's presets as a selectable section.
    *  Off for override surfaces, where a MoA preset isn't a worker model. */
   includeMoa?: boolean
-  /** Profile whose catalog this is; keys the query and pins the REST
-   *  recovery read. Omitted → the active API profile scope, never a literal
-   *  'default' (a detached surface must follow the active profile). */
-  profile?: ProfileScope
-  /** Owner-routed dispatcher for the catalog read. A surface bound to a
-   *  session must pass the same dispatcher it writes through, or the read
-   *  lands on the ambient backend, which never held the session (#93892).
-   *  Detached surfaces omit it and read through `gateway` / REST. */
-  requestGateway?: ModelOptionsDispatch
+  profile?: string
   /** Session whose catalog to fetch. A live session's catalog can differ from
    *  the profile-global one, and the app invalidates the SESSION-scoped query
    *  key on model changes — a surface bound to a session must pass it or its
@@ -129,8 +124,8 @@ export function ModelCatalogMenu({
   footer,
   gateway,
   includeMoa = false,
-  profile,
-  requestGateway,
+  profile = 'default',
+  request,
   sessionId = null
 }: ModelCatalogMenuProps) {
   const { t } = useI18n()
@@ -150,8 +145,7 @@ export function ModelCatalogMenu({
     // Gateway-first even with no session: a connected (possibly remote)
     // gateway owns the model catalog, including virtual providers the local
     // REST fallback can't know about (#53817).
-    queryFn: (): Promise<ModelOptionsResponse> =>
-      requestModelOptions({ gateway, profile, request: requestGateway, sessionId })
+    queryFn: (): Promise<ModelOptionsResponse> => requestModelOptions({ gateway, profile, request, sessionId })
   })
 
   const loading = modelOptions.isPending && !modelOptions.data

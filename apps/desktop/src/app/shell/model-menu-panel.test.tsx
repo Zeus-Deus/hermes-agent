@@ -3,7 +3,6 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { DropdownMenu, DropdownMenuContent } from '@/components/ui/dropdown-menu'
-import type { ProfileScope } from '@/hermes'
 import { $collapsedProviders, toggleCollapsedProvider } from '@/store/provider-collapse'
 import { $activeSessionId, $currentModel, $currentProvider } from '@/store/session'
 
@@ -55,14 +54,14 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-function renderPanel(onSelectModel = vi.fn(), profile?: ProfileScope) {
+function renderPanel(onSelectModel = vi.fn()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 
   const content = render(
     <QueryClientProvider client={client}>
       <DropdownMenu open>
         <DropdownMenuContent>
-          <ModelMenuPanel onSelectModel={onSelectModel} profile={profile} requestGateway={vi.fn() as never} />
+          <ModelMenuPanel onSelectModel={onSelectModel} requestGateway={vi.fn() as never} />
         </DropdownMenuContent>
       </DropdownMenu>
     </QueryClientProvider>
@@ -126,20 +125,6 @@ describe('ModelMenuPanel MoA presets', () => {
 })
 
 describe('ModelMenuPanel current selection', () => {
-  it('carries the exact catalog owner into the model selection', async () => {
-    const ownerScope = { connectionId: 'remote-owner', profile: 'bot' }
-    const { content, onSelectModel } = renderPanel(vi.fn(), ownerScope)
-
-    fireEvent.click(await content.findByText(/Gemini 3\.1 Pro/i))
-
-    expect(onSelectModel).toHaveBeenCalledWith({
-      model: 'gemini-3.1-pro',
-      profile: ownerScope,
-      provider: 'google',
-      sessionId: 'runtime-1'
-    })
-  })
-
   it('keeps the checkmark on the live SessionView model when a stale options response disagrees', async () => {
     $currentProvider.set('google')
     $currentModel.set('gemini-3.1-pro')
@@ -413,48 +398,5 @@ describe('ModelMenuPanel provider collapse', () => {
 
     expect($collapsedProviders.get()).toContain('google')
     expect($collapsedProviders.get()).toContain('deepseek')
-  })
-})
-
-// #93892: a tile's menu is handed an owner-routed `requestGateway`; catalog
-// READS and fallback must remain on that owner (not only writes), or a remote
-// bot tile can list the active connection's models.
-describe('ModelMenuPanel catalog routing', () => {
-  it("keeps a remote-owner tile's empty WS catalog pinned while another connection is active", async () => {
-    const ownerScope = { connectionId: 'remote-owner', profile: 'backend-bot' }
-
-    const requestGateway = vi.fn(async (method: string) =>
-      method === 'model.options' ? { model: 'gemini-3.1-pro', provider: 'google', providers: [] } : {}
-    )
-
-    // Deterministic active-connection trap: only the explicit owner scope gets
-    // the owner's REST catalog; an ambient fallback gets the other connection.
-    getGlobalModelOptions.mockImplementation(async (_opts, scope) =>
-      JSON.stringify(scope) === JSON.stringify(ownerScope)
-        ? { providers: [GOOGLE_PROVIDER] }
-        : { providers: [DEEPSEEK_PROVIDER] }
-    )
-
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-
-    const content = render(
-      <QueryClientProvider client={client}>
-        <DropdownMenu open>
-          <DropdownMenuContent>
-            <ModelMenuPanel
-              onSelectModel={vi.fn()}
-              profile={ownerScope}
-              requestGateway={requestGateway as never}
-            />
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </QueryClientProvider>
-    )
-
-    await content.findByText(/Gemini 3\.1 Pro/i)
-
-    expect(requestGateway).toHaveBeenCalledWith('model.options', { explicit_only: true, session_id: 'runtime-1' })
-    expect(getGlobalModelOptions).toHaveBeenCalledWith({ explicitOnly: true }, ownerScope)
-    expect(content.queryByText('Deepseek Chat')).toBeNull()
   })
 })

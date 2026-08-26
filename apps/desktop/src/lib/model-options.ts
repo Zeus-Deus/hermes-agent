@@ -1,7 +1,4 @@
-import { registryBackendScopeKey } from '@hermes/shared'
-
-import { capabilityScoped, getApiRequestConnection } from '@/api/client'
-import { getGlobalModelOptions, type HermesGateway, type ModelOptionsResponse, type ProfileScope } from '@/hermes'
+import { getGlobalModelOptions, type HermesGateway, type ModelOptionsResponse } from '@/hermes'
 import type { ModelOptionProvider } from '@/types/hermes'
 
 /**
@@ -37,45 +34,27 @@ export function manualPickRemoved(
   return !models.includes(model)
 }
 
-/** A gateway dispatcher: the ambient `gateway.request`, or a session-owner
- *  routed one (`requestForSessionProfile`) for surfaces bound to a session. */
-export type ModelOptionsDispatch = <T>(method: string, params?: Record<string, unknown>) => Promise<T>
-
 interface ModelOptionsRequest {
   /** When false, include ambient/unconfigured providers (onboarding/setup
    *  surfaces). Chat pickers default to true so only explicitly configured
    *  providers are listed (#56974). */
   explicitOnly?: boolean
   gateway?: HermesGateway
-  /** Profile whose REST catalog the recovery path reads. Defaults to the
-   *  active API profile — wrong for a tile bound to another profile's
-   *  session, so session-bound surfaces pass their owner's profile. */
-  profile?: ProfileScope
+  /** Owner-routed RPC. When set, catalog reads hit this dispatcher instead of
+   *  `gateway.request` — a tile's model menu must not query the ambient
+   *  chrome socket (#93892). */
+  request?: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
+  /** Profile for the REST recovery path. Must match the catalog owner so a
+   *  secondary tile does not fall back to the launch profile's models. */
+  profile?: null | string
   refresh?: boolean
-  /**
-   * Owner-routed dispatcher for the `model.options` read. Takes precedence
-   * over `gateway`: the backend resolves `session_id` in ITS OWN process, so
-   * a catalog read for a session owned by another profile/connection must go
-   * out on that owner's socket — the ambient one never held the runtime, and
-   * silently answers with its own global config instead (#93892).
-   */
-  request?: ModelOptionsDispatch
   sessionId?: null | string
 }
 
-/** Canonical model-catalog ownership key. Unlike the general capability key,
- * model catalogs must distinguish an explicit local pin from ambient routing,
- * and ambient routing must rotate with the active registry connection. */
-export function modelOptionsScopeKey(profile: ProfileScope): string {
-  const effective = capabilityScoped(profile)
-  const explicit = !!profile && typeof profile === 'object'
-  const connectionId = explicit ? (profile.connectionId ?? '').trim() || 'local' : getApiRequestConnection()
+export function modelOptionsQueryKey(profile: null | string | undefined, sessionId?: null | string) {
+  const profileKey = (profile ?? '').trim() || 'default'
 
-  return registryBackendScopeKey(connectionId, effective.profile)
-}
-
-export function modelOptionsQueryKey(profile: ProfileScope, sessionId?: null | string) {
-  return ['model-options', modelOptionsScopeKey(profile), sessionId || 'global'] as const
+  return ['model-options', profileKey, sessionId || 'global'] as const
 }
 
 function hasSelectableModels(options: ModelOptionsResponse | null | undefined): boolean {
@@ -83,14 +62,14 @@ function hasSelectableModels(options: ModelOptionsResponse | null | undefined): 
 }
 
 function restModelOptions(
-  opts: { explicitOnly: boolean; refresh?: true },
-  profile: ProfileScope
+  explicitOnly: boolean,
+  refresh: boolean,
+  profile?: null | string
 ): Promise<ModelOptionsResponse> {
-  // Only pass a scope when the caller named one — undefined keeps the active
-  // API (connection, profile) scope and the call shape global callers rely on.
-  return profile == null || (typeof profile === 'string' && !profile.trim())
-    ? getGlobalModelOptions(opts)
-    : getGlobalModelOptions(opts, profile)
+  const opts = { explicitOnly, ...(refresh ? { refresh: true } : {}) }
+  const profileKey = (profile ?? '').trim()
+
+  return profileKey ? getGlobalModelOptions(opts, profileKey) : getGlobalModelOptions(opts)
 }
 
 export async function requestModelOptions({
@@ -101,9 +80,7 @@ export async function requestModelOptions({
   request,
   sessionId
 }: ModelOptionsRequest): Promise<ModelOptionsResponse> {
-  const dispatch: ModelOptionsDispatch | undefined =
-    request ??
-    (gateway ? <T>(method: string, params?: Record<string, unknown>) => gateway.request<T>(method, params) : undefined)
+  const dispatch = request ?? (gateway ? gateway.request.bind(gateway) : null)
 
   if (dispatch) {
     const params: Record<string, unknown> = {}
@@ -122,10 +99,9 @@ export async function requestModelOptions({
 
     let gatewayError: unknown
     let gatewayOptions: ModelOptionsResponse | undefined
-    let restFallback: ModelOptionsResponse | undefined
 
     try {
-      gatewayOptions = (await dispatch<ModelOptionsResponse | undefined>('model.options', params)) ?? undefined
+      gatewayOptions = await dispatch<ModelOptionsResponse>('model.options', params)
     } catch (error) {
       gatewayError = error
     }
@@ -139,7 +115,7 @@ export async function requestModelOptions({
     // catalog is already populated. Recover through the same profile-scoped
     // endpoint Settings uses, but keep the live session selection authoritative.
     try {
-      const restOptions = await restModelOptions({ explicitOnly, ...(refresh ? { refresh: true } : {}) }, profile)
+      const restOptions = await restModelOptions(explicitOnly, refresh, profile)
 
       if (hasSelectableModels(restOptions)) {
         return {
@@ -148,8 +124,6 @@ export async function requestModelOptions({
           ...(gatewayOptions?.model ? { model: gatewayOptions.model } : {})
         }
       }
-
-      restFallback = restOptions
     } catch {
       // Preserve the gateway result (or its original error) when the recovery
       // path is unavailable.
@@ -159,14 +133,8 @@ export async function requestModelOptions({
       return gatewayOptions
     }
 
-    // The dispatcher answered with nothing at all (no catalog, no error): the
-    // REST read is the only catalog we have, selectable models or not.
-    if (restFallback && gatewayError === undefined) {
-      return restFallback
-    }
-
-    throw gatewayError ?? new Error('model.options returned no catalog')
+    throw gatewayError
   }
 
-  return restModelOptions({ explicitOnly, ...(refresh ? { refresh: true } : {}) }, profile)
+  return restModelOptions(explicitOnly, refresh, profile)
 }
