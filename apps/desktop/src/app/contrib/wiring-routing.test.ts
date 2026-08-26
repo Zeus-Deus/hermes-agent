@@ -87,7 +87,7 @@ describe('resolveSessionRpcOwner', () => {
       resolveSessionRpcOwner({
         routingSessionId: null,
         sessionOwnerHint: none,
-        sessionRowProfile: none,
+        sessionRowOwner: none,
         tileOwnerRoute: none
       })
     ).toBeUndefined()
@@ -97,7 +97,7 @@ describe('resolveSessionRpcOwner', () => {
     const owner = resolveSessionRpcOwner({
       routingSessionId: 'stored-bot',
       sessionOwnerHint: () => omar,
-      sessionRowProfile: () => 'default',
+      sessionRowOwner: () => 'default',
       tileOwnerRoute: () => homelab
     })
 
@@ -111,11 +111,36 @@ describe('resolveSessionRpcOwner', () => {
     const owner = resolveSessionRpcOwner({
       routingSessionId: 'stored-omar',
       sessionOwnerHint: id => (id === 'stored-omar' ? omar : undefined),
-      sessionRowProfile: () => 'default',
+      sessionRowOwner: () => 'default',
       tileOwnerRoute: none
     })
 
     expect(owner).toEqual(omar)
+  })
+
+  it('reconstructs the EXACT owner from a connection-tagged row when the hint is gone (evicted / relaunch)', () => {
+    // The bounded hint map is transient. A row tagged with its owning
+    // connection (optimistic create row, unified-list splice, or a tag
+    // mergeSessionPage carried across a refresh) names the same registry
+    // entry, so the second turn still dials the socket that holds the runtime.
+    expect(
+      resolveSessionRpcOwner({
+        routingSessionId: 'stored-omar',
+        sessionOwnerHint: none,
+        sessionRowOwner: () => ({ connectionId: 'local', profile: 'omar' }),
+        tileOwnerRoute: none
+      })
+    ).toEqual({ connectionId: 'local', profile: 'omar' })
+
+    // The hint still outranks the row when both exist.
+    expect(
+      resolveSessionRpcOwner({
+        routingSessionId: 'stored-omar',
+        sessionOwnerHint: () => omar,
+        sessionRowOwner: () => ({ connectionId: 'homelab', profile: 'omar' }),
+        tileOwnerRoute: none
+      })
+    ).toEqual(omar)
   })
 
   it('falls back to the session row profile, then to undefined for the probe', () => {
@@ -123,7 +148,7 @@ describe('resolveSessionRpcOwner', () => {
       resolveSessionRpcOwner({
         routingSessionId: 'stored-1',
         sessionOwnerHint: none,
-        sessionRowProfile: () => 'coder',
+        sessionRowOwner: () => 'coder',
         tileOwnerRoute: none
       })
     ).toBe('coder')
@@ -132,7 +157,16 @@ describe('resolveSessionRpcOwner', () => {
       resolveSessionRpcOwner({
         routingSessionId: 'stored-1',
         sessionOwnerHint: none,
-        sessionRowProfile: () => '  ',
+        sessionRowOwner: () => '  ',
+        tileOwnerRoute: none
+      })
+    ).toBeUndefined()
+
+    expect(
+      resolveSessionRpcOwner({
+        routingSessionId: 'stored-1',
+        sessionOwnerHint: none,
+        sessionRowOwner: () => null,
         tileOwnerRoute: none
       })
     ).toBeUndefined()

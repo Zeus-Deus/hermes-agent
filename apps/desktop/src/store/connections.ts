@@ -3,6 +3,7 @@ import { atom, computed } from 'nanostores'
 import type { DesktopConnectionsRegistry } from '@/global'
 import { persistStringRecord, storedStringRecord } from '@/lib/storage'
 import { isTimeoutError, withTimeout } from '@/lib/with-timeout'
+import { $connectionsRegistry } from '@/store/connection-registry-state'
 import {
   beginGatewaySwitch,
   endGatewaySwitch,
@@ -13,6 +14,7 @@ import {
   $activeGatewayProfile,
   $newChatProfile,
   $showAllProfiles,
+  captureNewChatSource,
   ensureGatewayAgent,
   normalizeProfileKey,
   openGatewayAgent,
@@ -31,7 +33,7 @@ const SWITCH_DIAL_TIMEOUT_MS = 20_000
 const SWITCH_COMMIT_TIMEOUT_MS = 20_000
 const SWITCH_REMEMBER_TIMEOUT_MS = 5_000
 
-export const $connectionsRegistry = atom<DesktopConnectionsRegistry | null>(null)
+export { $connectionsRegistry } from '@/store/connection-registry-state'
 
 // Use only the resolved descriptor identity Electron publishes. `primary`
 // means the registry default, not necessarily the source this window is using;
@@ -245,6 +247,10 @@ export async function selectConnection(connectionId: string): Promise<void> {
   if (pendingTarget === null && currentConnectionId === connectionId && currentProfile === targetProfile) {
     $showAllProfiles.set(false)
     $newChatProfile.set(targetProfile)
+    // A connection switch is a new-chat intent on THAT source: keep the
+    // registry identity with the profile so the next create names local::x /
+    // <source>::x exactly, never a bare profile string.
+    captureNewChatSource()
     requestFreshSession()
     await rememberConnection(connectionId)
 
@@ -359,6 +365,7 @@ export async function selectConnection(connectionId: string): Promise<void> {
       }
 
       $newChatProfile.set(targetProfile)
+      captureNewChatSource()
       requestFreshSession()
       await refreshActiveProfile()
     }

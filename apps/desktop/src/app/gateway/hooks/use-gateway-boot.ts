@@ -51,8 +51,10 @@ import {
   $activeSessionId,
   $connection,
   $currentCwd,
+  $selectedStoredSessionId,
   $sessions,
   ensureDefaultWorkspaceCwd,
+  forgetSessionOwnerHintsForConnection,
   setConnection,
   setCurrentBranch,
   setCurrentCwd,
@@ -60,7 +62,10 @@ import {
 } from '@/store/session'
 import {
   $attentionSessionIds,
+  $sessionOwnerHoldRevision,
+  $sessionTiles,
   $workingSessionIds,
+  foregroundSessionScopes,
   liveSessionScopes,
   reconcileBusyStatesOnReconnect,
   recordSessionEventScope,
@@ -650,6 +655,14 @@ export function useGatewayBoot({
     // (connectionId, profile) keep-set so two sources exposing the same
     // profile name (every source has a 'default') can't collide.
     configureGatewayRegistry({
+      // The primary socket has no secondary entry to carry registry identity.
+      // Electron's published active descriptor is authoritative after boot;
+      // a true legacy primary has no connectionId and remains unqualified.
+      activeConnectionId: () => $connection.get()?.connectionId ?? null,
+      // Every dispose path in the registry (live-work pruner AND the
+      // refcount-0 request leases) spares a socket a mounted tile or the
+      // primary thread is bound to (#93892).
+      foregroundScopes: foregroundSessionScopes,
       onActiveConnectionChanged: publish,
       // Keep $activeGatewayProfile in lockstep with the registry's OWN record
       // of which profile the active socket serves. The registry is the only
@@ -739,6 +752,13 @@ export function useGatewayBoot({
       }
 
       disposeSecondariesForConnection(payload.connectionId, { redial: payload.reason === 'updated' })
+
+      if (payload.reason !== 'updated') {
+        // Nothing can dial the removed source again: drop the persisted exact
+        // owner hints naming it so its sessions are not pinned (fail-closed)
+        // to a route that no longer exists.
+        forgetSessionOwnerHintsForConnection(payload.connectionId)
+      }
     })
 
     const onOnline = () => void forceReconnectNow()
@@ -789,6 +809,9 @@ export function useGatewayBoot({
     const offWorking = $workingSessionIds.subscribe(() => recomputeKeptGateways())
     const offAttention = $attentionSessionIds.subscribe(() => recomputeKeptGateways())
     const offActiveProfile = $activeGatewayProfile.subscribe(() => recomputeKeptGateways())
+    const offTiles = $sessionTiles.subscribe(() => recomputeKeptGateways())
+    const offSelectedSession = $selectedStoredSessionId.subscribe(() => recomputeKeptGateways())
+    const offSessionOwnerHolds = $sessionOwnerHoldRevision.subscribe(() => recomputeKeptGateways())
 
     const offWindowState = desktop.onWindowStateChanged?.(payload => {
       const current = $connection.get()
@@ -983,6 +1006,9 @@ export function useGatewayBoot({
       offWorking()
       offAttention()
       offActiveProfile()
+      offTiles()
+      offSelectedSession()
+      offSessionOwnerHolds()
       window.removeEventListener('online', onOnline)
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('focus', onFocus)

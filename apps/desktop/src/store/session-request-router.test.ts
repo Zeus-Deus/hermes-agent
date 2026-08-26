@@ -54,6 +54,7 @@ const {
 } = await import('./gateway')
 
 const { requestForSessionProfile, sessionRpcNeedsProfileRoute } = await import('./session-request-router')
+const { $connectionsRegistry } = await import('./connection-registry-state')
 
 function installDesktop(): void {
   ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
@@ -78,6 +79,7 @@ function makePrimary() {
 
 beforeEach(() => {
   secondaryGateways.length = 0
+  $connectionsRegistry.set(null)
   configureGatewayRegistry({ onEvent: vi.fn() })
   closeSecondaryGateways()
 })
@@ -152,6 +154,19 @@ describe('sessionRpcNeedsProfileRoute', () => {
 })
 
 describe('requestForSessionProfile', () => {
+  it('rejects a bare profile owner when a connection registry exists', async () => {
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    $connectionsRegistry.set({ connections: [{ id: 'local' }] } as never)
+    const ambient = vi.fn(async () => ({ ambient: true }))
+
+    await expect(
+      requestForSessionProfile('default', ambient as never, 'session.resume', { session_id: 'stored-a' })
+    ).rejects.toThrow(/exact connection route/i)
+    expect(primary.request).not.toHaveBeenCalled()
+    expect(ambient).not.toHaveBeenCalled()
+  })
+
   it('keeps concurrent same-name requests pinned while foreground activation changes', async () => {
     const primary = makePrimary()
     setPrimaryGateway(primary as never, 'default')

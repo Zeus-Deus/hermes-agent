@@ -22,7 +22,12 @@ import { setSessionYolo } from '@/lib/yolo-session'
 import { $clarifyRequests } from '@/store/clarify'
 import { migrateSessionDraft } from '@/store/composer'
 import { clearQueuedPrompts, migrateQueuedPrompts } from '@/store/composer-queue'
-import { openGatewayForAgent, openGatewayForProfile, requestGatewayForAgent } from '@/store/gateway'
+import {
+  openGatewayForAgent,
+  openGatewayForProfile,
+  requestGatewayForAgent,
+  retainGatewayForAgent
+} from '@/store/gateway'
 import { $gatewaySwitching } from '@/store/gateway-switch'
 import { $pinnedSessionIds } from '@/store/layout'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
@@ -30,12 +35,12 @@ import {
   $activeGatewayProfile,
   $gatewaySwapTarget,
   $newChatProfile,
-  $newChatRoute,
   $showAllProfiles,
   type AgentProfileRoute,
   ensureGatewayAgent,
   ensureGatewayProfile,
-  normalizeProfileKey
+  normalizeProfileKey,
+  resolveNewChatOwnerRoute
 } from '@/store/profile'
 import {
   $projectScope,
@@ -94,9 +99,11 @@ import {
   $sessionTiles,
   closeSessionTile,
   dropSessionState,
+  holdSessionOwnerUntilForeground,
   openSessionTile,
   patchSessionTile,
   publishSessionState,
+  releaseSessionOwnerHold,
   type SessionTileWorkspaceScope,
   type TileDock
 } from '@/store/session-states'
@@ -215,7 +222,7 @@ function reconcileAuthoritativeMessages(
 // never the profile default (that lives in Settings → Model).
 async function desktopSessionCreateParams(
   cwd: string,
-  capturedRoute = $newChatRoute.get()
+  capturedRoute = resolveNewChatOwnerRoute()
 ): Promise<Record<string, unknown>> {
   // Treat Send as the linearization point for the visible selector state. The
   // profile handshake below can yield long enough for background config/model
@@ -471,31 +478,59 @@ export function useSessionActions({
               ? workspaceTarget.trim()
               : $currentCwd.get().trim() || resolveNewSessionCwd()
 
-        const capturedRoute = $newChatRoute.get()
+        // The EXACT owner for this create: an explicit agent route, else the
+        // (registry source, profile) pair the draft was made on. Read ONCE at
+        // the send linearization point and threaded through the create RPC,
+        // the owner hint, the optimistic row and the failure cleanup, so the
+        // profile-rail path (selectProfile clears $newChatRoute) can no longer
+        // reduce the owner to a bare profile name that later RPCs dial on a
+        // different socket than the one that minted the runtime.
+        const capturedRoute = resolveNewChatOwnerRoute()
         const params = await desktopSessionCreateParams(cwd, capturedRoute)
 
-        const created = capturedRoute
-          ? await requestGatewayForAgent<SessionCreateResponse>(
-              capturedRoute.connectionId,
-              capturedRoute.profile,
-              'session.create',
-              params
-            )
-          : await requestGateway<SessionCreateResponse>('session.create', params)
+        // Lease the owner socket for the whole create → owner-publication
+        // sequence (#93602 primitive). The per-request lease inside
+        // requestGatewayForAgent ends when session.create returns; the
+        // foreground hold below takes over from that point until the created
+        // chat is selected. Between the two, nothing may close the socket
+        // that just minted the runtime.
+        const releaseCreateLease = capturedRoute
+          ? await retainGatewayForAgent(capturedRoute.connectionId, capturedRoute.profile)
+          : () => undefined
 
-        const stored = created.stored_session_id ?? null
+        let created: SessionCreateResponse
+        let stored: null | string
 
-        // Record the EXACT owner the moment a routed create returns a stored
-        // id — before the drift check, the optimistic row, navigation, or any
-        // session-scoped RPC can resolve this session's owner. The route is
-        // the only authority: in All-profiles / Bot routing the ambient
-        // $activeGatewayProfile stays on `default` while the session lives on
-        // `capturedRoute` (e.g. local::omar). Without this hint the optimistic
-        // row (stamped from ambient) was the only owner record, so the first
-        // turn ran on omar and every later session-scoped RPC resolved the row
-        // as `default` and 4001'd "session not found".
-        if (stored && capturedRoute) {
-          setSessionOwnerHint(stored, capturedRoute)
+        try {
+          created = capturedRoute
+            ? await requestGatewayForAgent<SessionCreateResponse>(
+                capturedRoute.connectionId,
+                capturedRoute.profile,
+                'session.create',
+                params
+              )
+            : await requestGateway<SessionCreateResponse>('session.create', params)
+
+          stored = created.stored_session_id ?? null
+
+          // Record the EXACT owner the moment a routed create returns a stored
+          // id — before the drift check, the optimistic row, navigation, or any
+          // session-scoped RPC can resolve this session's owner. The route is
+          // the only authority: in All-profiles / Bot routing the ambient
+          // $activeGatewayProfile stays on `default` while the session lives on
+          // `capturedRoute` (e.g. local::omar). Without this hint the optimistic
+          // row (stamped from ambient) was the only owner record, so the first
+          // turn ran on omar and every later session-scoped RPC resolved the row
+          // as `default` and 4001'd "session not found".
+          if (stored && capturedRoute) {
+            setSessionOwnerHint(stored, capturedRoute)
+            // Pin the owner socket until the foreground publication (route →
+            // $selectedStoredSessionId) covers it, so a prune or lease release
+            // in that gap cannot close the runtime before the first prompt.
+            holdSessionOwnerUntilForeground(stored, capturedRoute)
+          }
+        } finally {
+          releaseCreateLease()
         }
 
         // Only a genuine move to a DIFFERENT chat mid-create should orphan the
@@ -527,6 +562,10 @@ export function useSessionActions({
             : requestGateway('session.close', { session_id: created.session_id })
 
           await closeCreated.catch(() => undefined)
+
+          if (stored) {
+            releaseSessionOwnerHold(stored)
+          }
 
           return null
         }
@@ -634,7 +673,7 @@ export function useSessionActions({
         // `options?.cwd || resolve…` is wrong for Home: null is falsy and used
         // to fall through into the last project folder while main chat was
         // occupied (openTab path for "New session in Home").
-        const capturedRoute = options?.route === undefined ? $newChatRoute.get() : options.route
+        const capturedRoute = options?.route === undefined ? resolveNewChatOwnerRoute() : options.route
         const workspaceScope = options?.workspaceScope ?? { workspaceMode: 'sessions' }
 
         const cwd =
@@ -645,16 +684,38 @@ export function useSessionActions({
           ...(workspaceScope.workspaceMode === 'bots' ? { hidden: true } : {})
         }
 
-        const created = capturedRoute
-          ? await requestGatewayForAgent<SessionCreateResponse>(
-              capturedRoute.connectionId,
-              capturedRoute.profile,
-              'session.create',
-              params
-            )
-          : await requestGateway<SessionCreateResponse>('session.create', params)
+        // Same lease chain as createBackendSessionForSend: owner socket held
+        // across the create, then the foreground hold carries it until the
+        // tile is mounted ($sessionTiles names the owner from then on).
+        const releaseCreateLease = capturedRoute
+          ? await retainGatewayForAgent(capturedRoute.connectionId, capturedRoute.profile)
+          : () => undefined
 
-        const stored = created.stored_session_id
+        let created: SessionCreateResponse
+        let stored: string | undefined
+
+        try {
+          created = capturedRoute
+            ? await requestGatewayForAgent<SessionCreateResponse>(
+                capturedRoute.connectionId,
+                capturedRoute.profile,
+                'session.create',
+                params
+              )
+            : await requestGateway<SessionCreateResponse>('session.create', params)
+
+          stored = created.stored_session_id
+
+          if (stored && capturedRoute) {
+            // Same ownership transition as createBackendSessionForSend: the
+            // route that minted the session is its exact owner from this
+            // moment on, and its socket stays pinned until the tile mounts.
+            setSessionOwnerHint(stored, capturedRoute)
+            holdSessionOwnerUntilForeground(stored, capturedRoute)
+          }
+        } finally {
+          releaseCreateLease()
+        }
 
         if (!stored) {
           const closeCreated = capturedRoute
@@ -670,12 +731,6 @@ export function useSessionActions({
         }
 
         createdThisRun.add(stored)
-
-        // Same ownership transition as createBackendSessionForSend: the route
-        // that minted the session is its exact owner from this moment on.
-        if (capturedRoute) {
-          setSessionOwnerHint(stored, capturedRoute)
-        }
 
         // Seed the per-runtime cache so the tile renders immediately without a
         // redundant resume. Only add the row to the SIDEBAR when `listed` — an

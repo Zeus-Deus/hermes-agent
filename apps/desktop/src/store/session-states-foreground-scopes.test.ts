@@ -1,9 +1,22 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { $selectedStoredSessionId, setSessionOwnerHint, setSessions } from '@/store/session'
+import {
+  $selectedStoredSessionId,
+  _resetSessionOwnerHintsForTests,
+  setSessionOwnerHint,
+  setSessions
+} from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
 
-import { $sessionTiles, foregroundSessionScopes, recordTileOwner } from './session-states'
+import {
+  $sessionOwnerHoldRevision,
+  $sessionTiles,
+  _resetSessionOwnerHoldsForTests,
+  foregroundSessionScopes,
+  holdSessionOwnerUntilForeground,
+  recordTileOwner,
+  releaseSessionOwnerHold
+} from './session-states'
 
 // #93892: the gateway keep-set only carried busy / needs-input work, so an
 // idle tile's owner socket was pruned out from under its resumed runtime —
@@ -34,6 +47,92 @@ afterEach(() => {
   $sessionTiles.set([])
   $selectedStoredSessionId.set(null)
   setSessions([])
+  _resetSessionOwnerHoldsForTests()
+  _resetSessionOwnerHintsForTests({ storage: true })
+  vi.useRealTimers()
+})
+
+describe('foregroundSessionScopes: connection-tagged rows', () => {
+  it('pins the selected primary thread by its EXACT scope when only the row (no hint, no tile) names the owner', () => {
+    // The transient hint is gone (evicted / relaunch); the sidebar row still
+    // carries the connection the create stamped (or a refresh carried).
+    setSessions([row({ connection_id: 'local', id: 'stored-omar', profile: 'omar' })])
+    $selectedStoredSessionId.set('stored-omar')
+
+    expect(foregroundSessionScopes()).toEqual(new Set(['conn:local::omar']))
+  })
+})
+
+describe('foregroundSessionScopes: owner hold across the create → foreground gap', () => {
+  const omar = { connectionId: 'local', mode: 'local' as const, profile: 'omar' }
+
+  it('names the owner from the moment a routed create returns, before anything is selected or tiled', () => {
+    holdSessionOwnerUntilForeground('stored-fresh', omar)
+
+    expect(foregroundSessionScopes()).toEqual(new Set(['conn:local::omar']))
+  })
+
+  it('retires once the foreground publication covers it (selected primary thread / mounted tile)', () => {
+    holdSessionOwnerUntilForeground('stored-fresh', omar)
+    setSessionOwnerHint('stored-fresh', omar)
+
+    $selectedStoredSessionId.set('stored-fresh')
+    // Covered by the selected-thread rung now; the hold itself is gone.
+    expect(foregroundSessionScopes()).toEqual(new Set(['conn:local::omar']))
+    $selectedStoredSessionId.set(null)
+    _resetSessionOwnerHintsForTests()
+    expect(foregroundSessionScopes()).toEqual(new Set())
+
+    holdSessionOwnerUntilForeground('stored-tile', { connectionId: 'homelab', profile: 'bot' })
+    $sessionTiles.set([{ ownerRoute: { connectionId: 'homelab', profile: 'bot' }, storedSessionId: 'stored-tile' }])
+    expect(foregroundSessionScopes()).toEqual(new Set(['conn:homelab::bot']))
+    $sessionTiles.set([])
+    expect(foregroundSessionScopes()).toEqual(new Set())
+  })
+
+  it('is released explicitly by the caller (failed create / drift close) and expires on its own', () => {
+    vi.useFakeTimers()
+
+    const release = holdSessionOwnerUntilForeground('stored-a', omar)
+    holdSessionOwnerUntilForeground('stored-b', { connectionId: 'homelab', profile: 'worker' })
+
+    release()
+    expect(foregroundSessionScopes()).toEqual(new Set(['conn:homelab::worker']))
+
+    releaseSessionOwnerHold('stored-b')
+    expect(foregroundSessionScopes()).toEqual(new Set())
+
+    holdSessionOwnerUntilForeground('stored-c', omar)
+    vi.advanceTimersByTime(60_000 + 1)
+    expect(foregroundSessionScopes()).toEqual(new Set())
+  })
+
+  it('publishes hold release and TTL expiry so pending gateway redials can drain without unrelated UI state', () => {
+    vi.useFakeTimers()
+    const revisions: number[] = []
+    const off = $sessionOwnerHoldRevision.subscribe(value => revisions.push(value))
+
+    const release = holdSessionOwnerUntilForeground('stored-release', omar)
+    const afterHold = revisions.at(-1)!
+    release()
+    expect(revisions.at(-1)).toBeGreaterThan(afterHold)
+
+    holdSessionOwnerUntilForeground('stored-expiry', omar)
+    const beforeExpiry = revisions.at(-1)!
+    vi.advanceTimersByTime(60_000 + 1)
+    expect(revisions.at(-1)).toBeGreaterThan(beforeExpiry)
+    expect(foregroundSessionScopes()).toEqual(new Set())
+
+    off()
+  })
+
+  it('ignores blank ids, null owners and profile-only owners map to the legacy pool key', () => {
+    holdSessionOwnerUntilForeground('  ', omar)
+    holdSessionOwnerUntilForeground('stored-null', null)
+    holdSessionOwnerUntilForeground('stored-legacy', 'research')
+
+    expect(foregroundSessionScopes()).toEqual(new Set(['research']))
+  })
 })
 
 describe('foregroundSessionScopes', () => {
