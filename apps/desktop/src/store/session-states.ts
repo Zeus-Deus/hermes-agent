@@ -247,7 +247,7 @@ export function foregroundSessionScopes(): Set<string> {
       route,
       getSessionOwnerHint(storedSessionId),
       resolvedTileOwners.get(storedSessionId),
-      knownSessionProfile(sessions, storedSessionId)
+      knownSessionOwner(sessions, storedSessionId)
     ]
 
     for (const candidate of candidates) {
@@ -290,7 +290,11 @@ export function foregroundSessionScopes(): Set<string> {
       continue
     }
 
-    addOwner(hold.owner)
+    const key = ownerScopeKey(hold.owner)
+
+    if (key) {
+      scopes.add(key)
+    }
   }
 
   return scopes
