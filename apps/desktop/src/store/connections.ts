@@ -220,6 +220,12 @@ export async function selectConnection(connectionId: string): Promise<void> {
   const targetProfile = normalizeProfileKey($lastProfileByConnection.get()[connectionId] ?? 'default')
   const targetKey = `${connectionId}::${targetProfile}`
 
+  const targetIsActive = () => {
+    const active = $connection.get()
+
+    return active?.connectionId === connectionId && normalizeProfileKey(active.profile) === targetProfile
+  }
+
   if (pendingTarget === targetKey) {
     return
   }
@@ -275,29 +281,54 @@ export async function selectConnection(connectionId: string): Promise<void> {
     // backend's bindings, then publish, with nothing in between. A click that
     // superseded this switch while it was queued makes the hook decline —
     // neither wipe nor activation — so the user never flips through it.
+    const activationController = new AbortController()
+    let markActivationStarted: () => void = () => undefined
+
+    const activationStarted = new Promise<void>(resolve => {
+      markActivationStarted = resolve
+    })
+
     try {
       try {
-        await withTimeout(
-          ensureGatewayAgent(connectionId, targetProfile, {
-            beforeActivate: () => {
-              if (revision !== switchRevision) {
-                return false
-              }
-
-              token = beginGatewaySwitch()
-
-              return true
+        const activation = ensureGatewayAgent(connectionId, targetProfile, {
+          signal: activationController.signal,
+          beforeActivate: () => {
+            if (revision !== switchRevision) {
+              return false
             }
-          }),
-          SWITCH_COMMIT_TIMEOUT_MS,
-          `Timed out activating "${targetConnection.label}".`
+
+            token = beginGatewaySwitch()
+            markActivationStarted()
+
+            return true
+          }
+        })
+
+        const timedActivation = activationStarted.then(() =>
+          withTimeout(
+            activation,
+            SWITCH_COMMIT_TIMEOUT_MS,
+            `Timed out activating "${targetConnection.label}".`,
+            error => {
+              // withTimeout does not cancel its input. Every timed-out owner
+              // loses future activation/publication rights, even when low-level
+              // activation already published the target and the commit remains
+              // fail-open. The shared activation signal suppresses any trailing
+              // descriptor/profile publication when stale work later settles.
+              activationController.abort(error)
+            }
+          )
         )
+
+        // Queue time belongs to the profile-store mutex. Start the bounded
+        // commit window only once beforeActivate grants this request its turn.
+        await Promise.race([activation, timedActivation])
       } catch (error) {
         // The socket is activated and its descriptor published synchronously;
-        // only the best-effort descriptor resync trails it. A commit that timed
-        // out AFTER the new source became active has landed — the straggler is
-        // fail-open and cannot undo it.
-        if (!isTimeoutError(error) || $connection.get()?.connectionId !== connectionId) {
+        // only best-effort descriptor resync trails it. A commit that timed out
+        // AFTER the new source became active has landed, so keep it fail-open;
+        // the timeout signal still revokes all trailing publication rights.
+        if (!isTimeoutError(error) || !targetIsActive()) {
           throw error
         }
       }
@@ -306,7 +337,7 @@ export async function selectConnection(connectionId: string): Promise<void> {
         return
       }
 
-      if ($connection.get()?.connectionId !== connectionId) {
+      if (!targetIsActive()) {
         throw new Error(`Connection "${targetConnection.label}" did not become active.`)
       }
     } finally {
@@ -338,7 +369,7 @@ export async function selectConnection(connectionId: string): Promise<void> {
         // source is still the active one, and nothing reactive re-pulls its
         // lists (no scope moved): repaint it and land on a fresh draft there,
         // matching what a failed Settings apply leaves behind.
-        recoverActiveSourceAfterFailedGatewaySwitch()
+        recoverActiveSourceAfterFailedGatewaySwitch(token)
         requestFreshSession()
       }
 

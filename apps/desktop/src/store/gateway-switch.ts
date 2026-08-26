@@ -46,7 +46,7 @@ export const $gatewaySwitching = atom(false)
 export interface GatewaySwitchLifecycle {
   beforeConnectionSwitch: () => void
   /** Re-pull the session lists from whichever backend is active NOW. */
-  refreshSessions: () => Promise<void>
+  refreshSessions: (shouldPublish?: () => boolean) => Promise<void>
 }
 
 let switchLifecycle: GatewaySwitchLifecycle | null = null
@@ -55,6 +55,11 @@ let switchLifecycle: GatewaySwitchLifecycle | null = null
 export type GatewaySwitchToken = number
 
 let latestSwitchToken = 0
+
+/** True only while token owns the latest connection-switch lifecycle. */
+export function isCurrentGatewaySwitch(token: GatewaySwitchToken): boolean {
+  return token === latestSwitchToken
+}
 
 export function registerGatewaySwitchLifecycle(lifecycle: GatewaySwitchLifecycle): () => void {
   switchLifecycle = lifecycle
@@ -78,11 +83,37 @@ export function registerGatewaySwitchLifecycle(lifecycle: GatewaySwitchLifecycle
  */
 export function beginGatewaySwitch(): GatewaySwitchToken {
   const token = ++latestSwitchToken
-  $gatewaySwitching.set(true)
-  switchLifecycle?.beforeConnectionSwitch()
-  wipeSessionListsForGatewaySwitch()
+  let wipeStarted = false
 
-  return token
+  $gatewaySwitching.set(true)
+
+  try {
+    switchLifecycle?.beforeConnectionSwitch()
+    wipeStarted = true
+    wipeSessionListsForGatewaySwitch()
+
+    return token
+  } catch (error) {
+    // No caller received this token, so begin owns cleanup. Token-aware teardown
+    // preserves a newer recursively-started switch, if lifecycle code began one.
+    const stillOwnsSwitch = isCurrentGatewaySwitch(token)
+
+    endGatewaySwitch(token)
+
+    // A synchronous wipe has no rollback: once it starts, some outgoing-source
+    // stores may already be empty. Repaint the still-active source best-effort.
+    // A lifecycle failure happens before the wipe and leaves lists untouched.
+    // If a nested switch superseded this one, its owner is responsible instead.
+    if (wipeStarted && stillOwnsSwitch) {
+      try {
+        recoverActiveSourceAfterFailedGatewaySwitch(token)
+      } catch {
+        // Recovery must never replace the original commit failure.
+      }
+    }
+
+    throw error
+  }
 }
 
 /**
@@ -92,7 +123,7 @@ export function beginGatewaySwitch(): GatewaySwitchToken {
  * newer one is still in flight. No token = force down (host teardown).
  */
 export function endGatewaySwitch(token?: GatewaySwitchToken): void {
-  if (token !== undefined && token !== latestSwitchToken) {
+  if (token !== undefined && !isCurrentGatewaySwitch(token)) {
     return
   }
 
@@ -103,14 +134,33 @@ export function endGatewaySwitch(token?: GatewaySwitchToken): void {
  * A commit that fails AFTER beginGatewaySwitch leaves the still-active source
  * with its lists wiped and the sidebar skeleton armed, and nothing reactive
  * re-pulls them (no source/profile scope moved). Repaint it explicitly so the
- * sidebar doesn't sit on the skeleton; the fetch is best-effort, the skeleton
- * always disarms.
+ * sidebar doesn't sit on the skeleton; the fetch is best-effort. Recovery
+ * retains the failed switch's token across the async refresh so it cannot
+ * request through, or disarm loading for, a newer route.
  */
-export function recoverActiveSourceAfterFailedGatewaySwitch(): void {
+export function recoverActiveSourceAfterFailedGatewaySwitch(token: GatewaySwitchToken): void {
+  const lifecycle = switchLifecycle
+
+  if (!lifecycle) {
+    console.debug('[gateway-switch] cannot repaint the active source because no switch lifecycle is registered')
+
+    if (isCurrentGatewaySwitch(token)) {
+      setSessionsLoading(false)
+    }
+
+    return
+  }
+
   void Promise.resolve()
-    .then(() => switchLifecycle?.refreshSessions())
+    .then(() =>
+      isCurrentGatewaySwitch(token) ? lifecycle.refreshSessions(() => isCurrentGatewaySwitch(token)) : undefined
+    )
     .catch(() => undefined)
-    .finally(() => setSessionsLoading(false))
+    .finally(() => {
+      if (isCurrentGatewaySwitch(token)) {
+        setSessionsLoading(false)
+      }
+    })
 }
 
 /**

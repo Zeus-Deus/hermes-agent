@@ -23,6 +23,7 @@ const $gatewaySwitching = atom(false)
 
 interface ActivationOptions {
   beforeActivate?: () => boolean
+  signal?: AbortSignal
 }
 
 const ensureGatewayAgent = vi.fn(
@@ -112,7 +113,7 @@ beforeEach(() => {
   ensureGatewayAgent.mockReset()
   // Mirrors the real door: the commit hook runs right before the activation
   // publishes, and a declined hook publishes nothing.
-  ensureGatewayAgent.mockImplementation(async (connectionId, _profile, options) => {
+  ensureGatewayAgent.mockImplementation(async (connectionId, profile, options) => {
     if (options?.beforeActivate && !options.beforeActivate()) {
       return
     }
@@ -120,7 +121,7 @@ beforeEach(() => {
     $connection.set({
       connectionId: connectionId ?? undefined,
       mode: connectionId === 'local' ? 'local' : 'remote',
-      profile: 'default',
+      profile,
       registryScoped: true
     })
   })
@@ -445,6 +446,48 @@ describe('selectConnection', () => {
     expect($pendingConnectionId.get()).toBeNull()
   })
 
+  it('does not spend the activation timeout while waiting for the serialized commit turn', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const mutex = deferred()
+
+      setConnectionsRegistry(registry)
+      $connection.set({ connectionId: 'local', mode: 'local' })
+      ensureGatewayAgent.mockImplementationOnce(async (connectionId, _profile, options) => {
+        await mutex.promise
+
+        if (options?.beforeActivate && !options.beforeActivate()) {
+          return
+        }
+
+        $connection.set({
+          connectionId: connectionId ?? undefined,
+          mode: 'remote',
+          profile: 'default',
+          registryScoped: true
+        })
+      })
+
+      const attempt = selectConnection('homelab')
+      await vi.waitFor(() => expect(ensureGatewayAgent).toHaveBeenCalledTimes(1))
+
+      // Queue ownership belongs to the shared mutex, not the actual activation
+      // attempt, so waiting here must not consume its 20-second commit budget.
+      await vi.advanceTimersByTimeAsync(20_000)
+      expect(beginGatewaySwitch).not.toHaveBeenCalled()
+
+      mutex.resolve()
+      await attempt
+
+      expect($connection.get()?.connectionId).toBe('homelab')
+      expect(beginGatewaySwitch).toHaveBeenCalledTimes(1)
+      expect($gatewaySwitching.get()).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('a dial that never answers times out: nothing severed, the click fails visibly, and the source can be retried', async () => {
     vi.useFakeTimers()
 
@@ -514,6 +557,89 @@ describe('selectConnection', () => {
     }
   })
 
+  it('a timed-out activation that already published cannot republish after a newer source wins', async () => {
+    vi.useFakeTimers()
+
+    try {
+      let releaseDescriptor: () => void = () => undefined
+
+      setConnectionsRegistry(registry)
+      // Seed A's remembered profile through the real source/profile observer,
+      // then restore the currently active local source.
+      $activeGatewayProfile.set('research')
+      $connection.set({ connectionId: 'homelab', mode: 'remote', profile: 'research', registryScoped: true })
+      $activeGatewayProfile.set('default')
+      $connection.set({ connectionId: 'local', mode: 'local', profile: 'default', registryScoped: true })
+
+      ensureGatewayAgent
+        .mockImplementationOnce((connectionId, profile, options) => {
+          options?.beforeActivate?.()
+
+          // Low-level activation publishes synchronously. The trailing descriptor
+          // promise remains alive beyond selectConnection's commit timeout.
+          $activeGatewayProfile.set(profile)
+          $connection.set({
+            connectionId: connectionId ?? undefined,
+            mode: 'remote',
+            profile,
+            registryScoped: true
+          })
+
+          return new Promise<void>(resolve => {
+            releaseDescriptor = () => {
+              // Mirrors ensureGatewayAgent's publication seam: a revoked owner
+              // observes its signal and must not publish its late descriptor.
+              if (!options?.signal?.aborted) {
+                $activeGatewayProfile.set(profile)
+                $connection.set({
+                  connectionId: connectionId ?? undefined,
+                  mode: 'remote',
+                  profile,
+                  registryScoped: true
+                })
+              }
+
+              resolve()
+            }
+          })
+        })
+        .mockImplementationOnce(async (connectionId, profile, options) => {
+          if (options?.beforeActivate && !options.beforeActivate()) {
+            return
+          }
+
+          $activeGatewayProfile.set(profile)
+          $connection.set({
+            connectionId: connectionId ?? undefined,
+            mode: 'remote',
+            profile,
+            registryScoped: true
+          })
+        })
+
+      const timedOutOwner = selectConnection('homelab')
+      await vi.advanceTimersByTimeAsync(20_000)
+      await timedOutOwner
+
+      // Fail open: A really did become active before its trailing descriptor
+      // work timed out, so the commit remains successful.
+      expect($activeGatewayProfile.get()).toBe('research')
+      expect($connection.get()?.connectionId).toBe('homelab')
+
+      await selectConnection('work-vps')
+      expect($activeGatewayProfile.get()).toBe('default')
+      expect($connection.get()?.connectionId).toBe('work-vps')
+
+      releaseDescriptor()
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect($activeGatewayProfile.get()).toBe('default')
+      expect($connection.get()?.connectionId).toBe('work-vps')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('an activation that stalls AFTER the wipe times out: barrier down, still-active source repainted', async () => {
     vi.useFakeTimers()
 
@@ -540,6 +666,56 @@ describe('selectConnection', () => {
       expect(requestFreshSession).toHaveBeenCalledTimes(1)
       expect(setLastUsed).not.toHaveBeenCalled()
       expect($connection.get()?.connectionId).toBe('local')
+      expect($pendingConnectionId.get()).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a timed-out activation cannot publish the target after it eventually settles', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const activation = deferred()
+
+      setConnectionsRegistry(registry)
+      $connection.set({ connectionId: 'local', mode: 'local' })
+      ensureGatewayAgent.mockImplementationOnce(async (connectionId, _profile, options) => {
+        options?.beforeActivate?.()
+        await activation.promise
+
+        // Mirrors the real activation door: cancellation ownership is checked
+        // immediately before publishing after the async activation work.
+        if (options?.signal?.aborted) {
+          return
+        }
+
+        $connection.set({
+          connectionId: connectionId ?? undefined,
+          mode: 'remote',
+          profile: 'default',
+          registryScoped: true
+        })
+      })
+
+      const outcome = selectConnection('homelab').then(
+        () => 'resolved',
+        (error: Error) => error.message
+      )
+
+      await vi.advanceTimersByTimeAsync(20_000)
+
+      expect(await outcome).toMatch(/Timed out activating "Homelab"/)
+      expect($connection.get()?.connectionId).toBe('local')
+      expect($gatewaySwitching.get()).toBe(false)
+
+      activation.resolve()
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect($connection.get()?.connectionId).toBe('local')
+      expect(beginGatewaySwitch).toHaveBeenCalledTimes(1)
+      expect(endGatewaySwitch).toHaveBeenCalledTimes(1)
+      expect($gatewaySwitching.get()).toBe(false)
       expect($pendingConnectionId.get()).toBeNull()
     } finally {
       vi.useRealTimers()
