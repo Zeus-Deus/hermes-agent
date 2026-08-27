@@ -653,7 +653,8 @@ describe('typing-aware sessions.changed deferral', () => {
       refreshCurrentModel: vi.fn(),
       refreshHermesConfig: vi.fn(),
       refreshMessagingSessions: vi.fn(),
-      requestGateway: vi.fn(async () => ({ sessions: [] })) as never
+      requestGateway: vi.fn(async () => ({ sessions: [] })) as never,
+      updateSessionState: vi.fn()
     }
 
     return renderHook(() => {
