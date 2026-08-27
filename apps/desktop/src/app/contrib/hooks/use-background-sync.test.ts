@@ -654,7 +654,16 @@ describe('typing-aware sessions.changed deferral', () => {
       refreshHermesConfig: vi.fn(),
       refreshMessagingSessions: vi.fn(),
       requestGateway: vi.fn(async () => ({ sessions: [] })) as never,
-      updateSessionState: vi.fn()
+      // Required by the hook's params. This harness never drives the
+      // transcript path, so the updater just runs against a throwaway state —
+      // but it must live in `stable` like every other prop, since a fresh
+      // identity per render would re-run the connect-reseed effect.
+      updateSessionState: vi.fn(
+        (
+          _sessionId: string,
+          updater: (state: ReturnType<typeof createClientSessionState>) => ReturnType<typeof createClientSessionState>
+         ) => updater(createClientSessionState(ACTIVE_STORED_ID))
+       )
     }
 
     return renderHook(() => {

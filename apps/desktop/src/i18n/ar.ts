@@ -1510,7 +1510,11 @@ export const ar = defineLocale({
       message: count => `سيتم تخطي ${count} من المهام المجدولة حتى تراجع إعدادات النموذج الخاصة بها.`,
       detailMore: (names, remaining) => `${names} و${remaining} أخرى`,
       review: 'مراجعة المهام المجدولة',
-      saveFailed: 'لم يحفظ Hermes تغيير النموذج هذا.'
+      saveFailed: 'لم يحفظ Hermes تغيير النموذج هذا.',
+      confirmTitle: 'تحذير اختيار النموذج',
+      confirmDetail: 'أكّد فقط إذا كنت تقبل هذه المقايضة.',
+      confirmAction: 'تأكيد',
+      declined: 'أُلغي تغيير النموذج — رفضت تحذير طبقة تدريب البيانات.'
     },
     search: 'بحث',
     loading: 'جار التحميل...',
@@ -2783,6 +2787,10 @@ export const ar = defineLocale({
     editFailed: 'فشل التحرير',
     editTurnUnavailable: 'هذه الجولة لم تعد في سجل الخادم (ربما أزيلت بالضغط).',
     resumeFailed: 'فشل الاستئناف',
+    readOnlyTranscriptTitle: 'فُتحت للقراءة فقط',
+    readOnlyTranscriptBody:
+      'لا يوجد بعد خادم متصل يملك هذه المحادثة القديمة، لذا فُتحت كنصّ محفوظ للقراءة فقط. السجل سليم؛ الإرسال معطّل حتى يتبنّاها خادم.',
+    readOnlyTranscriptSendBlocked: 'هذه المحادثة مفتوحة كنصّ محفوظ للقراءة فقط — الإرسال معطّل.',
     resumeStrandedTitle: 'تعذّر تحميل هذه الجلسة',
     resumeStrandedBody:
       'فشل الاتصال بهذه الجلسة وتوقفت إعادة المحاولة التلقائية. تأكد من تشغيل البوابة، ثم حاول مجددا.',
