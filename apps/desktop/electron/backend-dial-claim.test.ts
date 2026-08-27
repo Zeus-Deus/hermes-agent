@@ -172,7 +172,9 @@ describe('main.ts wiring for #90812', () => {
   it('routes the roster-enumeration probe through the single-owner claim', () => {
     const handlerStart = mainSource.indexOf('async function enumerateRegistryAgentSources')
     expect(handlerStart).toBeGreaterThan(-1)
-    const body = mainSource.slice(handlerStart, handlerStart + 3_700)
+    const handlerEnd = mainSource.indexOf("ipcMain.handle('hermes:agents:roster'", handlerStart)
+    expect(handlerEnd).toBeGreaterThan(handlerStart)
+    const body = mainSource.slice(handlerStart, handlerEnd)
 
     expect(body).toContain('backendDialClaims.run(backendScopeKey(connection.id, null)')
     expect(body).toContain('ensureRegistryBackend(connection.id, null)')
