@@ -16,7 +16,7 @@
  * itself here as the delegate so tile UI stays dependency-light.
  */
 
-import { LOCAL_CONNECTION_ID, registryBackendScopeKey } from '@hermes/shared'
+import { backendScopePrefix, LOCAL_CONNECTION_ID, registryBackendScopeKey } from '@hermes/shared'
 import { atom, computed } from 'nanostores'
 
 import type { ClientSessionState } from '@/app/types'
@@ -45,10 +45,13 @@ import {
   $sessions,
   clearReadBaseline,
   getSessionOwnerHint,
+  getSessionOwnerHints,
+  idsShareLineage,
   knownSessionOwner,
   lineageAliases,
   markSessionRead,
   ownerLookupSessionRows,
+  requestSessionResume,
   sessionMatchesStoredId,
   setActiveSessionStoredIdRotation,
   setAwaitingResponse,
@@ -84,9 +87,18 @@ export const $sessionStates = atom<Record<string, ClientSessionState>>({})
 const sessionScopeByRuntimeId = new Map<string, string>()
 
 export function recordSessionEventScope(event: { connectionId?: string; profile?: string; session_id?: string }): void {
-  if (event.session_id && event.connectionId) {
-    sessionScopeByRuntimeId.set(event.session_id, registryBackendScopeKey(event.connectionId, event.profile))
+  const connectionId = event.connectionId?.trim()
+
+  if (event.session_id && connectionId) {
+    sessionScopeByRuntimeId.set(event.session_id, registryBackendScopeKey(connectionId, event.profile))
   }
+}
+
+/** Composite source scope recorded for a live runtime. This reuses the
+ *  pre-existing keep-set ledger; callers can match it to a complete durable
+ *  hint without introducing a second structured owner registry. */
+export function runtimeSessionScope(runtimeId: string): string | undefined {
+  return sessionScopeByRuntimeId.get(runtimeId)
 }
 
 /** Composite scopes of registry-sourced sessions that are live (busy or
@@ -204,6 +216,70 @@ export function _resetSessionOwnerHoldsForTests(): void {
  * a bounded TTL retires it, so nothing can close the socket that minted the
  * runtime before the first prompt lands.
  */
+function uniqueForegroundSessionOwner(
+  rows: readonly SessionInfo[],
+  storedSessionId: null | string
+): SessionOwnerScope {
+  if (!storedSessionId) {
+    return undefined
+  }
+
+  const aliases = lineageAliases(storedSessionId, rows)
+  const exactOwners = new Map<string, SessionOwnerRoute>()
+
+  for (const alias of aliases) {
+    for (const route of getSessionOwnerHints(alias)) {
+      exactOwners.set(registryBackendScopeKey(route.connectionId, route.profile), route)
+    }
+  }
+
+  const bareProfiles = new Set<string>()
+
+  for (const row of rows.filter(candidate => aliases.some(alias => sessionMatchesStoredId(candidate, alias)))) {
+    const connectionId = row.connection_id?.trim()
+    const profile = normalizeProfileKey(row.profile)
+
+    if (connectionId) {
+      const scope = registryBackendScopeKey(connectionId, profile)
+
+      exactOwners.set(scope, exactOwners.get(scope) ?? { connectionId, profile })
+    } else {
+      bareProfiles.add(profile)
+    }
+  }
+
+  if (exactOwners.size === 1) {
+    const owner = [...exactOwners.values()][0]
+
+    const compatibleProfiles = new Set([
+      normalizeProfileKey(owner.profile),
+      normalizeProfileKey(owner.targetProfile || owner.profile)
+    ])
+
+    return [...bareProfiles].every(profile => compatibleProfiles.has(profile)) ? owner : undefined
+  }
+
+  return exactOwners.size === 0 && bareProfiles.size === 1 ? [...bareProfiles][0] : undefined
+}
+
+function sessionOwnerHintForScope(
+  rows: readonly SessionInfo[],
+  storedSessionId: string,
+  scope: Pick<SessionOwnerRoute, 'connectionId' | 'profile'>
+): SessionOwnerRoute | undefined {
+  const aliases = [storedSessionId, ...lineageAliases(storedSessionId, rows).filter(id => id !== storedSessionId)]
+
+  for (const alias of aliases) {
+    const hint = getSessionOwnerHint(alias, scope)
+
+    if (hint) {
+      return hint
+    }
+  }
+
+  return undefined
+}
+
 export function foregroundSessionScopes(): Set<string> {
   const scopes = new Set<string>()
 
@@ -226,7 +302,36 @@ export function foregroundSessionScopes(): Set<string> {
 
   addRuntimeScope($activeSessionId.get() ?? undefined)
 
-  for (const tile of $sessionTiles.get()) {
+  // Before the first owner-tagged stream frame (and after a scoped reconnect),
+  // the selected main chat can have a durable exact owner but no runtime scope
+  // entry yet. Pin that owner just like a tile's persisted route: otherwise the
+  // exact socket is invisible to refcount/prune disposal while the main pane is
+  // visibly bound to it. A unique hint or connection-tagged row is exact;
+  // ambiguous same-id twins deliberately add nothing.
+  const activeRuntimeId = $activeSessionId.get()
+  const selectedStoredSessionId = $selectedStoredSessionId.get()
+  const ownerRows = ownerLookupSessionRows()
+  const activeStoredSessionId = activeRuntimeId ? storedSessionIdForRuntimeId(activeRuntimeId) : null
+
+  const selectedIsActive = Boolean(
+    activeStoredSessionId &&
+      selectedStoredSessionId &&
+      idsShareLineage(activeStoredSessionId, selectedStoredSessionId, ownerRows)
+  )
+
+  if (selectedIsActive) {
+    const selectedOwner = uniqueForegroundSessionOwner(ownerRows, selectedStoredSessionId)
+
+    if (typeof selectedOwner === 'string') {
+      scopes.add(normalizeProfileKey(selectedOwner))
+    } else {
+      addRouteScope(selectedOwner ?? undefined)
+    }
+  }
+
+  const foregroundTiles = $sessionTiles.get()
+
+  for (const tile of foregroundTiles) {
     addRuntimeScope(tile.runtimeId)
     addRouteScope(tile.ownerRoute)
   }
@@ -244,7 +349,17 @@ export function foregroundSessionScopes(): Set<string> {
           ? registryBackendScopeKey(hold.owner.connectionId.trim(), normalizeProfileKey(hold.owner.profile))
           : null
 
-    if (!scope || hold.until <= now || scopes.has(scope)) {
+    const selectedPublished = Boolean(
+      selectedIsActive &&
+        selectedStoredSessionId &&
+        idsShareLineage(storedSessionId, selectedStoredSessionId, ownerRows)
+    )
+
+    const tilePublished = foregroundTiles.some(tile =>
+      idsShareLineage(storedSessionId, tile.storedSessionId, ownerRows)
+    )
+
+    if (!scope || hold.until <= now || selectedPublished || tilePublished) {
       // This recompute was already triggered by the covering publication (or
       // is itself observing expiry), so avoid recursively publishing.
       forgetSessionOwnerHold(storedSessionId, false)
@@ -1200,7 +1315,10 @@ export function resetTileRuntimeBindings(
       return false
     }
 
-    return !reconnected.profile || (route.targetProfile || route.profile) === reconnected.profile
+    // openSecondary reports the Desktop route profile. targetProfile is the
+    // backend alias used inside RPC params and must not be compared with the
+    // registry key that owns this socket.
+    return !reconnected.profile || normalizeProfileKey(route.profile) === normalizeProfileKey(reconnected.profile)
   }
 
   const preservedStoredIds = new Set(
@@ -1214,10 +1332,104 @@ export function resetTileRuntimeBindings(
       .map(tile => tile.storedSessionId)
   )
 
+  const activeRuntimeId = $activeSessionId.get()
+  const selectedStoredSessionId = $selectedStoredSessionId.get()
+  const ownerRows = ownerLookupSessionRows()
+  const activeStoredSessionId = activeRuntimeId ? storedSessionIdForRuntimeId(activeRuntimeId) : null
+
+  const activeMainMatchesSelection = Boolean(
+    activeStoredSessionId &&
+      selectedStoredSessionId &&
+      idsShareLineage(activeStoredSessionId, selectedStoredSessionId, ownerRows)
+  )
+
+  const uniqueSelectedOwner = activeMainMatchesSelection
+    ? uniqueForegroundSessionOwner(ownerRows, selectedStoredSessionId)
+    : undefined
+
+  const uniqueSelectedOwnerRoute =
+    uniqueSelectedOwner && typeof uniqueSelectedOwner === 'object' ? uniqueSelectedOwner : undefined
+
+  const runtimeScope = activeRuntimeId ? runtimeSessionScope(activeRuntimeId) : undefined
+
+  const reconnectedOwnerScope =
+    reconnected?.connectionId && reconnected.profile
+      ? { connectionId: reconnected.connectionId, profile: reconnected.profile }
+      : undefined
+
+  const reconnectedScopeKey = reconnectedOwnerScope
+    ? registryBackendScopeKey(reconnectedOwnerScope.connectionId, reconnectedOwnerScope.profile)
+    : undefined
+
+  const selectedOwnerScope =
+    runtimeScope ??
+    (uniqueSelectedOwnerRoute
+      ? registryBackendScopeKey(uniqueSelectedOwnerRoute.connectionId, uniqueSelectedOwnerRoute.profile)
+      : undefined)
+
+  const reconnectsActiveMain = Boolean(
+    activeMainMatchesSelection &&
+      selectedOwnerScope &&
+      reconnectedScopeKey &&
+      selectedOwnerScope === reconnectedScopeKey
+  )
+
+  const activeMainOwnerUnaffected = Boolean(
+    activeMainMatchesSelection &&
+      selectedOwnerScope &&
+      (liveConnectionIds
+        ? [...liveConnectionIds].some(connectionId => selectedOwnerScope.startsWith(backendScopePrefix(connectionId)))
+        : reconnected?.connectionId
+          ? reconnected.profile
+            ? selectedOwnerScope !== reconnectedScopeKey
+            : !selectedOwnerScope.startsWith(backendScopePrefix(reconnected.connectionId))
+          : false)
+  )
+
+  // A reconnect must not invalidate an active main chat that is proven to live
+  // on another exact/still-live owner. Keep every lineage alias because the
+  // route and cache can straddle a compression id rotation.
+  if (
+    selectedStoredSessionId &&
+    activeMainOwnerUnaffected
+  ) {
+    for (const alias of lineageAliases(selectedStoredSessionId, ownerRows)) {
+      preservedStoredIds.add(alias)
+    }
+  }
+
   sessionTileDelegate()?.invalidateRuntimeBindings?.(preservedStoredIds)
 
   if (tiles.some(tile => tile.runtimeId && !preservedStoredIds.has(tile.storedSessionId))) {
     $sessionTiles.set(tiles.map(tile => (preservedStoredIds.has(tile.storedSessionId) ? tile : toStored(tile))))
+  }
+
+  if (reconnectsActiveMain && selectedStoredSessionId && reconnectedOwnerScope) {
+    // A scoped secondary can reconnect while the ambient/global gateway stays
+    // open, so useRouteResume never observes a closed→open edge. Re-arm the
+    // selected durable row explicitly; resumeSession supplies the existing
+    // single-flight and navigation-drift guards and cancels the backend orphan
+    // timer before its grace expires.
+    const scopedHint = sessionOwnerHintForScope(ownerRows, selectedStoredSessionId, reconnectedOwnerScope)
+
+    const scopedUniqueOwner =
+      uniqueSelectedOwnerRoute &&
+      registryBackendScopeKey(uniqueSelectedOwnerRoute.connectionId, uniqueSelectedOwnerRoute.profile) ===
+        reconnectedScopeKey
+        ? uniqueSelectedOwnerRoute
+        : undefined
+
+    // A runtime scope can disambiguate twins, but it cannot recover
+    // targetProfile/mode. When that stronger runtime evidence exists, accept
+    // only the complete hint for the same scope; never replace it with a stale
+    // unique route from another connection.
+    const ownerRoute = scopedHint ?? (runtimeScope ? undefined : scopedUniqueOwner)
+
+    if (!ownerRoute) {
+      return
+    }
+
+    requestSessionResume(selectedStoredSessionId, ownerRoute)
   }
 }
 
