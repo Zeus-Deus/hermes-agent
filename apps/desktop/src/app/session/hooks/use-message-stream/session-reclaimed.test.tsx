@@ -4,7 +4,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ClientSessionState } from '@/app/types'
 import { createClientSessionState } from '@/lib/chat-runtime'
-import { $sessionStates, $sessionTiles, publishSessionState } from '@/store/session-states'
+import {
+  $activeSessionId,
+  $selectedStoredSessionId,
+  $sessionResumeRequest,
+  _resetSessionOwnerHintsForTests,
+  setSessionOwnerHint,
+  setSessions
+} from '@/store/session'
+import {
+  $sessionStates,
+  $sessionTiles,
+  _resetSessionOwnerHoldsForTests,
+  publishSessionState,
+  recordSessionEventScope
+} from '@/store/session-states'
 import type { RpcEvent } from '@/types/hermes'
 
 import { type MessageStreamHarness, renderMessageStream } from './test-harness'
@@ -16,6 +30,7 @@ import { type MessageStreamHarness, renderMessageStream } from './test-harness'
 
 const ACTIVE_SID = 'session-active'
 const ACTIVE_PROFILE = 'compass'
+const STORED_SID = 'stored-1'
 let stream: MessageStreamHarness
 let queryClient: QueryClient
 let wiringCache: Map<string, ClientSessionState>
@@ -38,12 +53,24 @@ beforeEach(() => {
   queryClient = new QueryClient()
   $sessionStates.set({})
   $sessionTiles.set([])
+  $activeSessionId.set(null)
+  $selectedStoredSessionId.set(null)
+  $sessionResumeRequest.set(null)
+  setSessions([])
+  _resetSessionOwnerHintsForTests({ storage: true })
+  _resetSessionOwnerHoldsForTests()
 })
 
 afterEach(() => {
   cleanup()
   $sessionStates.set({})
   $sessionTiles.set([])
+  $activeSessionId.set(null)
+  $selectedStoredSessionId.set(null)
+  $sessionResumeRequest.set(null)
+  setSessions([])
+  _resetSessionOwnerHintsForTests({ storage: true })
+  _resetSessionOwnerHoldsForTests()
   vi.restoreAllMocks()
 })
 
@@ -128,5 +155,200 @@ describe('session.reclaimed', () => {
 
     expect(wiringCache.has('live-gone')).toBe(false)
     expect(wiringCache.has('live-kept')).toBe(true)
+  })
+
+  it('re-arms the active main chat from its durable id and exact owner after a WS orphan reap', () => {
+    const runtimeBindings = new Map([[STORED_SID, ACTIVE_SID]])
+    stream = renderMessageStream(ACTIVE_SID, {
+      activeGatewayProfile: 'youtube',
+      queryClient,
+      runtimeBindings
+    })
+    wiringCache = stream.states
+    wiringCache.set(ACTIVE_SID, createClientSessionState(STORED_SID))
+    publishSessionState(ACTIVE_SID, createClientSessionState(STORED_SID))
+    $activeSessionId.set(ACTIVE_SID)
+    $selectedStoredSessionId.set(STORED_SID)
+
+    // The same stored id can exist on two sources. The old runtime's recorded
+    // source is authoritative; the global reclaim broadcast's arrival socket
+    // must not make recovery pick the cloud twin or a bare ambient profile.
+    setSessionOwnerHint(STORED_SID, {
+      connectionId: 'local',
+      mode: 'local',
+      profile: 'youtube',
+      targetProfile: 'youtube'
+    })
+    setSessionOwnerHint(STORED_SID, {
+      connectionId: 'cloud-a',
+      mode: 'remote',
+      profile: 'youtube',
+      targetProfile: 'yt-remote'
+    })
+    recordSessionEventScope({ connectionId: 'local', profile: 'youtube', session_id: ACTIVE_SID })
+    const previousSequence = $sessionResumeRequest.get()?.sequence ?? 0
+
+    act(() =>
+      stream.handleEvent({
+        connectionId: 'local',
+        payload: {
+          reason: 'ws_orphan_reap',
+          session_id: ACTIVE_SID,
+          stored_session_id: STORED_SID
+        },
+        profile: 'bystander-profile',
+        session_id: '',
+        type: 'session.reclaimed'
+      } as RpcEvent)
+    )
+
+    expect($sessionStates.get()[ACTIVE_SID]).toBeUndefined()
+    expect(wiringCache.has(ACTIVE_SID)).toBe(false)
+    expect(runtimeBindings.has(STORED_SID)).toBe(false)
+    expect($sessionResumeRequest.get()).toEqual({
+      ownerRoute: {
+        connectionId: 'local',
+        mode: 'local',
+        profile: 'youtube',
+        targetProfile: 'youtube'
+      },
+      sequence: expect.any(Number),
+      sessionId: STORED_SID
+    })
+    expect($sessionResumeRequest.get()!.sequence).toBeGreaterThan(previousSequence)
+
+    const firstRecoverySequence = $sessionResumeRequest.get()!.sequence
+
+    // The backend global-broadcasts once per socket. A duplicate delivered by
+    // the bystander after the first handler dropped the runtime scope must not
+    // replace the local recovery with the cloud twin or restart the resume.
+    act(() =>
+      stream.handleEvent({
+        connectionId: 'local',
+        payload: {
+          reason: 'ws_orphan_reap',
+          session_id: ACTIVE_SID,
+          stored_session_id: STORED_SID
+        },
+        profile: 'bystander-profile',
+        session_id: '',
+        type: 'session.reclaimed'
+      } as RpcEvent)
+    )
+
+    expect($sessionResumeRequest.get()!.sequence).toBe(firstRecoverySequence)
+    expect($sessionResumeRequest.get()!.ownerRoute?.connectionId).toBe('local')
+  })
+
+  it.each(['idle_timeout', 'lru_evict'])(
+    'does not auto-resume an intentionally reclaimed active chat (%s)',
+    reason => {
+      mountStream()
+      wiringCache.set(ACTIVE_SID, createClientSessionState(STORED_SID))
+      $activeSessionId.set(ACTIVE_SID)
+      $selectedStoredSessionId.set(STORED_SID)
+
+      reclaim(ACTIVE_SID, reason)
+
+      // Cache cleanup still happens, but resuming an idle/LRU reclaim would
+      // immediately recreate the resource the backend deliberately evicted.
+      expect(wiringCache.has(ACTIVE_SID)).toBe(false)
+      expect($sessionResumeRequest.get()).toBeNull()
+    }
+  )
+
+  it('resumes the currently routed lineage root when reclaim reports a rotated compression tip', () => {
+    mountStream()
+    setSessions([{ _lineage_root_id: 'lineage-root', id: 'lineage-tip', profile: ACTIVE_PROFILE } as never])
+    wiringCache.set(ACTIVE_SID, createClientSessionState('lineage-root'))
+    stream.runtimeBindings.set('lineage-root', ACTIVE_SID)
+    $activeSessionId.set(ACTIVE_SID)
+    $selectedStoredSessionId.set('lineage-root')
+    setSessionOwnerHint('lineage-root', {
+      connectionId: 'local',
+      profile: ACTIVE_PROFILE
+    })
+    recordSessionEventScope({ connectionId: 'local', profile: ACTIVE_PROFILE, session_id: ACTIVE_SID })
+
+    act(() =>
+      stream.handleEvent({
+        payload: {
+          reason: 'ws_orphan_reap',
+          session_id: ACTIVE_SID,
+          stored_session_id: 'lineage-tip'
+        },
+        session_id: '',
+        type: 'session.reclaimed'
+      } as RpcEvent)
+    )
+
+    expect($sessionResumeRequest.get()).toMatchObject({
+      ownerRoute: { connectionId: 'local', profile: ACTIVE_PROFILE },
+      sessionId: 'lineage-root'
+    })
+    expect(stream.runtimeBindings.has('lineage-root')).toBe(false)
+  })
+
+  it('fails closed when an untagged reclaim has two possible exact owners', () => {
+    mountStream()
+    wiringCache.set(ACTIVE_SID, createClientSessionState(STORED_SID))
+    $activeSessionId.set(ACTIVE_SID)
+    $selectedStoredSessionId.set(STORED_SID)
+    setSessionOwnerHint(STORED_SID, { connectionId: 'local', profile: ACTIVE_PROFILE })
+    setSessionOwnerHint(STORED_SID, { connectionId: 'cloud-a', profile: ACTIVE_PROFILE })
+
+    reclaim(ACTIVE_SID)
+
+    expect($sessionResumeRequest.get()).toBeNull()
+  })
+
+  it('fails closed when a stale unique hint conflicts with the current tagged row owner', () => {
+    mountStream()
+    setSessions([{ connection_id: 'local', id: STORED_SID, profile: ACTIVE_PROFILE } as never])
+    wiringCache.set(ACTIVE_SID, createClientSessionState(STORED_SID))
+    $activeSessionId.set(ACTIVE_SID)
+    $selectedStoredSessionId.set(STORED_SID)
+    setSessionOwnerHint(STORED_SID, { connectionId: 'cloud-a', profile: ACTIVE_PROFILE })
+
+    reclaim(ACTIVE_SID)
+
+    expect($sessionResumeRequest.get()).toBeNull()
+  })
+
+  it('fails closed when two untagged profile rows share the reclaimed durable id', () => {
+    mountStream()
+    setSessions([
+      { id: STORED_SID, profile: 'youtube' } as never,
+      { id: STORED_SID, profile: 'research' } as never
+    ])
+    wiringCache.set(ACTIVE_SID, createClientSessionState(STORED_SID))
+    $activeSessionId.set(ACTIVE_SID)
+    $selectedStoredSessionId.set(STORED_SID)
+
+    reclaim(ACTIVE_SID)
+
+    expect($sessionResumeRequest.get()).toBeNull()
+  })
+
+  it('does not collapse a known scoped runtime to ambient when its complete owner hint is missing', () => {
+    mountStream()
+    wiringCache.set(ACTIVE_SID, createClientSessionState(STORED_SID))
+    $activeSessionId.set(ACTIVE_SID)
+    $selectedStoredSessionId.set(STORED_SID)
+    recordSessionEventScope({ connectionId: 'cloud-a', profile: ACTIVE_PROFILE, session_id: ACTIVE_SID })
+
+    reclaim(ACTIVE_SID)
+
+    expect($sessionResumeRequest.get()).toBeNull()
+  })
+
+  it('does not let a late background reclaim rebind the active main chat', () => {
+    mountStream()
+    $activeSessionId.set(ACTIVE_SID)
+    $selectedStoredSessionId.set(STORED_SID)
+
+    reclaim('runtime-from-previous-chat')
+
+    expect($sessionResumeRequest.get()).toBeNull()
   })
 })

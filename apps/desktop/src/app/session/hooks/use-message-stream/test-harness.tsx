@@ -10,6 +10,10 @@ import type { RpcEvent } from '@/types/hermes'
 import { useMessageStream } from './index'
 
 export interface MessageStreamHarnessOptions extends Partial<Parameters<typeof useMessageStream>[0]> {
+  /** Stored→runtime bindings owned by the wiring cache. Reclaim tests seed the
+   *  reverse half explicitly so a stale runtime cannot be handed back on the
+   *  next resume. */
+  runtimeBindings?: Map<string, string>
   /** Session-state map to mount with, for tests that seed state up front. */
   states?: Map<string, ClientSessionState>
 }
@@ -22,6 +26,8 @@ export interface MessageStreamHarness {
   appendDelta: (sessionId: string, delta: string) => void
   /** The hook's session-state map, so callers can seed or inspect it directly. */
   states: Map<string, ClientSessionState>
+  /** The hook's stored→runtime reverse bindings. */
+  runtimeBindings: Map<string, string>
   /** State for a session, blank before the hook has written any. */
   state: (sessionId?: string) => ClientSessionState
   /** Last state written for any session — for assertions about the write itself. */
@@ -45,7 +51,11 @@ export interface MessageStreamHarness {
  *  own `cleanup()`. */
 export function renderMessageStream(
   sessionId: string | null,
-  { states = new Map<string, ClientSessionState>(), ...overrides }: MessageStreamHarnessOptions = {}
+  {
+    runtimeBindings = new Map<string, string>(),
+    states = new Map<string, ClientSessionState>(),
+    ...overrides
+  }: MessageStreamHarnessOptions = {}
 ): MessageStreamHarness {
   let dispatch: ((event: RpcEvent) => void) | null = null
   let appendDelta: ((sessionId: string, delta: string) => void) | null = null
@@ -53,6 +63,7 @@ export function renderMessageStream(
 
   function Harness() {
     const activeSessionIdRef = useRef<string | null>(sessionId)
+    const runtimeIdByStoredSessionIdRef = useRef(runtimeBindings)
     const sessionStateByRuntimeIdRef = useRef(states)
     const queryClientRef = useRef(new QueryClient())
 
@@ -62,6 +73,7 @@ export function renderMessageStream(
       queryClient: queryClientRef.current,
       refreshHermesConfig: vi.fn(async () => undefined),
       refreshSessions: vi.fn(async () => undefined),
+      runtimeIdByStoredSessionIdRef,
       sessionStateByRuntimeIdRef,
       updateSessionState: (id, updater) => {
         const next = updater(states.get(id) ?? createClientSessionState())
@@ -100,6 +112,7 @@ export function renderMessageStream(
 
       appendDelta(id, delta)
     },
+    runtimeBindings,
     states,
     state,
     latest: () => latest,

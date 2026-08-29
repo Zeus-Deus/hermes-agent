@@ -94,6 +94,7 @@ const HANDLERS: GatewayEventHandler[] = [
 export function useGatewayEventHandler(deps: GatewayEventDeps) {
   const { activeSessionIdRef, compactedTurnRef, refreshHermesConfig, sessionStateByRuntimeIdRef } = deps
 
+  const reclaimedRuntimeIdsRef = useRef(new Set<string>())
   const unscopedStreamSessionIdRef = useRef<string | null>(null)
 
   // session.info arrives in bursts (agent build ready + turn end + title /
@@ -152,6 +153,21 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           : Date.now() / 1000
 
       const explicitSid = event.session_id || ''
+
+      if (
+        explicitSid &&
+        event.type !== 'session.reclaimed' &&
+        reclaimedRuntimeIdsRef.current.has(explicitSid) &&
+        (sessionStateByRuntimeIdRef.current.has(explicitSid) ||
+          [...deps.runtimeIdByStoredSessionIdRef.current.values()].includes(explicitSid))
+      ) {
+        // Runtime ids can be recycled after a backend restart. Any fresh
+        // session-scoped event proves this generation is live and may claim a
+        // future reclaim independently of an older generation with the same
+        // id. Require a fresh cache/binding too, so a queued late event from the
+        // dead generation cannot re-arm duplicate global broadcasts.
+        reclaimedRuntimeIdsRef.current.delete(explicitSid)
+      }
 
       const route = resolveGatewayEventSessionId({
         activeSessionId: activeSessionIdRef.current,
@@ -218,6 +234,15 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       }
 
       const ctx: GatewayEventContext = {
+        claimReclaimedRuntime: runtimeId => {
+          if (reclaimedRuntimeIdsRef.current.has(runtimeId)) {
+            return false
+          }
+
+          reclaimedRuntimeIdsRef.current.add(runtimeId)
+
+          return true
+        },
         deps,
         event,
         payload,
@@ -253,6 +278,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       deps.lastCwdInfoSessionRef,
       deps.nativeSubagentSessionsRef,
       deps.queryClient,
+      deps.runtimeIdByStoredSessionIdRef,
       scheduleConfigRefresh,
       deps.scheduleSessionsRefresh,
       deps.sessionInterrupted,

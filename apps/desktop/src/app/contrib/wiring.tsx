@@ -447,6 +447,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     queryClient,
     refreshHermesConfig,
     refreshSessions,
+    runtimeIdByStoredSessionIdRef,
     sessionStateByRuntimeIdRef,
     updateSessionState
   })

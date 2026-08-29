@@ -31,6 +31,7 @@ export interface GatewayEventDeps {
   ) => Promise<void>
   queryClient: QueryClient
   refreshHermesConfig: () => Promise<void>
+  runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>>
   scheduleSessionsRefresh: () => void
   sessionInterrupted: (sessionId: string) => boolean
   sessionStateByRuntimeIdRef: MutableRefObject<Map<string, ClientSessionState>>
@@ -51,6 +52,9 @@ export interface GatewayEventDeps {
 /** Everything a per-family handler needs about the event being dispatched —
  *  the routing preamble in index.ts computes it once per event. */
 export interface GatewayEventContext {
+  /** Claim one backend-reclaimed runtime for rebind. Global broadcasts arrive
+   *  once per socket; only the first copy may schedule recovery. */
+  claimReclaimedRuntime: (runtimeId: string) => boolean
   deps: GatewayEventDeps
   event: RpcEvent
   payload: GatewayEventPayload | undefined

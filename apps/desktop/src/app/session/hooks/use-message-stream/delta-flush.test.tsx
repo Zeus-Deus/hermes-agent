@@ -265,6 +265,7 @@ describe('useMessageStream composed with the real useSessionStateCache', () => {
       queryClient: queryClientRef.current,
       refreshHermesConfig: vi.fn(async () => undefined),
       refreshSessions: vi.fn(async () => undefined),
+      runtimeIdByStoredSessionIdRef: sessionCache.runtimeIdByStoredSessionIdRef,
       sessionStateByRuntimeIdRef: sessionCache.sessionStateByRuntimeIdRef,
       updateSessionState: sessionCache.updateSessionState
     })
