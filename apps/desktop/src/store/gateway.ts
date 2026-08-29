@@ -1054,6 +1054,14 @@ export async function retainGatewayForAgent(connectionId: null | string, profile
     return route.release
   }
 
+  // Mirror requestGatewayForAgent's primary-route collapse. The turn lease
+  // and the request must retain the SAME socket: otherwise an exact owner that
+  // names the registry-backed primary opens a duplicate secondary solely for
+  // the hold while prompt.submit itself correctly rides the primary.
+  if (isPrimaryRegistryRoute(connectionId, key)) {
+    return () => undefined
+  }
+
   if (!window.hermesDesktop?.getConnectionFor) {
     // No registry dialing in this build — nothing to hold; the request path
     // will throw its own actionable error.
@@ -1158,6 +1166,15 @@ export async function retainGatewayForSessionTurn(
   profile: string,
   sessionId: string
 ): Promise<() => void> {
+  // The primary socket is process-owned, not refcount-disposed, so it needs no
+  // routed turn hold. More importantly, primary events do not flow through a
+  // Secondary's terminal-event listener: registering a no-op lease here would
+  // leave a phantom key that can suppress the real hold if this route is later
+  // re-homed as a secondary.
+  if (isPrimaryRegistryRoute(connectionId, profile)) {
+    return () => undefined
+  }
+
   const scope = registryBackendScopeKey(connectionId, normKey(profile))
   const key = turnLeaseKey(scope, sessionId)
 

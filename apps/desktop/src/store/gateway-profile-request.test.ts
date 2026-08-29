@@ -58,6 +58,7 @@ const {
   requestGatewayForAgent,
   requestGatewayForProfile,
   retainGatewayForAgent,
+  retainGatewayForSessionTurn,
   setPrimaryGateway,
   setPrimaryGatewayConnection
 } = await import('./gateway')
@@ -486,6 +487,43 @@ describe('retainGatewayForAgent (#93602)', () => {
       touchBackend: vi.fn(async () => undefined)
     }
   }
+
+  it('reuses the primary socket when the exact registry owner is the primary route', async () => {
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'remote-primary' })
+    installRegistryDesktop()
+
+    const release = await retainGatewayForAgent('remote-primary', 'default')
+
+    expect(secondaryGateways).toHaveLength(0)
+    expect(window.hermesDesktop!.getConnectionFor).not.toHaveBeenCalled()
+
+    release()
+    expect(primary.request).not.toHaveBeenCalled()
+  })
+
+  it('does not leave a phantom turn lease when an exact primary route is later re-homed', async () => {
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'remote-primary' })
+    installRegistryDesktop()
+
+    // A primary has no refcount-disposal risk and its events bypass the
+    // Secondary terminal listener. This must therefore leave no turn key.
+    await retainGatewayForSessionTurn('remote-primary', 'default', 'runtime-1')
+
+    // The same route later becomes a real secondary. A stale primary key would
+    // make this call return a no-op and skip opening/holding the owner socket.
+    setPrimaryGatewayConnection({ connectionId: 'new-primary' })
+    const release = await retainGatewayForSessionTurn('remote-primary', 'default', 'runtime-1')
+
+    expect(secondaryGateways).toHaveLength(1)
+    expect(secondaryGateways[0].close).not.toHaveBeenCalled()
+
+    release()
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+  })
 
   it('holds the registry socket across multiple leased requests — no mid-turn disposal', async () => {
     const primary = makePrimary()
