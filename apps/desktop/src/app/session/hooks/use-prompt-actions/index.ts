@@ -22,17 +22,14 @@ import {
   updateComposerAttachment
 } from '@/store/composer'
 import { resetSessionBackground } from '@/store/composer-status'
-import { requestGatewayForAgent } from '@/store/gateway'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { clearPreviewArtifacts } from '@/store/preview-status'
 import { clearAllPrompts } from '@/store/prompts'
 import {
   $busy,
-  $connection,
   $currentCwd,
   $messages,
   $terminalBackend,
-  getSessionOwnerHint,
   setActiveSessionId,
   setAwaitingResponse,
   setBusy,
@@ -486,30 +483,6 @@ export function usePromptActions({
     }
   }, [activeSessionId, composerAttachments, eagerlyUploadAttachment])
 
-  // Session resume can be routed through a registry connection while the
-  // render-time requestGateway still points at the local default socket. Keep
-  // every follow-up session RPC on the same composite owner; otherwise resume
-  // succeeds on HERMES01 and prompt.submit immediately fails locally with
-  // "session not found".
-  const requestForPromptSession = useCallback<GatewayRequest>(
-    (method, params = {}, timeoutMs) => {
-      const storedSessionId = selectedStoredSessionIdRef.current
-      const owner = storedSessionId ? getSessionOwnerHint(storedSessionId) : undefined
-      const ambientConnection = $connection.get()
-
-      const connectionId =
-        owner?.connectionId ||
-        (ambientConnection?.mode === 'remote' ? ambientConnection.connectionId?.trim() || '' : '')
-
-      if (connectionId) {
-        return requestGatewayForAgent(connectionId, owner?.profile || 'default', method, params, timeoutMs)
-      }
-
-      return timeoutMs === undefined ? requestGateway(method, params) : requestGateway(method, params, timeoutMs)
-    },
-    [requestGateway, selectedStoredSessionIdRef]
-  )
-
   const submitPromptText = useSubmitPrompt({
     activeSessionIdRef,
     busyRef,
@@ -518,7 +491,11 @@ export function usePromptActions({
     getRoutedStoredSessionId,
     getRuntimeIdForStoredSession,
     getRouteToken,
-    requestGateway: requestForPromptSession,
+    // The window dispatcher already resolves the target session's exact owner
+    // and, for prompt.submit, retains that socket through the terminal turn
+    // event. A private raw requestGatewayForAgent wrapper bypassed the latter
+    // and released the only client as soon as the prompt ACK arrived.
+    requestGateway,
     runtimeIdByStoredSessionIdRef,
     resumeStoredSession,
     selectedStoredSessionIdRef,

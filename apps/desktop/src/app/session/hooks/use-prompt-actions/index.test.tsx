@@ -9,7 +9,6 @@ import { textPart } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $composerAttachments, $composerDraft, type ComposerAttachment, setComposerDraft } from '@/store/composer'
 import { $queuedPromptsBySession, getQueuedPrompts } from '@/store/composer-queue'
-import { requestGatewayForAgent } from '@/store/gateway'
 import { $goalsBySession, setSessionGoal } from '@/store/goals'
 import { $hudMode } from '@/store/hud'
 import { $notifications, clearNotifications } from '@/store/notifications'
@@ -48,11 +47,6 @@ vi.mock('@/hermes', () => ({
   PROMPT_SUBMIT_REQUEST_TIMEOUT_MS: 1_800_000,
   setApiRequestProfile: vi.fn(),
   transcribeAudio: vi.fn()
-}))
-
-vi.mock('@/store/gateway', async importOriginal => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  requestGatewayForAgent: vi.fn()
 }))
 
 // The active id the desktop holds is the *runtime* session id from
@@ -1774,16 +1768,14 @@ describe('usePromptActions submit / queue drain semantics', () => {
   afterEach(() => {
     cleanup()
     $connection.set(null)
-    vi.mocked(requestGatewayForAgent).mockReset()
     vi.restoreAllMocks()
   })
 
-  it('pins prompt.submit to the active registry connection when the remote session row is untagged', async () => {
+  it('dispatches prompt.submit through the window session router after a remote resume', async () => {
     $connection.set({ connectionId: 'hermes01', mode: 'remote' } as never)
     setSessions([sessionInfo({ id: 'stored-remote', profile: 'default' })])
 
     const ambientRequest = vi.fn(async () => ({}) as never)
-    vi.mocked(requestGatewayForAgent).mockResolvedValue({} as never)
 
     let handle: HarnessHandle | null = null
     await actRender(
@@ -1798,14 +1790,11 @@ describe('usePromptActions submit / queue drain semantics', () => {
     )
 
     expect(await handle!.submitText('continue remotely')).toBe(true)
-    expect(requestGatewayForAgent).toHaveBeenCalledWith(
-      'hermes01',
-      'default',
+    expect(ambientRequest).toHaveBeenCalledWith(
       'prompt.submit',
       { session_id: 'runtime-remote', text: 'continue remotely' },
       1_800_000
     )
-    expect(ambientRequest).not.toHaveBeenCalled()
   })
 
   it('clears a leftover interrupted flag on a fresh submit (so the new turn streams)', async () => {
