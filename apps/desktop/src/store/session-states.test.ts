@@ -218,6 +218,32 @@ describe('resetTileRuntimeBindings', () => {
     expect(invalidateRuntimeBindings).toHaveBeenCalledWith(new Set(['stored-barry-sibling-bot', 'stored-work-bot']))
   })
 
+  it('keeps an owner-routed SESSIONS tile (branch child) bound across an unrelated reconnect', () => {
+    const invalidateRuntimeBindings = vi.fn()
+    setSessionTileDelegate({ invalidateRuntimeBindings } as unknown as SessionTileDelegate)
+    $sessionTiles.set([
+      {
+        ownerRoute: { connectionId: '100-125-133-71-9119', mode: 'remote', profile: 'default' },
+        runtimeId: 'runtime-branch-live',
+        storedSessionId: 'stored-branch-child',
+        workspaceMode: 'sessions'
+      }
+    ])
+
+    // A flapping SSH sibling ('omer-private') reconnects; the branch child's
+    // runtime lives on Pandora and must keep its binding — dropping it re-arms
+    // the tile's resume, and repeated sibling flaps latch the resume-storm
+    // error card over a healthy session.
+    resetTileRuntimeBindings({ connectionId: 'omer-private', profile: 'default' })
+
+    expect($sessionTiles.get()[0]?.runtimeId).toBe('runtime-branch-live')
+    expect(invalidateRuntimeBindings).toHaveBeenCalledWith(new Set(['stored-branch-child']))
+
+    // Its OWN connection reconnecting still drops the binding for re-resume.
+    resetTileRuntimeBindings({ connectionId: '100-125-133-71-9119', profile: 'default' })
+    expect($sessionTiles.get()[0]?.runtimeId).toBeUndefined()
+  })
+
   it('matches a reconnect against the Desktop profile rather than its backend target alias', () => {
     const invalidateRuntimeBindings = vi.fn()
     setSessionTileDelegate({ invalidateRuntimeBindings } as unknown as SessionTileDelegate)
@@ -428,6 +454,27 @@ describe('SessionTile workspace scope', () => {
         workspaceOwnerKey: 'connection-a::writer'
       })
     ])
+  })
+
+  it('persists a sessions-mode owner route so a branch child tile pins its owning socket', () => {
+    const ownerRoute = { connectionId: '100-125-133-71-9119', mode: 'remote' as const, profile: 'default' }
+
+    openSessionTile('branch-child', 'center', undefined, null, { ownerRoute, workspaceMode: 'sessions' })
+
+    expect($sessionTiles.get()).toEqual([
+      expect.objectContaining({ ownerRoute, storedSessionId: 'branch-child', workspaceMode: 'sessions' })
+    ])
+  })
+
+  it('keeps an existing sessions-mode owner route on a route-less re-scope', () => {
+    const ownerRoute = { connectionId: '100-125-133-71-9119', mode: 'remote' as const, profile: 'default' }
+
+    openSessionTile('branch-child', 'center', undefined, null, { ownerRoute, workspaceMode: 'sessions' })
+    // A plain sidebar re-open routes through setSessionTileWorkspaceScope with
+    // no route — absence of information, not a revocation.
+    setSessionTileWorkspaceScope('branch-child', { workspaceMode: 'sessions' })
+
+    expect($sessionTiles.get()).toEqual([expect.objectContaining({ ownerRoute, storedSessionId: 'branch-child' })])
   })
 
   it('re-scopes an existing tile without changing its placement', () => {

@@ -355,9 +355,25 @@ export function foregroundSessionScopes(): Set<string> {
         idsShareLineage(storedSessionId, selectedStoredSessionId, ownerRows)
     )
 
-    const tilePublished = foregroundTiles.some(tile =>
-      idsShareLineage(storedSessionId, tile.storedSessionId, ownerRows)
-    )
+    // A tile publication only covers the hold when the tile actually NAMES
+    // the held scope (its persisted route, or a runtime whose event scope is
+    // recorded). A route-less tile pins nothing — retiring the hold on its
+    // mere existence reopened the create→foreground gap it exists to close:
+    // the pruner closed the owner socket, the backend reaped the draft
+    // runtime, and a branch child's tile looped resume→reclaim (#93892).
+    const tilePublished = foregroundTiles.some(tile => {
+      if (!idsShareLineage(storedSessionId, tile.storedSessionId, ownerRows)) {
+        return false
+      }
+
+      const routeScope = tile.ownerRoute?.connectionId?.trim()
+        ? registryBackendScopeKey(tile.ownerRoute.connectionId.trim(), normalizeProfileKey(tile.ownerRoute.profile))
+        : null
+
+      const runtimeScope = tile.runtimeId ? sessionScopeByRuntimeId.get(tile.runtimeId) : undefined
+
+      return routeScope === scope || runtimeScope === scope
+    })
 
     if (!scope || hold.until <= now || selectedPublished || tilePublished) {
       // This recompute was already triggered by the covering publication (or
@@ -1237,7 +1253,12 @@ export function setSessionTileWorkspaceScope(storedSessionId: string, scope: Ses
 
   const tile = $sessionTiles.get().find(candidate => candidate.storedSessionId === storedSessionId)
   const workspaceOwnerKey = scope.workspaceMode === 'bots' ? scope.workspaceOwnerKey : undefined
-  const ownerRoute = scope.workspaceMode === 'bots' ? scope.ownerRoute : undefined
+  // Sessions-mode re-opens (sidebar click on an already-tiled session) pass no
+  // route; that is absence of information, not a revocation — keep the exact
+  // owner the tile was opened with (a branch child's parent connection) so a
+  // plain re-open can't unpin the owning socket. Bot scopes stay authoritative
+  // both ways: they always name their route explicitly.
+  const ownerRoute = scope.workspaceMode === 'bots' ? scope.ownerRoute : (scope.ownerRoute ?? tile?.ownerRoute)
   const workspaceTabTitle = scope.workspaceMode === 'bots' ? scope.workspaceTabTitle : undefined
 
   if (
@@ -1324,8 +1345,15 @@ export function resetTileRuntimeBindings(
   const preservedStoredIds = new Set(
     tiles
       .filter(
+        // Any tile with an EXACT owner route — bot tabs always, and a
+        // sessions tile whose opener stamped one (a branch child on its
+        // parent's connection). Its runtime lives on that owner's socket,
+        // not the ambient gateway, so an unrelated connection's reconnect
+        // must not drop the binding: each drop re-arms the tile's resume,
+        // and a flapping sibling connection turns that into 4+ re-resumes
+        // inside the storm window — latching the "keeps losing its backend
+        // runtime" card over a session that is actually healthy.
         tile =>
-          tile.workspaceMode === 'bots' &&
           Boolean(tile.ownerRoute?.connectionId) &&
           (!(reconnected || liveConnectionIds) || !belongsToReconnectedRuntime(tile))
       )
@@ -1598,7 +1626,15 @@ export function openSessionTile(
         anchor: dock,
         before,
         dir,
-        ownerRoute: workspaceScope.workspaceMode === 'bots' ? workspaceScope.ownerRoute : undefined,
+        // The owner route pins the owning backend's socket in the gateway
+        // keep-set (openTileGatewayScopes / foregroundSessionScopes) for as
+        // long as the tile is open. Bot tabs always carry one; a sessions-mode
+        // tile carries one when its opener knows the exact owner — e.g. a
+        // branch child created on its parent's owning connection, whose
+        // draft runtime is otherwise orphan-reaped the moment the pruner
+        // closes the unpinned socket (the resume/reclaim flicker loop,
+        // #93892 shape).
+        ownerRoute: workspaceScope.ownerRoute,
         storedSessionId,
         workspaceMode: workspaceScope.workspaceMode,
         workspaceOwnerKey,
