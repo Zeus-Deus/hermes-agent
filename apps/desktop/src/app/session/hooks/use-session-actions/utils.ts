@@ -1094,6 +1094,59 @@ export function removeRepresentedLocalLiveProjection(
 }
 
 /**
+ * Remove only the optimistic user half of a live turn represented by a resume
+ * snapshot. The assistant half deliberately stays: it may have received deltas
+ * after the snapshot and overlayConcurrentMessageChanges must still graft
+ * those onto the resumed stream row.
+ *
+ * This is narrower than text dedupe. The matching user must be in the open
+ * tail and immediately own a synthetic live assistant boundary, so an
+ * intentionally repeated prompt typed after that boundary survives.
+ */
+export function removeRepresentedLocalInflightUser(
+  previousMessages: ChatMessage[],
+  projection: Pick<SessionResumeResponse, 'inflight'>
+): ChatMessage[] {
+  const inflightUser = projection.inflight?.user?.replace(/\s+/g, ' ').trim() ?? ''
+
+  if (!inflightUser) {
+    return previousMessages
+  }
+
+  let openTailStart = 0
+
+  for (let index = previousMessages.length - 1; index >= 0; index -= 1) {
+    const message = previousMessages[index]
+
+    if (message.role === 'assistant' && !message.pending) {
+      openTailStart = index + 1
+
+      break
+    }
+  }
+
+  const inflightUserIndex = previousMessages.findIndex(
+    (message, index) =>
+      index >= openTailStart &&
+      message.role === 'user' &&
+      message.id.startsWith('user-') &&
+      normalizedMessageText(message) === inflightUser
+  )
+
+  const assistant = previousMessages[inflightUserIndex + 1]
+
+  if (
+    inflightUserIndex < openTailStart ||
+    assistant?.role !== 'assistant' ||
+    !assistant.id.startsWith('assistant-stream-')
+  ) {
+    return previousMessages
+  }
+
+  return previousMessages.filter((_message, index) => index !== inflightUserIndex)
+}
+
+/**
  * Overlay messages that changed while activation waited on REST. Existing ids
  * replace the older activation row; only rows added or changed since the warm
  * cache baseline are appended. This is identity-based, never text-based.

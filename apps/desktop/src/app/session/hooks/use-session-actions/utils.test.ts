@@ -28,6 +28,7 @@ import {
   overlayConcurrentMessageChanges,
   preserveLocalPendingTurnMessages,
   reconcileResumeMessages,
+  removeRepresentedLocalInflightUser,
   removeRepresentedLocalLiveProjection,
   resolveResumedBusy,
   selectBranchMessages,
@@ -1678,7 +1679,71 @@ describe('removeRepresentedLocalLiveProjection', () => {
   })
 })
 
+describe('removeRepresentedLocalInflightUser', () => {
+  it('drops the represented optimistic user but keeps newer stream deltas and a racing prompt', () => {
+    const previous = [
+      msg('assistant-complete', 'assistant', 'finished answer'),
+      msg('user-current', 'user', 'current prompt'),
+      msg('assistant-stream-current', 'assistant', 'partial answer + newer delta', { pending: true }),
+      msg('user-racing', 'user', 'next prompt')
+    ]
+
+    const remaining = removeRepresentedLocalInflightUser(previous, runningProjection('current prompt'))
+
+    expect(remaining.map(message => message.id)).toEqual([
+      'assistant-complete',
+      'assistant-stream-current',
+      'user-racing'
+    ])
+  })
+
+  it('preserves an identical racing prompt that does not own a live assistant boundary', () => {
+    const previous = [
+      msg('assistant-complete', 'assistant', 'finished answer'),
+      msg('user-racing', 'user', 'current prompt')
+    ]
+
+    expect(removeRepresentedLocalInflightUser(previous, runningProjection('current prompt'))).toBe(previous)
+  })
+})
+
 describe('overlayConcurrentMessageChanges', () => {
+  it('does not re-append an optimistic user already represented by the resumed in-flight turn', () => {
+    const baseline = [
+      msg('stored-user', 'user', 'earlier prompt'),
+      msg('stored-assistant', 'assistant', 'earlier answer'),
+      msg('persisted-current', 'user', 'current prompt')
+    ]
+
+    const authoritative = [
+      ...baseline,
+      msg('assistant-stream-resumed', 'assistant', 'partial answer', { pending: true })
+    ]
+
+    const current = [
+      ...baseline.slice(0, 2),
+      msg('user-optimistic', 'user', 'current prompt'),
+      msg('assistant-stream-original', 'assistant', 'partial answer + delta', { pending: true })
+    ]
+
+    const projection = runningProjection('current prompt')
+
+    const overlaid = overlayConcurrentMessageChanges(
+      authoritative,
+      removeRepresentedLocalInflightUser(baseline, projection),
+      removeRepresentedLocalInflightUser(current, projection)
+    )
+
+    expect(overlaid.filter(message => message.role === 'user').map(message => message.id)).toEqual([
+      'stored-user',
+      'persisted-current'
+    ])
+    expect(overlaid.at(-1)).toMatchObject({
+      id: 'assistant-stream-original',
+      parts: [{ type: 'text', text: 'partial answer + delta' }]
+    })
+  })
+
   it('does not replace an authoritative row with an unchanged baseline cache row', () => {
     const baseline = [msg('shared-assistant', 'assistant', 'stale cached answer')]
     const authoritative = [msg('shared-assistant', 'assistant', 'completed persisted answer')]

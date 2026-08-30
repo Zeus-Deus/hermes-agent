@@ -155,6 +155,7 @@ import {
   patchSessionWorkspace,
   preserveLocalPendingTurnMessages,
   reconcileResumeMessages,
+  removeRepresentedLocalInflightUser,
   removeRepresentedLocalLiveProjection,
   resolveResumedBusy,
   resolveSessionProfile,
@@ -1575,8 +1576,8 @@ export function useSessionActions({
 
               const withConcurrentChanges = overlayConcurrentMessageChanges(
                 resumedMessages,
-                localSnapshot,
-                currentMessages
+                removeRepresentedLocalInflightUser(localSnapshot, resumed),
+                removeRepresentedLocalInflightUser(currentMessages, resumed)
               )
 
               return chatMessageArraysEquivalent(currentMessages, withConcurrentChanges)
@@ -1603,8 +1604,8 @@ export function useSessionActions({
 
         const preferredWithRuntimeChanges = overlayConcurrentMessageChanges(
           preferredMessages,
-          resumeRuntimeBaselineMessages,
-          currentRuntimeMessages
+          removeRepresentedLocalInflightUser(resumeRuntimeBaselineMessages, resumed),
+          removeRepresentedLocalInflightUser(currentRuntimeMessages, resumed)
         )
 
         // #70449: same stale-snapshot guard as the warm path — a turn that
