@@ -90,12 +90,11 @@ export function connectionScoped(): { connectionId?: string } {
  *  routing may override the active source for an explicitly-owned resource.
  *
  *  Helpers under `api/` go through here rather than calling the preload bridge
- *  directly, so the connection tag cannot be forgotten on a new one — with one
- *  exception. A capabilityScoped() helper must NOT: that scope says "the local
- *  pool" by omitting `connectionId` entirely, and an absent key cannot override
- *  the ambient tag spread underneath it, so a 'local' pin would silently route
- *  to whatever remote gateway happened to be active. Those helpers call the
- *  bridge directly and own their routing end to end. */
+ *  directly, so the connection tag cannot be forgotten on a new one.
+ *  capabilityScoped() now emits an explicit `connectionId` for EVERY object
+ *  pin — `'local'` included — so a pin always overrides the ambient tag spread
+ *  underneath it. (It used to omit the key for 'local', which made the pin
+ *  unable to beat the ambient tag; helpers then had to bypass this wrapper.) */
 export function hermesApi<T>(request: HermesApiRequest): Promise<T> {
   return window.hermesDesktop.api<T>({ ...connectionScoped(), ...request })
 }
@@ -113,15 +112,14 @@ export function hermesApi<T>(request: HermesApiRequest): Promise<T> {
 //     connection tag (connectionScoped, same contract the cron helpers adopted
 //     in #87882). Without the tag, a window activated onto a registered remote
 //     gateway read the LOCAL pool's skills/tools/MCP — the wrong machine.
-//   - `{ connectionId, profile }` → explicit pin. A `'local'` connection id
-//     means THIS machine and is emitted verbatim: the main process keeps an
-//     explicit `local` registry-pinned (hermes:api's registry branch spawns a
-//     forced-local child when the v1 route is remote), which is the only way
-//     a local-profile pick made while a remote gateway is active reaches the
-//     local machine. Dropping it left the request on the legacy profile
-//     route, which follows the ACTIVE remote — so a "This device" bot's
-//     skills/tools/MCP 404'd there with "Profile 'x' does not exist" (#94071).
-//     An empty id keeps the ambient-free legacy route (no pin at all).
+//   - `{ connectionId, profile }` → explicit pin. A non-empty connection id —
+//     `'local'` INCLUDED — is sent through so Electron's registry resolver
+//     owns the routing. Dropping the `'local'` pin (the pre-#91564 behavior,
+//     when an absent id always meant the local pool) silently re-routes a
+//     "This device" pick to the registry PRIMARY once that primary is a
+//     remote/cloud/ssh gateway: the v1 fallback route treats a remote registry
+//     primary as global-remote, so the explicit pin is the ONLY way back to
+//     this machine (see apiRequestRegistryConnectionId in Electron main).
 export type ProfileScope = undefined | null | string | { connectionId?: null | string; profile?: null | string }
 
 export function capabilityScoped(scope?: ProfileScope): { connectionId?: string; profile?: string } {
@@ -138,15 +136,12 @@ export function capabilityScoped(scope?: ProfileScope): { connectionId?: string;
   return { ...profileScoped(scope), ...connectionScoped() }
 }
 
-/** Stable cache-key for a capability scope: `profile` for the legacy path
- *  (string scope / empty connection id), `connectionId::profile` for ANY
- *  explicit pin — `'local'` included. capabilityScoped routes an explicit
- *  `'local'` pin to THIS machine while the legacy path follows the active
- *  gateway, so the two must never share a cache row: with a remote gateway
- *  active, a "This device" bot's editor would otherwise read (and write) the
- *  remote same-named profile's skills/toolsets/config from the query cache
- *  (#94071). Mirrors normalizeProfileKey for plain strings so existing keys
- *  stay byte-identical. */
+/** Stable cache-key for a capability scope: `profile` for the ambient/legacy
+ *  path, `connectionId::profile` for ANY explicit pin — `local` included. An
+ *  explicit "This device" pick and the ambient path are no longer guaranteed
+ *  to hit the same backend (a remote registry PRIMARY makes the ambient path
+ *  remote), so sharing the bare-profile cache row between them painted one
+ *  machine's config under the other's scope (AGENTS.md scope-in-key rule). */
 export function profileScopeKey(scope?: ProfileScope): string {
   if (scope && typeof scope === 'object') {
     const profile = (scope.profile ?? '').trim() || 'default'
