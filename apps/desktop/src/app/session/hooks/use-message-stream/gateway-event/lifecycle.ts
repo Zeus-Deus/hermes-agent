@@ -20,6 +20,7 @@ import {
   sessionMatchesStoredId
 } from '@/store/session'
 import type { SessionOwnerRoute } from '@/store/session-request-router'
+import { markRuntimeGone } from '@/store/runtime-gone'
 import {
   dropSessionState,
   holdSessionOwnerUntilForeground,
@@ -178,6 +179,8 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
       : undefined
 
     if (reclaimedRuntimeId) {
+      // Heal while the cached stored-id mapping is still intact, then drop.
+      markRuntimeGone(reclaimedRuntimeId)
       dropSessionState(reclaimedRuntimeId)
       // A tile bound to the reclaimed runtime would otherwise render an
       // empty transcript forever: its view reads $sessionStates[runtime]

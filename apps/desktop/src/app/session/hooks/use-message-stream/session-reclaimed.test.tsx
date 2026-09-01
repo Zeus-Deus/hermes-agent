@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ClientSessionState } from '@/app/types'
 import { createClientSessionState } from '@/lib/chat-runtime'
+import { resetRuntimeGoneHealing } from '@/store/runtime-gone'
 import {
   $activeSessionId,
   $selectedStoredSessionId,
@@ -51,6 +52,7 @@ const reclaim = (sessionId: string, reason = 'ws_orphan_reap') =>
 
 beforeEach(() => {
   queryClient = new QueryClient()
+  resetRuntimeGoneHealing()
   $sessionStates.set({})
   $sessionTiles.set([])
   $activeSessionId.set(null)
@@ -63,6 +65,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  resetRuntimeGoneHealing()
   $sessionStates.set({})
   $sessionTiles.set([])
   $activeSessionId.set(null)

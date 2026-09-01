@@ -491,10 +491,8 @@ export function usePromptActions({
     getRoutedStoredSessionId,
     getRuntimeIdForStoredSession,
     getRouteToken,
-    // The window dispatcher already resolves the target session's exact owner
-    // and, for prompt.submit, retains that socket through the terminal turn
-    // event. A private raw requestGatewayForAgent wrapper bypassed the latter
-    // and released the only client as soon as the prompt ACK arrived.
+    // Window dispatcher: exact owner + turn lease through the terminal event.
+    // A private requestGatewayForAgent wrapper released the only client at ACK.
     requestGateway,
     runtimeIdByStoredSessionIdRef,
     resumeStoredSession,
