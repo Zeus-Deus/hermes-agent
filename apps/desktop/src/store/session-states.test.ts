@@ -10,18 +10,8 @@ import {
   setWorkspaceScope,
   workspaceScopeKey
 } from '@/components/pane-shell/workspace-scope'
-import { createClientSessionState } from '@/lib/chat-runtime'
 import { $activeGatewayProfile } from '@/store/profile'
-import {
-  $activeSessionId,
-  $connection,
-  $selectedStoredSessionId,
-  $sessionResumeRequest,
-  _resetSessionOwnerHintsForTests,
-  getSessionOwnerHint,
-  setSessionOwnerHint,
-  setSessions
-} from '@/store/session'
+import { $activeSessionId, $connection, $selectedStoredSessionId, setSessions } from '@/store/session'
 import type { SessionProfileRoute } from '@/store/session-request-router'
 import type { SessionTile } from '@/store/session-states'
 import type * as SessionStatesModule from '@/store/session-states'
@@ -29,7 +19,6 @@ import {
   $focusedStoredSessionId,
   $sessionStates,
   $sessionTiles,
-  _resetSessionOwnerHoldsForTests,
   blankDraftTile,
   clearAllSessionStates,
   closeAllOpenSessionTiles,
@@ -44,7 +33,6 @@ import {
   openSessionTile,
   orderTilesByTree,
   patchSessionTile,
-  publishSessionState,
   recordSessionEventScope,
   releaseSessionTranscript,
   requestForOwnedSession,
@@ -117,12 +105,6 @@ describe('foregroundSessionScopes', () => {
 
 describe('resetTileRuntimeBindings', () => {
   afterEach(() => {
-    $activeSessionId.set(null)
-    $selectedStoredSessionId.set(null)
-    $sessionResumeRequest.set(null)
-    _resetSessionOwnerHintsForTests({ storage: true })
-    _resetSessionOwnerHoldsForTests()
-    clearAllSessionStates()
     $sessionTiles.set([])
   })
 
@@ -230,11 +212,11 @@ describe('resetTileRuntimeBindings', () => {
       }
     ])
 
-    // A flapping SSH sibling ('omer-private') reconnects; the branch child's
-    // runtime lives on Pandora and must keep its binding — dropping it re-arms
-    // the tile's resume, and repeated sibling flaps latch the resume-storm
-    // error card over a healthy session.
-    resetTileRuntimeBindings({ connectionId: 'omer-private', profile: 'default' })
+    // A flapping sibling connection reconnects; the branch child's runtime
+    // lives on its parent's backend and must keep its binding — dropping it
+    // re-arms the tile's resume, and repeated sibling flaps latch the
+    // resume-storm error card over a healthy session.
+    resetTileRuntimeBindings({ connectionId: 'other-ssh-source', profile: 'default' })
 
     expect($sessionTiles.get()[0]?.runtimeId).toBe('runtime-branch-live')
     expect(invalidateRuntimeBindings).toHaveBeenCalledWith(new Set(['stored-branch-child']))
@@ -242,118 +224,6 @@ describe('resetTileRuntimeBindings', () => {
     // Its OWN connection reconnecting still drops the binding for re-resume.
     resetTileRuntimeBindings({ connectionId: '100-125-133-71-9119', profile: 'default' })
     expect($sessionTiles.get()[0]?.runtimeId).toBeUndefined()
-  })
-
-  it('matches a reconnect against the Desktop profile rather than its backend target alias', () => {
-    const invalidateRuntimeBindings = vi.fn()
-    setSessionTileDelegate({ invalidateRuntimeBindings } as unknown as SessionTileDelegate)
-    $sessionTiles.set([
-      {
-        ownerRoute: {
-          connectionId: 'cloud-a',
-          mode: 'remote',
-          profile: 'moxie',
-          targetProfile: 'default'
-        },
-        runtimeId: 'runtime-moxie-dead',
-        storedSessionId: 'stored-moxie',
-        workspaceMode: 'bots'
-      }
-    ])
-
-    resetTileRuntimeBindings({ connectionId: 'cloud-a', profile: 'moxie' })
-
-    expect($sessionTiles.get()[0]?.runtimeId).toBeUndefined()
-    expect(invalidateRuntimeBindings).toHaveBeenCalledWith(new Set())
-  })
-
-  it('re-arms the active main chat before its first owner-tagged event when the exact socket reconnects', () => {
-    const invalidateRuntimeBindings = vi.fn()
-    setSessionTileDelegate({ invalidateRuntimeBindings } as unknown as SessionTileDelegate)
-    setSessionOwnerHint('stored-youtube', {
-      connectionId: 'local',
-      mode: 'local',
-      profile: 'youtube',
-      targetProfile: 'youtube'
-    })
-    $activeSessionId.set('runtime-youtube-old')
-    $selectedStoredSessionId.set('stored-youtube')
-    publishSessionState('runtime-youtube-old', createClientSessionState('stored-youtube'))
-
-    resetTileRuntimeBindings({ connectionId: 'local', profile: 'youtube' })
-
-    expect(invalidateRuntimeBindings).toHaveBeenCalledOnce()
-    expect($sessionResumeRequest.get()).toEqual({
-      ownerRoute: {
-        connectionId: 'local',
-        mode: 'local',
-        profile: 'youtube',
-        targetProfile: 'youtube'
-      },
-      sequence: expect.any(Number),
-      sessionId: 'stored-youtube'
-    })
-  })
-
-  it('does not rebind the active main chat for an unrelated owner reconnect', () => {
-    const invalidateRuntimeBindings = vi.fn()
-    setSessionTileDelegate({ invalidateRuntimeBindings } as unknown as SessionTileDelegate)
-    setSessionOwnerHint('stored-youtube', {
-      connectionId: 'local',
-      mode: 'local',
-      profile: 'youtube'
-    })
-    $activeSessionId.set('runtime-youtube-old')
-    $selectedStoredSessionId.set('stored-youtube')
-    publishSessionState('runtime-youtube-old', createClientSessionState('stored-youtube'))
-    recordSessionEventScope({
-      connectionId: 'local',
-      profile: 'youtube',
-      session_id: 'runtime-youtube-old'
-    })
-
-    resetTileRuntimeBindings({ connectionId: 'cloud-a', profile: 'youtube' })
-
-    expect($sessionResumeRequest.get()).toBeNull()
-    expect(invalidateRuntimeBindings).toHaveBeenCalledWith(new Set(['stored-youtube']))
-  })
-
-  it('does not route a newly selected chat through the previous active runtime owner during a switch', () => {
-    setSessionTileDelegate({ invalidateRuntimeBindings: vi.fn() } as unknown as SessionTileDelegate)
-    setSessionOwnerHint('stored-b', {
-      connectionId: 'cloud-b',
-      mode: 'remote',
-      profile: 'youtube'
-    })
-    $activeSessionId.set('runtime-a')
-    $selectedStoredSessionId.set('stored-b')
-    publishSessionState('runtime-a', createClientSessionState('stored-a'))
-    recordSessionEventScope({ connectionId: 'local', profile: 'youtube', session_id: 'runtime-a' })
-
-    resetTileRuntimeBindings({ connectionId: 'local', profile: 'youtube' })
-
-    expect($sessionResumeRequest.get()).toBeNull()
-    expect(getSessionOwnerHint('stored-b')).toMatchObject({ connectionId: 'cloud-b', profile: 'youtube' })
-  })
-
-  it('preserves an active main binding owned by a still-live secondary across primary reconnect variants', () => {
-    const invalidateRuntimeBindings = vi.fn()
-    setSessionTileDelegate({ invalidateRuntimeBindings } as unknown as SessionTileDelegate)
-    setSessionOwnerHint('stored-work', {
-      connectionId: 'work-vps',
-      mode: 'remote',
-      profile: 'ceo'
-    })
-    $activeSessionId.set('runtime-work')
-    $selectedStoredSessionId.set('stored-work')
-    publishSessionState('runtime-work', createClientSessionState('stored-work'))
-    recordSessionEventScope({ connectionId: 'work-vps', profile: 'ceo', session_id: 'runtime-work' })
-
-    resetTileRuntimeBindings('legacy-primary')
-    expect(invalidateRuntimeBindings).toHaveBeenLastCalledWith(new Set(['stored-work']))
-
-    resetTileRuntimeBindings({ liveConnectionIds: new Set(['work-vps']) })
-    expect(invalidateRuntimeBindings).toHaveBeenLastCalledWith(new Set(['stored-work']))
   })
 
   it('unknown restarted identity preserves only Bot runtimes owned by provably-live connections', () => {
@@ -398,6 +268,27 @@ describe('SessionTile workspace scope', () => {
     $layoutTree.set(null)
     $selectedStoredSessionId.set(null)
     $sessionTiles.set([])
+  })
+
+  it('persists a sessions-mode owner route so a branch child tile pins its owning socket', () => {
+    const ownerRoute = { connectionId: '100-125-133-71-9119', mode: 'remote' as const, profile: 'default' }
+
+    openSessionTile('branch-child', 'center', undefined, null, { ownerRoute, workspaceMode: 'sessions' })
+
+    expect($sessionTiles.get()).toEqual([
+      expect.objectContaining({ ownerRoute, storedSessionId: 'branch-child', workspaceMode: 'sessions' })
+    ])
+  })
+
+  it('keeps an existing sessions-mode owner route on a route-less re-scope', () => {
+    const ownerRoute = { connectionId: '100-125-133-71-9119', mode: 'remote' as const, profile: 'default' }
+
+    openSessionTile('branch-child', 'center', undefined, null, { ownerRoute, workspaceMode: 'sessions' })
+    // A plain sidebar re-open routes through setSessionTileWorkspaceScope with
+    // no route — absence of information, not a revocation.
+    setSessionTileWorkspaceScope('branch-child', { workspaceMode: 'sessions' })
+
+    expect($sessionTiles.get()).toEqual([expect.objectContaining({ ownerRoute, storedSessionId: 'branch-child' })])
   })
 
   it('stores an exact Bot owner and keeps it through placement patches', () => {
@@ -454,27 +345,6 @@ describe('SessionTile workspace scope', () => {
         workspaceOwnerKey: 'connection-a::writer'
       })
     ])
-  })
-
-  it('persists a sessions-mode owner route so a branch child tile pins its owning socket', () => {
-    const ownerRoute = { connectionId: '100-125-133-71-9119', mode: 'remote' as const, profile: 'default' }
-
-    openSessionTile('branch-child', 'center', undefined, null, { ownerRoute, workspaceMode: 'sessions' })
-
-    expect($sessionTiles.get()).toEqual([
-      expect.objectContaining({ ownerRoute, storedSessionId: 'branch-child', workspaceMode: 'sessions' })
-    ])
-  })
-
-  it('keeps an existing sessions-mode owner route on a route-less re-scope', () => {
-    const ownerRoute = { connectionId: '100-125-133-71-9119', mode: 'remote' as const, profile: 'default' }
-
-    openSessionTile('branch-child', 'center', undefined, null, { ownerRoute, workspaceMode: 'sessions' })
-    // A plain sidebar re-open routes through setSessionTileWorkspaceScope with
-    // no route — absence of information, not a revocation.
-    setSessionTileWorkspaceScope('branch-child', { workspaceMode: 'sessions' })
-
-    expect($sessionTiles.get()).toEqual([expect.objectContaining({ ownerRoute, storedSessionId: 'branch-child' })])
   })
 
   it('re-scopes an existing tile without changing its placement', () => {

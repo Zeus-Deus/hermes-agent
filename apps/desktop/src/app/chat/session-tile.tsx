@@ -41,15 +41,15 @@ import { $activeGatewayProfile } from '@/store/profile'
 import { $projectTree } from '@/store/projects'
 import { sessionAwaitingInput } from '@/store/prompts'
 import {
+  $cronSessions,
   $gatewayState,
+  $messagingSessions,
   $selectedStoredSessionId,
   $sessions,
-  knownSessionOwner,
-  ownerLookupSessionRows,
   sessionMatchesStoredId,
   sessionPinId
 } from '@/store/session'
-import { requestForSessionProfile, type SessionOwnerRoute } from '@/store/session-request-router'
+import { requestForSessionProfile } from '@/store/session-request-router'
 import {
   $sessionStates,
   $sessionTileDelegateRevision,
@@ -57,8 +57,7 @@ import {
   closeSessionTile,
   patchSessionTile,
   type SessionTile,
-  sessionTileDelegate,
-  sessionTileOwnerRoute
+  sessionTileDelegate
 } from '@/store/session-states'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -70,6 +69,7 @@ import { SessionDraftTitle } from './session-draft-title'
 import { startSessionDrag } from './session-drag'
 import { SessionStatusDot } from './session-status-dot'
 import { useSessionTileActions } from './session-tile-actions'
+import { tileOwnerRoute } from './session-tile-owner'
 import { type SessionView, SessionViewProvider } from './session-view'
 import { SessionContextMenu } from './sidebar/session-actions-menu'
 import { lastVisibleMessageIsUser } from './thread-loading'
@@ -78,43 +78,24 @@ import { ChatView } from '.'
 
 const NO_MESSAGES: ChatMessage[] = []
 
-/**
- * Total resume budget for one tile (#93892). Every dial/RPC/hydration in the
- * resume chain has its own timeout, but the chain as a whole had none: a
- * runtime that genuinely resumes and is then reclaimed (`session.reclaimed`
- * unbinds the tile, which re-arms the resume effect) looped forever behind
- * the loader. More than TILE_RESUME_STORM_LIMIT successful resumes inside
- * TILE_RESUME_STORM_WINDOW_MS is not recovery any more — latch the error
- * card so the user gets a terminal state and a Retry (which re-opens the
- * budget). A normal sleep/wake or backend restart re-resumes once or twice;
- * the reclaim loop cycles roughly every orphan-reap grace (~20s).
- */
 export const TILE_RESUME_STORM_WINDOW_MS = 120_000
 export const TILE_RESUME_STORM_LIMIT = 4
 export const TILE_RESUME_STORM_MESSAGE =
   'Session keeps losing its backend runtime right after resuming — retry to resume it again.'
 
-/** The resume timestamps still inside the storm window at `now`. */
 export function recentTileResumes(resumedAt: readonly number[], now: number): number[] {
   return resumedAt.filter(at => now - at < TILE_RESUME_STORM_WINDOW_MS)
 }
 
-/** True once the resume budget is exhausted: the next resume must latch the
- *  error card instead of dialing again. */
 export function tileResumeStormed(resumedAt: readonly number[], now: number): boolean {
   return recentTileResumes(resumedAt, now).length >= TILE_RESUME_STORM_LIMIT
 }
 
 export interface TileResumeBudget {
-  /** Ask before dialing. False = the budget is spent: latch the error card
-   *  instead. The budget resets on that answer so a Retry gets a clean cycle. */
   take: () => boolean
-  /** A resume SUCCEEDED (bound a runtime) — only successes spend budget;
-   *  failures already latch their own error. */
   spend: () => void
 }
 
-/** One tile's resume budget — the pane keeps one for its lifetime. */
 export function createTileResumeBudget(now: () => number = Date.now): TileResumeBudget {
   let resumedAt: number[] = []
 
@@ -124,12 +105,10 @@ export function createTileResumeBudget(now: () => number = Date.now): TileResume
 
       if (tileResumeStormed(resumedAt, at)) {
         resumedAt = []
-
         return false
       }
 
       resumedAt = recentTileResumes(resumedAt, at)
-
       return true
     },
     spend: () => {
@@ -220,37 +199,20 @@ function TileChat({
   const { gateway, requestGateway } = useGatewayRequest()
   const queryClient = useQueryClient()
 
-  // Owner ladder, same as useSessionTileActions (session-tile-actions.ts:99-103):
-  // this tile's explicit route first, then the session row's own
-  // (connection, profile) tag — knownSessionOwner also folds in the owner hint.
-  // A tile opened without an explicit route — e.g. a branch child, which
-  // openSessionTile creates with no workspaceScope — has no tile route, so the
-  // row/hint rung is the only thing keeping this tile's model + composer RPCs
-  // on the backend that owns the session instead of the ambient one.
-  //
-  // Resolved on every render (cheap id lookups) so it cannot go stale against
-  // the tile store, the recents/cron/messaging rows, or the hint map. Only the
-  // resulting IDENTITY is memoised, on primitives, because knownSessionOwner
-  // mints a fresh object per call and requestTileGateway below is keyed on it.
-  const resolvedOwner =
-    sessionTileOwnerRoute(storedSessionId) ?? knownSessionOwner(ownerLookupSessionRows(), storedSessionId)
+  // Owner ladder, same as useSessionTileActions (session-tile-actions.ts:99-103).
+  // Recomputed when the tile store or any owner-bearing session list changes,
+  // NOT on every render: this component re-renders per streamed token, and the
+  // lookup spreads three arrays before scanning them.
+  const tiles = useStore($sessionTiles)
+  const sessionRows = useStore($sessions)
+  const cronRows = useStore($cronSessions)
+  const messagingRows = useStore($messagingSessions)
 
-  const ownerConnectionId = resolvedOwner && typeof resolvedOwner === 'object' ? resolvedOwner.connectionId : ''
-  const ownerProfile = resolvedOwner && typeof resolvedOwner === 'object' ? resolvedOwner.profile : ''
-  const ownerTargetProfile = resolvedOwner && typeof resolvedOwner === 'object' ? resolvedOwner.targetProfile : undefined
+  const ownerRoute = useMemo(() => {
+    const rows = cronRows.length || messagingRows.length ? [...sessionRows, ...cronRows, ...messagingRows] : sessionRows
 
-  // A bare profile string carries no connection and is not a usable route here.
-  const ownerRoute = useMemo<SessionOwnerRoute | undefined>(
-    () =>
-      ownerConnectionId
-        ? {
-            connectionId: ownerConnectionId,
-            profile: ownerProfile,
-            ...(ownerTargetProfile ? { targetProfile: ownerTargetProfile } : {})
-          }
-        : undefined,
-    [ownerConnectionId, ownerProfile, ownerTargetProfile]
-  )
+    return tileOwnerRoute(tiles, rows, storedSessionId)
+  }, [cronRows, messagingRows, sessionRows, storedSessionId, tiles])
 
   const requestTileGateway = useCallback(
     <T,>(method: string, params?: Record<string, unknown>, timeoutMs?: number, signal?: AbortSignal): Promise<T> =>
@@ -393,7 +355,6 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
   const gatewayOpen = useStore($gatewayState) === 'open'
   const delegateRevision = useStore($sessionTileDelegateRevision)
   const resumingRef = useRef(false)
-  // This tile's overall resume budget (#93892).
   const resumeBudget = useRef(createTileResumeBudget()).current
   const view = useMemo(() => buildTileView(storedSessionId), [storedSessionId])
 
@@ -465,12 +426,8 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
       return
     }
 
-    // Bounded overall budget (#93892): a runtime that keeps resuming and
-    // getting reclaimed is a loop, not recovery. Latch the error card (and
-    // reset the budget so Retry gets a clean cycle) instead of dialing again.
     if (!resumeBudget.take()) {
       patchSessionTile(storedSessionId, { error: TILE_RESUME_STORM_MESSAGE })
-
       return
     }
 
@@ -507,7 +464,7 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
       .finally(() => {
         resumingRef.current = false
       })
-  }, [delegateRevision, gatewayOpen, ownerRoute, resumeBudget, runtimeId, storedSessionId, tile?.error])
+  }, [delegateRevision, gatewayOpen, ownerRoute, runtimeId, storedSessionId, tile?.error])
 
   // The gateway (re)opening invalidates any latched error — it likely came
   // from a not-yet-open gateway or the previous connection. Clearing it

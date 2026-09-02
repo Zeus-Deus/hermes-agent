@@ -683,6 +683,10 @@ export const en: Translations = {
       bundleOutOfSyncDesc:
         'The Hermes runtime was updated, but the desktop app itself is still an older build — new interface features (like Bot Mode) will be missing until it updates. Run the update below to rebuild the app. If that doesn\u2019t clear this warning, reinstall from the latest desktop installer.',
       bundleOutOfSyncAction: 'Get the installer',
+      bundleSwapPending: 'Restart to finish the update',
+      bundleSwapPendingDesc:
+        'The updated app is already installed — Hermes only needs to restart to load it. Chats and settings are untouched.',
+      bundleSwapPendingAction: 'Restart Hermes',
       updates: 'Updates',
       checkNow: 'Check now',
       checking: 'Checking…',
@@ -1157,8 +1161,7 @@ export const en: Translations = {
           'A higher-quality model fits this machine but would respond too slowly on its memory bandwidth — this is the best model that stays fast.',
         'fastest-resident':
           'No model reaches full speed on this hardware; this one comes closest while running entirely in GPU memory.',
-        'least-painful-spilled':
-          'No model fits entirely in GPU memory here — this one runs best from system RAM.'
+        'least-painful-spilled': 'No model fits entirely in GPU memory here — this one runs best from system RAM.'
       } as Record<string, string>,
       downloaded: 'Downloaded',
       downloadAction: size => `Download · ${size}`,
@@ -1168,7 +1171,8 @@ export const en: Translations = {
       quickstartTitle: 'Run a model on this machine',
       quickstartDetail: (model, size) =>
         `One click sets everything up: the local engine, ${model} (${size} download), and your default for new chats. Nothing leaves this computer.`,
-      quickstartDetailReady: model => `One click makes ${model} your default for new chats. Everything runs on this machine.`,
+      quickstartDetailReady: model =>
+        `One click makes ${model} your default for new chats. Everything runs on this machine.`,
       quickstartAction: 'Set up for me',
       quickstartConfigure: 'Configure…',
       quickstartDoneToast: model => `${model} is set up — new chats run on this machine.`,
@@ -1179,7 +1183,8 @@ export const en: Translations = {
       useAction: 'Use',
       activePill: 'Default',
       updateTitle: 'Engine update available',
-      updateDetail: (next, current) => `A newer llama.cpp build (${next}) is ready to install — you're on ${current}. Models keep working during the download.`,
+      updateDetail: (next, current) =>
+        `A newer llama.cpp build (${next}) is ready to install — you're on ${current}. Models keep working during the download.`,
       updateAction: 'Update engine',
       updating: 'Updating engine…',
       upToDateTitle: 'Engine up to date',
@@ -1199,7 +1204,8 @@ export const en: Translations = {
       ejectFailed: 'Could not unload the model',
       stopServer: 'Turn off',
       startServer: 'Turn on',
-      runtimeRunningDetail: 'The local server is running. Turning it off frees all GPU memory and stops new chats from using local models until you turn it back on.',
+      runtimeRunningDetail:
+        'The local server is running. Turning it off frees all GPU memory and stops new chats from using local models until you turn it back on.',
       serverStopped: 'Local server stopped — GPU memory freed.',
       serverStarted: 'Local server running.',
       serverStopFailed: 'Could not stop the local server',
@@ -1212,7 +1218,8 @@ export const en: Translations = {
       pillUsesRam: 'Uses system RAM',
       pillTooBig: 'Too big for this machine',
       browseTitle: 'Find more models',
-      browseHint: 'Search all of Hugging Face. Models you download here are sized to your machine automatically, but not tested by us.',
+      browseHint:
+        'Search all of Hugging Face. Models you download here are sized to your machine automatically, but not tested by us.',
       browsePlaceholder: 'Search models by name or author…',
       browseSearching: 'Searching Hugging Face',
       browseListing: 'Reading model files',
@@ -3069,13 +3076,17 @@ export const en: Translations = {
       resetStatusbar: 'Reset to defaults',
       toggleApprovalMode: 'Approvals',
       toggleBackendVersion: 'Backend version',
+      toggleCacheHitRate: 'Cache hit rate',
       toggleCommandCenter: 'Command Center',
       toggleContextUsage: 'Context meter',
       toggleRunningTimer: 'Turn timer',
       toggleSessionTimer: 'Session timer',
       toggleTerminal: 'Terminal',
+      toggleTokensPerSecond: 'Tokens per second',
       toggleVersion: 'Version & updates',
       toggleWorkspace: 'Workspace',
+      cacheHitRateTitle: 'Prompt cache hit rate this session — cached tokens cost less, so higher is cheaper',
+      tokensPerSecondTitle: 'Output tokens per second, averaged over the last 10 model calls',
       agents: 'Agents',
       closeAgents: 'Close agents',
       openAgents: 'Open agents',
@@ -3680,10 +3691,6 @@ export const en: Translations = {
       'composer-mentions': {
         title: 'Attach and command',
         text: 'Type @ to bring a file into the conversation, / to run a command.'
-      },
-      'model-switch': {
-        title: 'Switch models mid-thread',
-        text: 'The model name is a button. Change it whenever the work changes shape.'
       },
       'local-setup': {
         title: 'This machine can run models locally',

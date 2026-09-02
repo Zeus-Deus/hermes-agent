@@ -148,6 +148,7 @@ import {
   applyRuntimeInfo,
   applyStoredSessionPreviewRuntimeInfo,
   type BranchMessage,
+  cachedSessionRow,
   chatMessageArraysEquivalent,
   dedupeInflightUserAgainstTranscript,
   dropListedSession,
@@ -158,7 +159,6 @@ import {
   patchSessionWorkspace,
   preserveLocalPendingTurnMessages,
   reconcileResumeMessages,
-  removeRepresentedLocalInflightUser,
   removeRepresentedLocalLiveProjection,
   resolveResumedBusy,
   resolveSessionProfile,
@@ -204,6 +204,42 @@ interface SessionActionsOptions {
 // bounded retry rebinds it when the backend returns. Boot-into-a-stale-last-id
 // (NOT in this set) still legitimately drops to a draft.
 const createdThisRun = new Set<string>()
+
+const branchMessagesFingerprint = (messages: BranchMessage[]): string =>
+  JSON.stringify(messages.map(({ content, role }) => [role, content]))
+
+// Identity of one branch create, so a re-entered branch action (a retried
+// renderer transition, a double right-click) rides the create already in
+// flight instead of minting a second child. The OWNER is part of the identity:
+// the same parent id served by two connections is two different sessions.
+function branchCreateKey({
+  branchCount,
+  branchMessages,
+  cwd,
+  ownerRoute,
+  parentStoredId,
+  profile,
+  sourceSessionId
+}: {
+  branchCount?: number
+  branchMessages: BranchMessage[]
+  cwd?: string
+  ownerRoute?: SessionOwnerRoute
+  parentStoredId: null | string
+  profile?: null | string
+  sourceSessionId: null | string
+}): string {
+  return JSON.stringify({
+    branchCount: branchCount ?? null,
+    connectionId: ownerRoute?.connectionId || null,
+    cwd: cwd?.trim() || null,
+    messages: sourceSessionId ? null : branchMessagesFingerprint(branchMessages),
+    ownerProfile: ownerRoute?.profile || null,
+    parentStoredId,
+    profile: profile?.trim() || null,
+    sourceSessionId
+  })
+}
 
 // Reflect a stored row's persisted token counts into the live usage atom
 // (total is derived, so callers can't drift it out of sync with input/output).
@@ -344,6 +380,7 @@ export function useSessionActions({
   const { t } = useI18n()
   const copy = t.desktop
   const resumeRequestRef = useRef(0)
+  const branchCreateFlightsRef = useRef(new Map<string, Promise<SessionCreateResponse>>())
 
   // Follow auto-compression's stored-id rotation only while the exact runtime,
   // selection, and route intent still belong to the rotating conversation.
@@ -1586,8 +1623,8 @@ export function useSessionActions({
 
               const withConcurrentChanges = overlayConcurrentMessageChanges(
                 resumedMessages,
-                removeRepresentedLocalInflightUser(localSnapshot, resumed),
-                removeRepresentedLocalInflightUser(currentMessages, resumed)
+                localSnapshot,
+                currentMessages
               )
 
               return chatMessageArraysEquivalent(currentMessages, withConcurrentChanges)
@@ -1614,8 +1651,8 @@ export function useSessionActions({
 
         const preferredWithRuntimeChanges = overlayConcurrentMessageChanges(
           preferredMessages,
-          removeRepresentedLocalInflightUser(resumeRuntimeBaselineMessages, resumed),
-          removeRepresentedLocalInflightUser(currentRuntimeMessages, resumed)
+          resumeRuntimeBaselineMessages,
+          currentRuntimeMessages
         )
 
         // #70449: same stale-snapshot guard as the warm path — a turn that
@@ -1987,25 +2024,52 @@ export function useSessionActions({
           await ensureGatewayProfile(profile)
         }
 
-        const requestBranchGateway = <T,>(method: string, params: Record<string, unknown>): Promise<T> =>
+        const requestBranchGateway = <T>(method: string, params: Record<string, unknown>): Promise<T> =>
           ownerRoute
             ? requestGatewayForAgent<T>(ownerRoute.connectionId, ownerRoute.profile, method, params)
             : requestGateway<T>(method, params)
 
+        // The owner is part of the identity: the same parent id on two
+        // connections is two different sessions, so a route-blind key would
+        // coalesce them onto one create.
+        const createKey = branchCreateKey({
+          branchCount,
+          branchMessages,
+          cwd,
+          ownerRoute,
+          parentStoredId,
+          profile,
+          sourceSessionId
+        })
+
+        let createFlight = branchCreateFlightsRef.current.get(createKey)
+
         // No title: the backend auto-names the branch from its parent's lineage.
-        const branched = sourceSessionId
-          ? await requestBranchGateway<SessionCreateResponse>('session.branch', {
-              session_id: sourceSessionId,
-              ...(branchCount !== undefined ? { count: branchCount } : {})
-            })
-          : await requestBranchGateway<SessionCreateResponse>('session.create', {
-              cols: 96,
-              source: 'desktop',
-              ...(cwd && { cwd }),
-              ...(profile ? { profile } : {}),
-              messages: branchMessages.map(({ content, role }) => ({ content, role })),
-              ...(parentStoredId && { parent_session_id: parentStoredId })
-            })
+        if (!createFlight) {
+          createFlight = (
+            sourceSessionId
+              ? requestBranchGateway<SessionCreateResponse>('session.branch', {
+                  session_id: sourceSessionId,
+                  ...(branchCount !== undefined ? { count: branchCount } : {})
+                })
+              : requestBranchGateway<SessionCreateResponse>('session.create', {
+                  cols: 96,
+                  source: 'desktop',
+                  ...(cwd && { cwd }),
+                  ...(profile ? { profile } : {}),
+                  messages: branchMessages.map(({ content, role }) => ({ content, role })),
+                  ...(parentStoredId && { parent_session_id: parentStoredId })
+                })
+          ).catch(err => {
+            // Drop the flight so a genuine retry re-issues the create; a
+            // resolved flight is cleared once the child is fully published.
+            branchCreateFlightsRef.current.delete(createKey)
+            throw err
+          })
+          branchCreateFlightsRef.current.set(createKey, createFlight)
+        }
+
+        const branched = await createFlight
 
         const responseBranchMessages =
           sourceSessionId && branched.messages?.length ? toBranchMessages(toChatMessages(branched.messages)) : []
@@ -2080,6 +2144,7 @@ export function useSessionActions({
         // unconditionally). resumeSession reuses the runtime warm-cached above
         // (ensureSessionState/updateSessionState) instead of an extra resume RPC.
         if (parentStoredId !== null && selectedStoredSessionIdRef.current === parentStoredId) {
+          navigate(sessionRoute(routedSessionId), { replace: true })
           await resumeSession(routedSessionId)
         } else {
           // Carry the exact owner onto the tile: its persisted ownerRoute is
@@ -2097,6 +2162,7 @@ export function useSessionActions({
           revealTreePane(`session-tile:${routedSessionId}`)
         }
 
+        branchCreateFlightsRef.current.delete(createKey)
         broadcastSessionsChanged()
 
         return true
@@ -2114,6 +2180,7 @@ export function useSessionActions({
       copy,
       creatingSessionRef,
       ensureSessionState,
+      navigate,
       requestGateway,
       resumeSession,
       selectedStoredSessionIdRef,
@@ -2154,9 +2221,7 @@ export function useSessionActions({
       // Same contract as branchStoredSession: the transcript read and the
       // branch RPC must both land on the backend that owns the parent, not on
       // whichever socket is active.
-      const ownerRoute = storedSessionId
-        ? sessionOwnerRouteFromRow($sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId)))
-        : undefined
+      const ownerRoute = storedSessionId ? sessionOwnerRouteFromRow(cachedSessionRow(storedSessionId)) : undefined
 
       if (storedSessionId) {
         try {
@@ -2225,9 +2290,11 @@ export function useSessionActions({
       // Right-clicking a session outside the paginated sidebar window is a cache
       // miss: resolve it (cache → active backend → cross-profile) so the branch
       // is created on the parent's OWNING profile, not whichever is live (#67603).
+      // cachedSessionRow spans Recents, cron/messaging and the profile-scoped
+      // project tree, and prefers the self-describing row — an ownerless legacy
+      // Recents copy of the same id must not mask the row carrying the owner.
       const stored =
-        $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId)) ??
-        (sessionProfile ? undefined : await resolveStoredSession(storedSessionId))
+        cachedSessionRow(storedSessionId) ?? (sessionProfile ? undefined : await resolveStoredSession(storedSessionId))
 
       const profile = sessionProfile ?? stored?.profile
 
@@ -2306,8 +2373,12 @@ export function useSessionActions({
         return
       }
 
-      const wasSelected = selectedStoredSessionId === storedSessionId
-      const closingRuntimeId = wasSelected ? activeSessionId : null
+      // Selection and runtime refs are updated synchronously at routing
+      // boundaries. React props can still describe the previous render when a
+      // delete lands in the same tick, which used to leave the doomed route in
+      // place and let the generic 4001 recovery rebind it.
+      const wasSelected = selectedStoredSessionIdRef.current === storedSessionId
+      const closingRuntimeId = wasSelected ? activeSessionIdRef.current : null
       const previousMessages = $messages.get()
       const previousPinned = $pinnedSessionIds.get()
 
@@ -2409,13 +2480,11 @@ export function useSessionActions({
       }
     },
     [
-      activeSessionId,
       activeSessionIdRef,
       copy,
       navigate,
       requestGateway,
       runtimeIdByStoredSessionIdRef,
-      selectedStoredSessionId,
       selectedStoredSessionIdRef,
       sessionStateByRuntimeIdRef,
       startFreshSessionDraft
@@ -2442,7 +2511,7 @@ export function useSessionActions({
         return
       }
 
-      const wasSelected = selectedStoredSessionId === storedSessionId
+      const wasSelected = selectedStoredSessionIdRef.current === storedSessionId
       const previousPinned = $pinnedSessionIds.get()
       // Pins are keyed on the durable lineage-root id; the stored id may be the
       // live tip after compression. Drop both so the pin can't linger.
@@ -2487,7 +2556,13 @@ export function useSessionActions({
         endSessionMutation(archivedIds)
       }
     },
-    [copy, runtimeIdByStoredSessionIdRef, selectedStoredSessionId, sessionStateByRuntimeIdRef, startFreshSessionDraft]
+    [
+      copy,
+      runtimeIdByStoredSessionIdRef,
+      selectedStoredSessionIdRef,
+      sessionStateByRuntimeIdRef,
+      startFreshSessionDraft
+    ]
   )
 
   return {
