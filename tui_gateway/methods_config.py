@@ -397,69 +397,30 @@ def _(rid, params: dict) -> dict:
     return _err(rid, 4002, f"unknown config key: {key}")
 
 
-def _readiness_profile_home(params: dict):
+def _readiness_profile_scope(params: dict):
     """Resolve the optional ``profile`` param of the setup readiness RPCs.
 
-    Returns ``(profile, home)``: ``home`` is the named profile's directory on
-    THIS host (None for the launch profile / no param). A profile that does
-    not exist here raises ``FileNotFoundError`` instead of silently answering
-    for the launch profile — a readiness check that quietly reports the wrong
-    profile (or the wrong machine) is exactly the failure #94071 describes.
+    Returns ``(profile, scope)`` where ``scope`` is a context manager binding
+    that profile's HERMES_HOME and ``.env`` secret scope (ContextVars, so
+    concurrent checks for different profiles stay isolated). The launch
+    profile / no param yields ``("", nullcontext())``. A profile unknown to
+    this host raises ``FileNotFoundError`` — a readiness check must never
+    quietly answer for the launch profile instead (#94071).
     """
+    import contextlib
+
     profile = str(params.get("profile") or "").strip() if isinstance(params, dict) else ""
     if not profile:
-        return "", None
+        return "", contextlib.nullcontext()
     from hermes_cli import profiles as profiles_mod
+    from tui_gateway import server as _server
 
     if not profiles_mod.profile_exists(profile):
         raise FileNotFoundError(f"Profile '{profile}' does not exist on this backend.")
-    # Looked up on the server module at call time: these helpers keep THIS
-    # module's globals (only handlers are rebound onto server.py's), and tests
-    # monkeypatch ``server._profile_home``.
-    from tui_gateway import server as _server
-
-    return profile, _server._profile_home(profile)
-
-
-def _bind_readiness_profile(home):
-    """Bind context-local HERMES_HOME and ``.env`` secret scope.
-
-    Both setters use ContextVars (not process globals), matching the turn
-    thread's pair while allowing concurrent checks for different profiles to
-    remain isolated. ``_profile_scoped`` only overrides the home; provider
-    resolution also reads credentials through the secret scope. Returns the
-    two reset tokens (None, None) for no-op.
-    """
+    home = _server._profile_home(profile)
     if home is None:
-        return None, None
-    home_token = set_hermes_home_override(home)
-    try:
-        secret_token = set_secret_scope(build_profile_secret_scope(Path(home)))
-    except Exception:
-        reset_hermes_home_override(home_token)
-        raise
-    return home_token, secret_token
-
-
-def _unbind_readiness_profile(home_token, secret_token) -> None:
-    try:
-        if secret_token is not None:
-            reset_secret_scope(secret_token)
-    finally:
-        if home_token is not None:
-            reset_hermes_home_override(home_token)
-
-
-def _unknown_readiness_profile(ok, rid, params: dict, error: FileNotFoundError) -> dict:
-    """Return the same semantic failure for both profile-aware readiness RPCs."""
-    return ok(
-        rid,
-        {
-            "ok": False,
-            "profile": str(params.get("profile") or "").strip(),
-            "error": str(error),
-        },
-    )
+        return profile, contextlib.nullcontext()
+    return profile, _server._session_profile_runtime_scope({"profile_home": str(home)})
 
 
 @method("setup.status")
@@ -467,22 +428,14 @@ def _(rid, params: dict) -> dict:
     """Loose provider check; ``profile`` (optional) scopes it to that profile's home."""
     try:
         from hermes_cli.main import _has_any_provider_configured
-        from tui_gateway.methods_config import (
-            _bind_readiness_profile,
-            _readiness_profile_home,
-            _unbind_readiness_profile,
-            _unknown_readiness_profile,
-        )
+        from tui_gateway.methods_config import _readiness_profile_scope
 
         try:
-            profile, home = _readiness_profile_home(params)
+            profile, scope = _readiness_profile_scope(params)
         except FileNotFoundError as e:
-            return _unknown_readiness_profile(_ok, rid, params, e)
-        home_token, secret_token = _bind_readiness_profile(home)
-        try:
+            return _ok(rid, {"ok": False, "profile": params.get("profile"), "error": str(e)})
+        with scope:
             configured = bool(_has_any_provider_configured(strict_profile_scope=bool(profile)))
-        finally:
-            _unbind_readiness_profile(home_token, secret_token)
         payload = {"provider_configured": configured}
         if profile:
             payload["profile"] = profile
@@ -502,35 +455,25 @@ def _(rid, params: dict) -> dict:
     when the user's configured model cannot actually be served, so UIs can
     surface onboarding before the user submits a doomed prompt.
 
-    ``profile`` (optional): answer for THAT profile's home on this host —
-    its config.yaml model pin and its ``.env`` — instead of the launch
-    profile's. The Desktop uses this right after creating a bot on a target
-    connection, before starting the bot's automatic first turn (#94071). A
-    profile unknown to this backend answers ``ok=False`` with an explicit
-    error rather than reporting the launch profile's readiness.
+    ``profile`` (optional): answer for THAT profile's home on this host — its
+    config.yaml model pin and its ``.env`` — instead of the launch profile's
+    (#94071). A profile unknown to this backend answers ``ok=False`` rather
+    than reporting the launch profile's readiness.
     """
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
         from hermes_cli.auth import has_usable_secret
         from hermes_cli.main import _has_any_provider_configured
-        from tui_gateway.methods_config import (
-            _bind_readiness_profile,
-            _readiness_profile_home,
-            _unbind_readiness_profile,
-            _unknown_readiness_profile,
-        )
+        from tui_gateway.methods_config import _readiness_profile_scope
 
         requested = str(params.get("provider") or "").strip() or None
         try:
-            profile, home = _readiness_profile_home(params)
+            profile, scope = _readiness_profile_scope(params)
         except FileNotFoundError as e:
-            return _unknown_readiness_profile(_ok, rid, params, e)
-        home_token, secret_token = _bind_readiness_profile(home)
-        try:
+            return _ok(rid, {"ok": False, "profile": params.get("profile"), "error": str(e)})
+        with scope:
             runtime = resolve_runtime_provider(requested=requested)
             provider_configured = bool(_has_any_provider_configured(strict_profile_scope=bool(profile)))
-        finally:
-            _unbind_readiness_profile(home_token, secret_token)
         scoped = {"profile": profile} if profile else {}
         provider = runtime.get("provider") or "provider"
         source = str(runtime.get("source") or "")

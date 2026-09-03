@@ -62,8 +62,10 @@ DEFAULT_CONFIG = {
         # Maximum time an alias routing key waits for the active turn holding
         # the same resolved session lease. On expiry the inbound message is
         # rejected with a resend notice rather than run without serialization.
-        # Non-positive values fall back to 1800 seconds.
-        "gateway_turn_lease_timeout": 1800,
+        # Keep this short: Telegram dispatches updates sequentially, so an
+        # inline lease waiter also delays unrelated topics. Non-positive values
+        # fall back to the five-second safety default.
+        "gateway_turn_lease_timeout": 5,
         # Per-session AIAgent cache in the gateway. Each cached agent keeps a
         # warm prompt prefix AND the session's full transcript, so the cache
         # trades memory for cost: too small and every turn re-pays an uncached
@@ -149,7 +151,10 @@ DEFAULT_CONFIG = {
             # leaves the budget untouched.
             "cost_threshold_usd": 0.25,
         },
+        # Fast mode: "" / "normal" (off), "fast" (always), "auto" (first
+        # fast_auto_seconds of every turn), "cold" (first turn of a session only).
         "service_tier": "",
+        "fast_auto_seconds": 60,
         # Tool-use enforcement: injects system prompt guidance that tells the
         # model to actually call tools instead of describing intended actions.
         # Values: "auto" (default — applies to gpt/codex models), true/false
@@ -295,6 +300,14 @@ DEFAULT_CONFIG = {
         # from gateway_timeout (which kills the turn) and
         # gateway_notify_interval ("still working" heartbeats). 0 = disable.
         "session_stall_timeout": 300,
+        # Transcript-sanitiser repeated-heal escalation threshold (#96870).
+        # After this many pre-send heal passes within a 10-minute session
+        # window, log one ERROR (session id + heal pattern) and queue a
+        # ONE-TIME out-of-band user notice pointing at /debug share or
+        # `hermes doctor`. Delivered via the status channel only —
+        # conversation context / prompt caching untouched. 0 = disable
+        # escalation (per-window WARNINGs still fire).
+        "sanitizer_heal_escalation_threshold": 3,
         # Long-lived reconnect-loop escalation (seconds). A platform that has
         # been continuously failing/reconnecting for this long gets
         # needs_attention flagged in gateway runtime status (visible in
@@ -327,6 +340,17 @@ DEFAULT_CONFIG = {
         # synchronously before the gate runs.  Set to 0 to disable the bound
         # (historical "wait forever" behaviour).
         "gateway_startup_restore_drain_timeout": 30,
+        # Max seconds the boot turn-machinery warm-up (#99373) may hold the
+        # gateway's inbound gate shut.  On a fresh boot the gateway warms the
+        # agent-side turn prerequisites (run_agent import graph, tool schemas
+        # + availability probes, context-file tier) BEFORE accepting inbound
+        # messages, so a message seconds after boot is no longer served with
+        # a skeleton system prompt (missing context files / tool schemas).
+        # On timeout the gate opens anyway and warm-up finishes in the
+        # background — a wedged init can't make the gateway permanently
+        # unavailable.  Set to 0 to disable the warm-up (historical
+        # lazy-init behaviour).
+        "gateway_startup_warmup_timeout": 20,
         # Stale-stream ceiling for local providers (Ollama, oMLX, llama-cpp) in
         # seconds. When the base stale timeout is at its default (180s) and a
         # local endpoint is detected, this finite ceiling replaces the former
@@ -370,6 +394,20 @@ DEFAULT_CONFIG = {
         # ``false`` keeps the historical strict-provider behavior (Mistral,
         # Groq, Cerebras reject the field with HTTP 400).
         "reasoning_echo": False,
+        # Turn liveness watchdog (#95548): a turn that shows no observable
+        # progress (activity-clock idle, never touched by lease renewal) for
+        # `timeout_s` seconds is logged loudly, force-interrupted so the UI
+        # can retry it, and its durable turn lease stops renewing so TTL
+        # expiry lets stale-turn cleanup reclaim the session even when the
+        # hard interrupt cannot unwind a wedged frame. `timeout_s` <= 0
+        # disables the watchdog; `poll_s` is the sampling interval. Invalid
+        # values (typo, NaN, Inf, non-positive poll) warn and fall back to
+        # the default instead of crashing startup or silently disabling the
+        # watchdog. See agent/turn_liveness.py.
+        "turn_liveness": {
+            "timeout_s": 600.0,
+            "poll_s": 15.0,
+        },
     },
 
     "terminal": {
@@ -520,7 +558,7 @@ DEFAULT_CONFIG = {
         "extract_backend": "",   # per-capability override for web_extract (e.g. "native")
         "extract_char_limit": 15000,  # per-page char budget for web_extract; larger pages truncate + store full text in cache/web
         # Keyless free-tier ring: with NO web backend configured or keyed,
-        # web_search/web_extract rotate round-robin across five vendors'
+        # web_search/web_extract rotate round-robin across four vendors'
         # public free tiers (exa, parallel, firecrawl, keenable),
         # failing over to the next ring vendor on rate limits. Never
         # pre-empts a configured or keyed backend. Set false to disable.
@@ -530,10 +568,11 @@ DEFAULT_CONFIG = {
         # free-tier ring — the next call attempts the chosen backend again
         # (no sticky failover). Off when keyless_fallback is false.
         "keyless_rescue": True,
-        # Per-provider tier selection for ring vendors with both a keyless
+        # Per-provider tier selection for vendors with both a keyless
         # free endpoint and a keyed paid path (exa, parallel,
-        # firecrawl, keenable). Set by the `hermes tools` picker's
-        # "Free (keyless)" / "Paid (API key)" rows.
+        # firecrawl, keenable on the ring; tavily is opt-in keyless via
+        # `hermes tools`, not a ring member). Set by the `hermes tools`
+        # picker's "Free (keyless)" / "Paid (API key)" rows.
         #   free  — always use the anonymous free endpoint (even with a key)
         #   paid  — always use the keyed path (missing key = error; vendor
         #           is also excluded from the keyless ring)
@@ -575,12 +614,17 @@ DEFAULT_CONFIG = {
         "record_sessions": False,  # Auto-record browser sessions as WebM videos
         "headed": False,  # Local mode: launch Chromium with a visible window (also skips per-turn cleanup so the window persists between turns; idle reaper still applies)
         "allow_private_urls": False,  # Allow navigating to private/internal IPs (localhost, 192.168.x.x, etc.)
-        # Browser engine for local mode.  Passed as ``--engine <value>`` to
-        # agent-browser v0.25.3+.
-        # "auto"       — use Chrome (default, don't pass --engine at all)
-        # "lightpanda" — use Lightpanda (1.3-5.8x faster navigation, no screenshots)
+        # Local browser engine, for both drivers:
+        #   Browser Use mode (default) — "lightpanda" makes Hermes spawn
+        #     ``lightpanda serve`` per session and point browser_exec at it.
+        #   Built-in tools (backend: off) — passed as ``--engine <value>`` to
+        #     agent-browser v0.25.3+ (with automatic Chrome fallback).
+        # "auto"       — Chrome (default)
+        # "lightpanda" — Lightpanda (faster navigation, no screenshots)
         # "chrome"     — explicitly request Chrome
-        # Also settable via AGENT_BROWSER_ENGINE env var.
+        # Ignored while a cloud provider, Camofox, browser.cdp_url or
+        # browser.use_real_profile is active — `/browser status` and
+        # `hermes doctor` say so. Also settable via AGENT_BROWSER_ENGINE.
         "engine": "auto",
         "auto_local_for_private_urls": True,  # When a cloud provider is set, auto-spawn local Chromium for LAN/localhost URLs instead of sending them to the cloud
         "cdp_url": "",  # Optional persistent CDP endpoint for attaching to an existing Chromium/Chrome
@@ -709,6 +753,11 @@ DEFAULT_CONFIG = {
     # rarely truncate a project doc. Set a positive integer to pin a fixed cap
     # and override the dynamic behavior. Separate from read_file tool limits.
     "context_file_max_chars": None,
+
+    # Seconds to wait for a single context file read before skipping it with a
+    # warning. Guards startup against network-backed filesystems (iCloud Drive,
+    # OneDrive, NFS) that can block a cold read on an evicted file.
+    "context_file_read_timeout": 5.0,
 
     # Maximum characters returned by a single read_file call.  Reads that
     # exceed this are rejected with guidance to use offset+limit.
@@ -1425,12 +1474,18 @@ DEFAULT_CONFIG = {
         # Mirrors `hermes -c` muscle memory.  Default off so existing
         # users aren't surprised.  HERMES_TUI_RESUME=<id> always wins.
         "tui_auto_resume_recent": False,
+        # When true (default), the Desktop app reopens the last chat (or
+        # last page) on cold start. Set false to always land on a fresh
+        # new chat. Also a switch in Desktop Settings → Appearance.
+        "resume_last_session": True,
         # When true (default), `hermes --tui` drops a one-time hint
         # ("subagents working · /agents to watch live") the first time a turn
         # starts delegating, nudging the user toward the live spawn-tree
         # dashboard. Set false to suppress the hint.
         "tui_agents_nudge": True,
         "bell_on_complete": False,
+        # Bell when a blocking prompt opens (clarify/approval/sudo/secret).
+        "bell_on_prompt": False,
         # Stream the model's reasoning/thinking live before the response.
         # Default ON: on thinking models the reasoning phase can run tens of
         # seconds, and with this off the user stares at a spinner the whole
@@ -1701,6 +1756,15 @@ DEFAULT_CONFIG = {
         # override for backward compatibility. 0 disables the reap
         # (park forever).
         "ws_orphan_reap_grace_s": 20.0,
+        # Activity-staleness threshold (seconds) gating the WS-orphan
+        # interrupt of a detached RUNNING turn (#98028/#100325). A
+        # client-absent turn is only interrupted once its agent activity
+        # clock (the same one the agent.turn_liveness watchdog samples —
+        # stamped by API waits, stream tokens, tool heartbeats) has been
+        # idle at least this long; an actively-working detached turn runs
+        # to completion. Default matches agent.turn_liveness.timeout_s.
+        # 0 restores the old interrupt-at-grace-regardless behavior.
+        "ws_orphan_activity_stale_s": 600.0,
         # Startup sweep of session rows orphaned by a dead gateway process
         # (#65194).  The ws-orphan grace timer above is in-process, so a
         # gateway restart (update, crash, systemd) leaves disconnected
@@ -1751,13 +1815,10 @@ DEFAULT_CONFIG = {
         # stable multi-worker / restart-surviving sessions. Compute a
         # ``password_hash`` with
         # ``python -c "from plugins.dashboard_auth.basic import hash_password; print(hash_password('PW'))"``.
-        # Extra Host header values to accept beyond the bound interface
-        # (CLI: repeatable ``--allowed-host``). Lets a loopback / Tailscale-IP
-        # bind be reached via its MagicDNS name (e.g. ``box.tailnet.ts.net``)
-        # without tripping the DNS-rebinding Host guard. Merged as a UNION of
-        # this config list + the CLI flags. Setting ANY entry FORCES the auth
-        # gate on regardless of bind address (an allowlisted external name
-        # means requests arrive from beyond this machine).
+        # Extra Host header values accepted beyond the bound interface. CLI
+        # ``--allowed-host`` values are unioned with this list; any entry also
+        # engages the authentication gate so DNS-rebinding protection remains
+        # intact for MagicDNS and other explicit remote names.
         "allowed_hosts": [],
         "basic_auth": {
             "username": "",  # blank → plugin no-op (no password provider)
@@ -2243,9 +2304,17 @@ DEFAULT_CONFIG = {
 
     # Skills — external skill directories for sharing skills across tools/agents.
     # Each path is expanded (~, ${VAR}) and resolved.  Read-only — skill creation
-    # always goes to ~/.hermes/skills/.
+    # goes to ~/.hermes/skills/ unless create_dir (below) redirects it.
     "skills": {
         "external_dirs": [],   # e.g. ["~/.agents/skills", "/shared/team-skills"]
+        # Where agent-created skills (skill_manage action=create) are written.
+        # Empty = the profile-local skills dir (~/.hermes/skills/). When set,
+        # new skills land here AND every agent-facing instruction that names
+        # the creation path (tool schema text, prompts) renders this directory
+        # instead of the default. Expanded (~, ${VAR}); relative paths resolve
+        # against HERMES_HOME. The directory is scanned for skills alongside
+        # the local dir. e.g. "/opt/brain/skills"
+        "create_dir": "",
         # Project-local skill discovery: when a session starts inside a git
         # checkout, ``<root>/.hermes/skills/`` and ``<root>/.agents/skills/``
         # are sourced as the highest-precedence skill tier — but ONLY when the
@@ -3057,10 +3126,12 @@ DEFAULT_CONFIG = {
     "model_catalog": {
         "enabled": True,
         "url": "https://hermes-agent.nousresearch.com/docs/api/model-catalog.json",
-        # Disk cache TTL in hours.  Beyond this, the CLI refetches on the
-        # next /model or `hermes model` invocation; network failures
-        # silently fall back to the stale cache.
-        "ttl_hours": 1,
+        # Disk cache TTL in minutes.  The gateway refreshes the catalogs on
+        # this cadence in the background; the CLI refetches on the next
+        # /model or `hermes model` invocation once the cache is older than
+        # this.  Network failures silently fall back to the stale cache.
+        # (Legacy `ttl_hours` is still honoured when set explicitly.)
+        "ttl_minutes": 20,
         # Optional per-provider override URLs for third parties that want
         # to self-host their own curation list using the same schema.
         # Example:
@@ -3179,6 +3250,12 @@ DEFAULT_CONFIG = {
         # the historical serve-all behavior; [] serves only the default.
         "multiplex_profile_allowlist": None,
 
+        # After an unexpected SIGTERM interrupts a running gateway agent,
+        # wait this many seconds for it to unwind before adapter and database
+        # teardown proceeds. Keep this short so service-manager shutdowns do
+        # not exhaust their stop budget before resource cleanup begins.
+        "signal_interrupt_grace_timeout": 1,
+
         # Durable delivery-obligation ledger: final agent responses are
         # recorded in state.db around the platform send, and a gateway that
         # died between finalize and platform ACK redelivers the stored
@@ -3215,6 +3292,18 @@ DEFAULT_CONFIG = {
         "loop_watchdog_probe_interval_s": 30.0,
         "loop_watchdog_probe_timeout_s": 10.0,
         "loop_watchdog_max_strikes": 3,
+
+        # Startup-liveness watchdog (OOF-298): plain daemon thread armed at
+        # process entry for gateway runs, hard-exits 75 if the event loop is
+        # not confirmed live within the deadline. The watchdog module itself
+        # is stdlib-only and armed before config can load, so run_gateway()
+        # bridges these keys to the internal HERMES_STARTUP_WATCHDOG /
+        # HERMES_STARTUP_WATCHDOG_TIMEOUT_S env vars AND applies them to the
+        # already-armed handle (disarm on disable, disarm+re-arm on a config
+        # timeout) — config.yaml is the user-facing surface; explicit env
+        # values win as operator override.
+        "startup_watchdog": True,
+        "startup_watchdog_timeout_seconds": 300,
 
         # Whether the gateway keeps writing the legacy sessions.json mirror of
         # its routing index. The primary copy lives in state.db (the
@@ -3403,13 +3492,18 @@ DEFAULT_CONFIG = {
     # reports 384MB+ databases with 68K+ messages, which slows down FTS5
     # inserts, /resume listing, and insights queries.
     "sessions": {
-        # When true, prune ended sessions inactive for retention_days once
+        # When true, prune ENDED sessions inactive for retention_days once
         # per (roughly) min_interval_hours at CLI/gateway/cron startup.
         # Activity is the latest message timestamp, falling back to creation
-        # time for empty sessions. Active sessions are always preserved.
-        # Default false: session history is valuable for search recall, and
-        # silently deleting it could surprise users.  Opt in explicitly.
-        "auto_prune": False,
+        # time for empty sessions. Sessions that are still open, pinned, or
+        # mid-turn are never deleted — the only open rows the sweep touches
+        # are stale automation sessions (cron/kanban/subagent/one-shot CLI)
+        # whose process died without closing them; those are *closed*, not
+        # deleted, and get a further full retention window before removal.
+        # Default true since #54189: without it state.db grows without bound
+        # (multi-GB installs reported within weeks).  Set false to keep every
+        # ended session forever.
+        "auto_prune": True,
         # How many inactive days of ended-session history to keep. Matches
         # the default of ``hermes sessions prune``.
         "retention_days": 90,
@@ -3427,7 +3521,9 @@ DEFAULT_CONFIG = {
         # subsequent INSERTs — so without VACUUM the file stays bloated
         # even after pruning.  VACUUM blocks writes for a few seconds per
         # 100MB, so it only runs at startup, and only when prune deleted
-        # ≥1 session.
+        # ≥1 session AND the reclaimable fraction of the file
+        # (PRAGMA freelist_count / page_count) exceeds 25% — a dense DB
+        # never pays for a full rewrite to reclaim a few MB (#54189).
         "vacuum_after_prune": True,
         # Minimum days between successful VACUUM rewrites. Pruning can still
         # run on its normal cadence while SQLite reuses the freed pages.
@@ -3808,6 +3904,7 @@ DEFAULT_CONFIG = {
         # every invocation (MCP backend, status, doctor, install). Set true
         # to let cua-driver use its own default (telemetry on).
         "cua_telemetry": False,
+        "native_wayland": False,
         # Cap driver screenshot longest edge (pixels) via set_config on
         # session start. Shrinks SOM multimodal payloads; 0 disables.
         "max_image_dimension": 1456,
@@ -3979,6 +4076,15 @@ DEFAULT_CONFIG = {
     # settings are non-secret routing config and live here. Both are bridged to
     # the VERTEX_PROJECT_ID / VERTEX_REGION env vars the adapter reads, so an
     # explicit env var still wins over config.yaml.
+    "nous": {
+        # Upper bound on the Nous auth keepalive tick, in seconds. The tick
+        # actually used derives from the credential lifetime the server issued
+        # and is capped by this value, so lowering it makes the keepalive more
+        # frequent while raising it has no effect below the derived tick.
+        # 0 disables the keepalive thread entirely.
+        "keepalive_interval_seconds": 900,
+    },
+
     "vertex": {
         # GCP project ID. Empty → use the project_id embedded in the service
         # account JSON (or ADC-resolved project).
@@ -3989,17 +4095,9 @@ DEFAULT_CONFIG = {
         "region": "global",
     },
 
-    # "Claude subscription via Agent SDK" runtime (provider "claude-code",
-    # api_mode "claude_agent_sdk"). A top-level root rather than a key under
-    # `model` because DEFAULT_CONFIG's `model` is a plain string here (only
-    # cli.py's CLI defaults shape it as a dict), so a nested key would be
-    # invisible to load_config() and to the gateway's raw-YAML reader.
-    # Read through hermes_cli/claude_subscription.py, never inline.
+    # Claude subscription via the Agent SDK. This transport is distinct from
+    # normal Anthropic API-key inference and remains explicitly default-off.
     "claude_subscription": {
-        # Default-off pending written policy clearance from Anthropic; see
-        # docs/design/claude-subscription-via-agent-sdk.md. Flipping this on
-        # is only sanctioned for private validation against a
-        # developer-controlled, consenting Claude account.
         "enabled": False,
     },
 
@@ -4027,7 +4125,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 39,
+    "_config_version": 40,
 }
 
 # Optional environment variables that enhance functionality
@@ -4528,6 +4626,14 @@ OPTIONAL_ENV_VARS = {
         "category": "tool",
         "advanced": True,
     },
+    "TAVILY_API_KEY": {
+        "description": "Tavily API key for AI-native web search and extract (optional — keyless works when Tavily is selected)",
+        "prompt": "Tavily API key",
+        "url": "https://app.tavily.com/home",
+        "tools": ["web_search", "web_extract"],
+        "password": True,
+        "category": "tool",
+    },
     "KEENABLE_API_KEY": {
         "description": "Keenable API key for fast independent-index web search and page fetch (optional — keyless free tier works without it)",
         "prompt": "Keenable API key",
@@ -4584,10 +4690,10 @@ OPTIONAL_ENV_VARS = {
         "category": "tool",
     },
     "AGENT_BROWSER_ENGINE": {
-        "description": "Browser engine for local mode: auto (default Chrome), lightpanda (faster, no screenshots), chrome",
+        "description": "Local browser engine: auto (default Chrome), lightpanda (faster, no screenshots; Browser Use mode spawns lightpanda serve), chrome",
         "prompt": "Browser engine (auto/lightpanda/chrome)",
-        "url": "https://github.com/vercel-labs/agent-browser",
-        "tools": ["browser_navigate", "browser_snapshot", "browser_click", "browser_vision"],
+        "url": "https://lightpanda.io/docs/run-locally/installation/one-liner",
+        "tools": ["browser_exec", "browser_navigate", "browser_snapshot", "browser_click", "browser_vision"],
         "password": False,
         "category": "tool",
         "advanced": True,

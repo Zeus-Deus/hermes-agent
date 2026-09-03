@@ -109,6 +109,12 @@ COMPACTION_STATUS_MARKER = "Compacting context"
 COMPACTION_STATUS = (
     f"🗜️ {COMPACTION_STATUS_MARKER} — summarizing earlier conversation so I can continue..."
 )
+# Periodic heartbeat re-emitted while a long compression is still running so
+# remote transports with idle-turn watchdogs (#98371) see progress. Same
+# marker as COMPACTION_STATUS so every consumer classifies it identically.
+COMPACTION_HEARTBEAT_STATUS = (
+    f"🗜️ {COMPACTION_STATUS_MARKER} — still summarizing earlier conversation so I can continue..."
+)
 
 COMPACTION_DONE_STATUS = "✓ Context compaction complete — continuing turn..."
 
@@ -201,6 +207,7 @@ CONTEXT_OVERFLOW_BLOCKED_WARNING_TEMPLATE = (
 # same constants the emission sites use) through the gateway noise filter.
 ROUTINE_COMPRESSION_STATUS_SAMPLES = (
     COMPACTION_STATUS,
+    COMPACTION_HEARTBEAT_STATUS,
     COMPACTION_DONE_STATUS,
     PRE_API_COMPRESSION_STATUS_TEMPLATE.format(tokens=123456),
     PREFLIGHT_COMPRESSION_STATUS_TEMPLATE.format(tokens=120000, threshold=100000),
@@ -2012,6 +2019,25 @@ def context_compression_timed_out(agent: Any) -> bool:
     return getattr(agent, "_last_compression_timed_out", None) is True
 
 
+def _automatic_gate_blocked(
+    blocked: Any, compressor: Any, bypass_cooldown: bool
+) -> bool:
+    """Evaluate the automatic breaker gate, optionally ignoring the cooldown.
+
+    Provider-proven overflow recovery (#100661) passes ``bypass_cooldown``;
+    engines whose gate predates the kwarg (plugins, test doubles) are called
+    with the legacy no-argument shape.
+    """
+    if bypass_cooldown:
+        try:
+            accepts = "ignore_cooldown" in inspect.signature(blocked).parameters
+        except (TypeError, ValueError):
+            accepts = False
+        if accepts:
+            return bool(blocked(compressor, ignore_cooldown=True))
+    return bool(blocked(compressor))
+
+
 def compression_blocked_transiently(agent: Any) -> bool:
     """Type-pinned read of the transient-block signal (#97488).
 
@@ -2248,6 +2274,7 @@ def _supported_compression_kwargs(
     focus_topic: Optional[str],
     force: bool,
     memory_context: str,
+    bypass_cooldown: bool = False,
 ) -> dict:
     """Return only compression kwargs accepted by an engine callable.
 
@@ -2261,6 +2288,8 @@ def _supported_compression_kwargs(
         "focus_topic": focus_topic,
         "force": force,
     }
+    if bypass_cooldown:
+        candidates["bypass_cooldown"] = True
     if memory_context:
         candidates["memory_context"] = memory_context
     try:
@@ -2287,6 +2316,8 @@ class _CompressionActivityHeartbeat:
         self,
         agent: Any,
         interval_seconds: float | None = None,
+        *,
+        emit_client_status: bool = False,
         commit_fence: Optional[CompressionCommitFence] = None,
     ) -> None:
         self._agent = agent
@@ -2303,6 +2334,10 @@ class _CompressionActivityHeartbeat:
         if not math.isfinite(interval_seconds):
             interval_seconds = 60.0
         self._interval_seconds = max(0.1, interval_seconds)
+        # Only a compression that opened a VISIBLE compaction phase (the
+        # routine start status was emitted) keeps it alive with heartbeats;
+        # quiet context engines emit neither (#98371 follow-up).
+        self._emit_client_status = emit_client_status
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run,
@@ -2375,11 +2410,40 @@ class _CompressionActivityHeartbeat:
         except Exception:
             logger.debug("compression activity heartbeat touch failed", exc_info=True)
 
+    def _emit_progress_status(self) -> None:
+        """Re-publish the compacting status so remote transports see progress.
+
+        Compression can stream for minutes with no deltas, tool events, or
+        status lines reaching remote transports. Idle-progress watchdogs on
+        those clients (e.g. the Android relay app's 180s turn watchdog)
+        treat the silence as a dead turn and fire ``session.interrupt`` —
+        killing a healthy compression mid-flight and rolling back its work,
+        which retriggers on the next prompt and loops forever on sessions
+        near the context ceiling (#98371).
+
+        Routed through ``agent._emit_status`` like every other compaction
+        status: same "lifecycle" key (the TUI gateway re-tags it to
+        ``compacting``; Telegram edits one bubble per key), same chat-platform
+        filter, same CLI print path.
+        """
+        if not self._emit_client_status:
+            return
+        emit = getattr(self._agent, "_emit_status", None)
+        if not callable(emit):
+            return
+        try:
+            emit(COMPACTION_HEARTBEAT_STATUS)
+        except Exception:
+            logger.debug(
+                "status emit error in compression heartbeat", exc_info=True
+            )
+
     def _run(self) -> None:
         while not self._stop.wait(self._interval_seconds):
             if self._should_suppress():
                 return
             self._touch("context compression in progress")
+            self._emit_progress_status()
 
 def _direct_messages_for_pre_compress_memory(messages: Any) -> list[dict[str, Any]]:
     """Return direct user/assistant evidence safe for memory checkpointing.
@@ -3146,6 +3210,15 @@ def _ensure_compressed_has_user_turn(
         return "already_present"
     if _compressed_has_busy_steer(compressed):
         return "already_present"
+    from agent.context_compressor import _INFLIGHT_REPLAY_MERGED_KEY
+
+    if any(
+        isinstance(message, dict) and message.get(_INFLIGHT_REPLAY_MERGED_KEY)
+        for message in compressed
+    ):
+        # The in-flight request was restated onto the summary carrier
+        # (#100818); inserting an anchor would duplicate it.
+        return "already_present"
     from agent.context_compressor import (
         COMPRESSION_CONTINUATION_USER_CONTENT,
         _fresh_compaction_message_copy,
@@ -3289,6 +3362,7 @@ def compress_context(
     task_id: str = "default",
     focus_topic: Optional[str] = None,
     force: bool = False,
+    bypass_cooldown: bool = False,
     defer_context_engine_notification: bool = False,
     commit_fence: Optional[CompressionCommitFence] = None,
 ) -> Tuple[list, str]:
@@ -3308,6 +3382,13 @@ def compress_context(
             by the manual ``/compress`` slash command so users can retry
             immediately after an auto-compress abort.  Auto-compress
             callers use the default ``False``.
+        bypass_cooldown: If True, the automatic breaker gates ignore ONLY the
+            summary-failure cooldown for this attempt (#100661). Set by the
+            provider-proven overflow recovery path: the provider already
+            rejected the request, so deferring until the cooldown lapses
+            wedges the session. Unlike ``force`` it does not clear the
+            cooldown, and the ineffective/structural breakers still apply;
+            a failed attempt records its cooldown normally.
         defer_context_engine_notification: Delay the existing context-engine
             hook until a manual host commits its outer history transaction.
         commit_fence: Optional cooperative fence for executor callers that
@@ -3425,7 +3506,9 @@ def compress_context(
             "_automatic_compression_blocked",
             None,
         )
-        if callable(blocked) and blocked(agent.context_compressor):
+        if callable(blocked) and _automatic_gate_blocked(
+            blocked, agent.context_compressor, bypass_cooldown
+        ):
             _mark_compression_blocked_transient(agent, agent.context_compressor)
             existing_prompt = getattr(agent, "_cached_system_prompt", None)
             if not existing_prompt:
@@ -3896,7 +3979,9 @@ def compress_context(
             "_automatic_compression_blocked",
             None,
         )
-        if callable(blocked) and blocked(compressor):
+        if callable(blocked) and _automatic_gate_blocked(
+            blocked, compressor, bypass_cooldown
+        ):
             _mark_compression_blocked_transient(agent, compressor)
             _release_lock()
             existing_prompt = getattr(agent, "_cached_system_prompt", None)
@@ -4093,6 +4178,7 @@ def compress_context(
             focus_topic=focus_topic,
             force=force,
             memory_context=memory_context,
+            bypass_cooldown=bypass_cooldown,
         )
         if memory_context.strip() and "memory_context" not in compress_kwargs:
             engine_name = getattr(
@@ -4113,7 +4199,9 @@ def compress_context(
 
         messages_before_compression = copy.deepcopy(messages)
         _activity_heartbeat = _CompressionActivityHeartbeat(
-            agent, commit_fence=commit_fence
+            agent,
+            commit_fence=commit_fence,
+            emit_client_status=_compaction_status_emitted,
         ).start()
         # Publish forward progress to the commit fence while the summary LLM
         # call streams. Async hosts (gateway session hygiene) poll
@@ -5539,9 +5627,10 @@ def compress_context(
             else:
                 agent.context_compressor._verify_compaction_cleared_threshold = True
 
-        # Clear the file-read dedup cache.  After compression the original
-        # read content is summarised away — if the model re-reads the same
-        # file it needs the full content, not a "file unchanged" stub.
+        # Advance file-read dedup to a fresh generation while preserving the
+        # mtime map. The first read of each unchanged key returns full content
+        # that compaction may have omitted; later reads return lightweight
+        # stubs. Stub-hit counters restart at the same boundary (#84857).
         try:
             from tools.file_tools import reset_file_dedup
             reset_file_dedup(task_id)
@@ -5708,7 +5797,9 @@ def _compress_context_via_codex_app_server(
 
     _activity_heartbeat: Optional[_CompressionActivityHeartbeat] = None
     try:
-        _activity_heartbeat = _CompressionActivityHeartbeat(agent).start()
+        _activity_heartbeat = _CompressionActivityHeartbeat(
+            agent, emit_client_status=True
+        ).start()
         result = codex_session.compact_thread()
     except BaseException:
         if _activity_heartbeat is not None:
@@ -6078,6 +6169,7 @@ def try_shrink_image_parts_in_messages(
 __all__ = [
     "COMPACTION_STATUS",
     "COMPACTION_DONE_STATUS",
+    "COMPACTION_HEARTBEAT_STATUS",
     "COMPACTION_STATUS_MARKER",
     "is_compaction_progress_status",
     "check_compression_model_feasibility",

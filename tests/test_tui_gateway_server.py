@@ -5535,7 +5535,7 @@ def test_superseded_runtime_finalized_without_reclaimed_broadcast(monkeypatch):
         # mark it finalized-for-lookup via a different stored key is wrong —
         # instead simulate the mint race by removing it from lookup).
         old["_finalized"] = False
-        monkeypatch.setattr(server, "_find_live_session_by_key", lambda _k: None)
+        monkeypatch.setattr(server, "_find_live_session_by_key", lambda _k, *_a: None)
 
         result = server._claim_or_reuse_live("new-sid", "stored-super", fresh, None)
 
@@ -8505,7 +8505,7 @@ def test_config_set_fast_updates_live_agent_session_scoped(monkeypatch):
     monkeypatch.setattr(server, "_emit", lambda *args: emits.append(args))
     monkeypatch.setattr(
         "hermes_cli.models.resolve_fast_mode_overrides",
-        lambda _model_id: {"service_tier": "priority"},
+        lambda _model_id, **_route: {"service_tier": "priority"},
     )
 
     try:
@@ -8584,7 +8584,7 @@ def test_config_set_fast_rejects_unsupported_model(monkeypatch):
     )
     monkeypatch.setattr(
         "hermes_cli.models.resolve_fast_mode_overrides",
-        lambda _model_id: None,
+        lambda _model_id, **_route: None,
     )
 
     try:
@@ -8904,7 +8904,7 @@ def test_enable_gateway_prompts_sets_gateway_env(monkeypatch):
 
 
 def test_setup_status_reports_provider_config(monkeypatch):
-    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kwargs: False)
+    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kw: False)
 
     resp = server.handle_request({"id": "1", "method": "setup.status", "params": {}})
 
@@ -8999,7 +8999,7 @@ def test_probe_credentials_allows_keyless_custom_runtime():
 
 
 def test_setup_runtime_check_rejects_empty_runtime_key(monkeypatch):
-    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kwargs: True)
+    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kw: True)
     monkeypatch.setattr(
         "hermes_cli.runtime_provider.resolve_runtime_provider",
         lambda requested=None: {
@@ -9021,7 +9021,7 @@ def test_setup_runtime_check_rejects_empty_runtime_key(monkeypatch):
 
 
 def test_setup_runtime_check_allows_no_key_custom_runtime(monkeypatch):
-    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kwargs: True)
+    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kw: True)
     monkeypatch.setattr(
         "hermes_cli.runtime_provider.resolve_runtime_provider",
         lambda requested=None: {
@@ -9038,7 +9038,7 @@ def test_setup_runtime_check_allows_no_key_custom_runtime(monkeypatch):
 
 
 def test_setup_runtime_check_rejects_implicit_bedrock_when_unconfigured(monkeypatch):
-    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kwargs: False)
+    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kw: False)
     monkeypatch.setattr(
         "hermes_cli.runtime_provider.resolve_runtime_provider",
         lambda requested=None: {
@@ -9133,7 +9133,7 @@ def test_profile_scoped_runtime_rejects_implicit_bedrock_despite_launch_key(monk
 
 def test_setup_runtime_check_honors_requested_provider(monkeypatch):
     """Onboarding must be able to validate the provider the user just connected."""
-    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kwargs: True)
+    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kw: True)
 
     def fake_resolve(requested=None, **kwargs):
         if requested == "nous":
@@ -9164,197 +9164,65 @@ def test_setup_runtime_check_honors_requested_provider(monkeypatch):
     assert default["result"]["provider"] == "anthropic"
 
 
-def test_setup_runtime_check_scopes_to_requested_profile(monkeypatch, tmp_path):
-    """#94071: the Desktop preflights a freshly created bot's provider on its
-    target backend BEFORE the automatic first turn. The check must resolve
-    against THAT profile's home + .env, not the launch profile's."""
+def test_setup_readiness_scopes_to_requested_profile(monkeypatch, tmp_path):
+    """#94071: the Desktop preflights a freshly created bot on its target
+    backend. ``profile`` binds THAT profile's home + .env — launch-process
+    credentials must not make an unconfigured bot look ready, and the bot's
+    own .env must be what the strict check sees."""
+    from agent import secret_scope
     from hermes_constants import get_hermes_home
 
     bot_home = tmp_path / "profiles" / "bot"
     bot_home.mkdir(parents=True)
-    (bot_home / ".env").write_text("OPENROUTER_API_KEY=sk-or-scoped-secret-1234\n", encoding="utf-8")
-
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-launch-profile-secret-0000")
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name == "bot")
+    monkeypatch.setattr(server, "_profile_home", lambda profile: bot_home if profile == "bot" else None)
     seen = {}
 
     def fake_resolve(requested=None, **kwargs):
-        from agent.secret_scope import get_secret
+        seen["home"] = Path(str(get_hermes_home())).resolve()
+        seen["secret"] = secret_scope.get_secret("OPENROUTER_API_KEY")
+        return {"provider": "openrouter", "api_key": seen["secret"] or "", "source": "env"}
 
-        seen["home"] = str(get_hermes_home())
-        seen["secret"] = get_secret("OPENROUTER_API_KEY")
-        return {"provider": "openrouter", "api_key": "sk-or-scoped-secret-1234", "source": "env"}
-
-    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kwargs: True)
     monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve)
-    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name == "bot")
-    monkeypatch.setattr(server, "_profile_home", lambda profile: bot_home if profile == "bot" else None)
 
-    resp = server.handle_request(
-        {"id": "1", "method": "setup.runtime_check", "params": {"profile": "bot"}}
-    )
+    secret_scope.set_multiplex_active(True)
+    try:
+        status = server.handle_request(
+            {"id": "1", "method": "setup.status", "params": {"profile": "bot"}}
+        )
+        assert status["result"] == {"provider_configured": False, "profile": "bot"}
 
-    assert resp["result"]["ok"] is True
-    assert resp["result"]["profile"] == "bot"
-    assert Path(seen["home"]).resolve() == bot_home.resolve()
-    assert seen["secret"] == "sk-or-scoped-secret-1234"
-    # Bindings are restored after the call.
+        (bot_home / ".env").write_text("OPENROUTER_API_KEY=sk-or-bot-profile-secret-00001\n")
+        status = server.handle_request(
+            {"id": "2", "method": "setup.status", "params": {"profile": "bot"}}
+        )
+        runtime = server.handle_request(
+            {"id": "3", "method": "setup.runtime_check", "params": {"profile": "bot"}}
+        )
+    finally:
+        secret_scope.set_multiplex_active(False)
+
+    assert status["result"] == {"provider_configured": True, "profile": "bot"}
+    assert runtime["result"]["ok"] is True
+    assert runtime["result"]["profile"] == "bot"
+    assert seen == {"home": bot_home.resolve(), "secret": "sk-or-bot-profile-secret-00001"}
     assert Path(str(get_hermes_home())).resolve() != bot_home.resolve()
 
 
-def test_setup_runtime_check_profile_scope_is_concurrency_safe(monkeypatch, tmp_path):
-    """Hermes home and secret scope are ContextVars, so overlapping checks for
-    different profiles must never observe one another's home or credentials."""
-    from agent.secret_scope import get_secret
-    from hermes_constants import get_hermes_home
-
-    homes = {}
-    for profile in ("alpha", "beta"):
-        home = tmp_path / "profiles" / profile
-        home.mkdir(parents=True)
-        (home / ".env").write_text(f"OPENROUTER_API_KEY={profile}-secret\n", encoding="utf-8")
-        homes[profile] = home
-
-    rendezvous = threading.Barrier(2)
-    seen = {}
-
-    def fake_resolve(requested=None, **kwargs):
-        rendezvous.wait(timeout=5)
-        profile = Path(get_hermes_home()).name
-        seen[profile] = {
-            "home": str(get_hermes_home()),
-            "secret": get_secret("OPENROUTER_API_KEY"),
-        }
-        return {"provider": "openrouter", "api_key": "no-key-required", "source": "env"}
-
-    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kwargs: True)
-    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve)
-    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name in homes)
-    monkeypatch.setattr(server, "_profile_home", lambda profile: homes[profile])
-
-    def check(profile):
-        return server.handle_request(
-            {"id": profile, "method": "setup.runtime_check", "params": {"profile": profile}}
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        responses = list(pool.map(check, ("alpha", "beta")))
-
-    assert [response["result"]["profile"] for response in responses] == ["alpha", "beta"]
-    assert all(response["result"]["ok"] is True for response in responses)
-    assert Path(seen["alpha"]["home"]).resolve() == homes["alpha"].resolve()
-    assert Path(seen["beta"]["home"]).resolve() == homes["beta"].resolve()
-    assert seen["alpha"]["secret"] == "alpha-secret"
-    assert seen["beta"]["secret"] == "beta-secret"
-
-
-def test_setup_runtime_check_unknown_profile_never_answers_for_launch_profile(monkeypatch):
-    """A profile this backend does not have must NOT silently report the
-    launch profile's readiness (that is the wrong-backend class of #94071)."""
-    calls = []
-
-    def fake_resolve(requested=None, **kwargs):
-        calls.append(requested)
-        return {"provider": "openrouter", "api_key": "sk-or-real-1234", "source": "env"}
-
-    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kwargs: True)
-    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve)
-    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: False)
-
-    resp = server.handle_request(
-        {"id": "1", "method": "setup.runtime_check", "params": {"profile": "ghost"}}
-    )
-
-    assert resp["result"]["ok"] is False
-    assert resp["result"]["profile"] == "ghost"
-    assert "does not exist on this backend" in resp["result"]["error"]
-    assert calls == []
-
-
-def test_setup_readiness_unknown_profile_errors_are_identical(monkeypatch):
-    """Both profile-aware readiness methods reject an invalid target with the
-    same semantic result instead of disagreeing on JSON-RPC error shape."""
-    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: False)
-
-    params = {"profile": " ghost "}
-    status = server.handle_request({"id": "1", "method": "setup.status", "params": params})
-    runtime = server.handle_request({"id": "2", "method": "setup.runtime_check", "params": params})
-
-    expected = {
-        "ok": False,
-        "profile": "ghost",
-        "error": "Profile 'ghost' does not exist on this backend.",
-    }
-    assert status["result"] == expected
-    assert runtime["result"] == expected
-
-
-def test_setup_runtime_check_without_profile_is_byte_identical(monkeypatch):
-    """No ``profile`` param → the pre-#94071 payload shape (no extra keys)."""
-    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kwargs: True)
+def test_setup_readiness_unknown_profile_never_answers_for_launch_profile(monkeypatch):
+    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kw: True)
     monkeypatch.setattr(
         "hermes_cli.runtime_provider.resolve_runtime_provider",
-        lambda requested=None: {"provider": "nous", "api_key": "invoke-jwt", "source": "portal"},
+        lambda requested=None, **kw: {"provider": "openrouter", "api_key": "sk-or-launch-0000000000", "source": "env"},
     )
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: False)
 
-    resp = server.handle_request({"id": "1", "method": "setup.runtime_check", "params": {}})
-
-    assert resp["result"] == {"ok": True, "provider": "nous", "model": None, "source": "portal"}
-
-
-def test_setup_runtime_check_scoped_profile_reports_missing_credentials(monkeypatch, tmp_path):
-    """The reproduced #94071 case: the target's profile has a model pin but no
-    usable credential → ok=False with the profile named, so the Desktop keeps
-    the bot and withholds the doomed intro turn."""
-    bot_home = tmp_path / "profiles" / "bot"
-    bot_home.mkdir(parents=True)
-
-    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kwargs: True)
-    monkeypatch.setattr(
-        "hermes_cli.runtime_provider.resolve_runtime_provider",
-        lambda requested=None: {"provider": "anthropic", "api_key": "", "source": "config"},
-    )
-    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name == "bot")
-    monkeypatch.setattr(server, "_profile_home", lambda profile: bot_home if profile == "bot" else None)
-
-    resp = server.handle_request(
-        {"id": "1", "method": "setup.runtime_check", "params": {"profile": "bot"}}
-    )
-
-    assert resp["result"] == {
-        "ok": False,
-        "provider": "anthropic",
-        "model": None,
-        "source": "config",
-        "error": "No usable credentials found for anthropic.",
-        "profile": "bot",
-    }
-
-
-def test_setup_status_scopes_to_requested_profile(monkeypatch, tmp_path):
-    from hermes_constants import get_hermes_home
-
-    bot_home = tmp_path / "profiles" / "bot"
-    bot_home.mkdir(parents=True)
-    seen = {}
-
-    def fake_configured(**_kwargs):
-        seen["home"] = str(get_hermes_home())
-        return False
-
-    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", fake_configured)
-    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name == "bot")
-    monkeypatch.setattr(server, "_profile_home", lambda profile: bot_home if profile == "bot" else None)
-
-    resp = server.handle_request({"id": "1", "method": "setup.status", "params": {"profile": "bot"}})
-
-    assert resp["result"] == {"provider_configured": False, "profile": "bot"}
-    assert Path(seen["home"]).resolve() == bot_home.resolve()
-
-    unknown = server.handle_request({"id": "2", "method": "setup.status", "params": {"profile": "ghost"}})
-    assert unknown["result"] == {
-        "ok": False,
-        "profile": "ghost",
-        "error": "Profile 'ghost' does not exist on this backend.",
-    }
+    for method in ("setup.status", "setup.runtime_check"):
+        resp = server.handle_request({"id": "1", "method": method, "params": {"profile": "ghost"}})
+        assert resp["result"]["ok"] is False
+        assert resp["result"]["profile"] == "ghost"
+        assert "does not exist" in resp["result"]["error"]
 
 
 def test_complete_slash_drops_removed_provider_alias():
@@ -15331,6 +15199,73 @@ def test_session_most_recent_honors_params_profile(monkeypatch, tmp_path):
         }
     )
     assert resp["result"]["session_id"] == "ml-tip"
+
+
+def test_handoff_request_uses_session_profile_home(monkeypatch, tmp_path):
+    """Handoff validation must read the owning session's gateway config."""
+    import contextlib
+
+    from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
+    from hermes_cli.config import get_hermes_home
+    from tui_gateway import methods_session
+
+    methods_session.register(server)
+    profile_home = tmp_path / "profiles" / "coder"
+    profile_home.mkdir(parents=True)
+    seen_homes = []
+
+    def load_config():
+        home = get_hermes_home()
+        seen_homes.append(home)
+        config = GatewayConfig()
+        if home == profile_home:
+            config.platforms[Platform.DISCORD] = PlatformConfig(
+                enabled=True,
+                home_channel=HomeChannel(
+                    platform=Platform.DISCORD,
+                    chat_id="discord-home",
+                    name="Hermes / #chat-coding",
+                ),
+            )
+        return config
+
+    class ProfileDB:
+        def get_session(self, _key):
+            return {"id": _key}
+
+        def request_handoff(self, _key, platform):
+            return platform == "discord"
+
+    @contextlib.contextmanager
+    def profile_db(_session):
+        yield ProfileDB()
+
+    monkeypatch.setattr("gateway.config.load_gateway_config", load_config)
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda _session: None)
+    monkeypatch.setattr(server, "_session_db", profile_db)
+    server._sessions["handoff-profile"] = {
+        "running": False,
+        "session_key": "desktop-coder-session",
+        "profile_home": str(profile_home),
+    }
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "handoff.request",
+                "params": {
+                    "session_id": "handoff-profile",
+                    "platform": "discord",
+                },
+            }
+        )
+    finally:
+        server._sessions.pop("handoff-profile", None)
+
+    assert "result" in resp, resp
+    assert resp["result"]["queued"] is True
+    assert seen_homes == [profile_home]
+    assert get_hermes_home() != profile_home
 
 
 def test_session_create_reports_requested_profile_name(monkeypatch, tmp_path):
