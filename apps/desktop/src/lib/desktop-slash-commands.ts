@@ -68,6 +68,7 @@ export type DesktopActionId =
   | 'stop'
   | 'title'
   | 'wake'
+  | 'worktree'
   | 'yolo'
 
 /** A command fulfilled by opening a desktop overlay picker. */
@@ -184,6 +185,12 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
     description: 'Branch the latest message into a new chat',
     aliases: ['/fork'],
     surface: action('branch')
+  },
+  {
+    name: '/worktree',
+    description: 'Inspect, create, or safely prune worktrees for this session [new|list|prune]',
+    surface: action('worktree'),
+    argumentMode: 'options'
   },
   { name: '/yolo', description: 'Toggle YOLO — auto-approve dangerous commands', surface: action('yolo') },
   {

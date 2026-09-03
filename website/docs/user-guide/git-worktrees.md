@@ -39,20 +39,23 @@ See also: [Checkpoints and /rollback](./checkpoints-and-rollback.md).
 
 ### From inside a session: `/worktree new`
 
-The fastest path (inspired by Copilot CLI's `/worktree new`): from an
-interactive CLI session, run
+The fastest path (inspired by Copilot CLI's `/worktree new`) works in
+interactive CLI and Desktop sessions:
 
 ```
 /worktree new my-experiment
 ```
 
-Hermes creates `.worktrees/my-experiment/` inside the repo (branch
-`hermes/my-experiment`, based on the freshly-fetched remote tip unless
-`worktree_sync: false`), and retargets the session's terminal and file tools
-into it — no restart needed. Omit the name to get a random `hermes-<id>`
-tree. `/worktree` alone shows the active tree; `/worktree list` lists all of
-them. On exit the tree is kept only if it has unpushed commits, exactly like
-`hermes -w`.
+Hermes creates `.worktrees/my-experiment/` inside the session's repository on
+branch `hermes/my-experiment`, then retargets that same session's terminal and
+file tools into it — no restart needed. Omit the name to generate one. Bare
+`/worktree` shows the active checkout; `/worktree list` lists the repository's
+worktrees; `/worktree prune [--dry-run]` reclaims only safe, unused trees and
+merged branches.
+
+The CLI additionally honors `worktree_sync` when choosing the base and applies
+its keep-if-unpushed cleanup on exit. Desktop keeps the created tree until you
+prune or remove it.
 
 ### Manually with git
 

@@ -82,6 +82,25 @@ import {
 // host is still compressing (#97948).
 export const SESSION_COMPRESS_TIMEOUT_MS = 660_000
 const WAKE_START_TIMEOUT_MS = 180_000
+const WORKTREE_TIMEOUT_MS = 120_000
+
+interface SessionWorktreeEntry {
+  branch?: null | string
+  detached?: boolean
+  isMain?: boolean
+  path: string
+}
+
+interface SessionWorktreeResponse {
+  action: 'list' | 'new' | 'prune' | 'status'
+  actions?: string[]
+  cwd: string
+  dry_run?: boolean
+  protected?: string[]
+  repo_root?: string
+  worktree?: null | SessionWorktreeEntry
+  worktrees?: SessionWorktreeEntry[]
+}
 
 const wakeDeviceLabel = (device?: WakeInputDeviceStatus): string => {
   if (!device) {
@@ -1041,6 +1060,115 @@ export function useSlashCommand(deps: SlashCommandDeps) {
           }
 
           await runExec(ctx)
+        },
+        worktree: async ctx => {
+          const resolved = await withSlashOutput(ctx)
+
+          if (!resolved) {
+            return
+          }
+
+          const { render: renderSlashOutput, sessionId } = resolved
+          const [rawAction = 'status', ...rest] = ctx.arg.trim().split(/\s+/).filter(Boolean)
+
+          const aliases: Record<string, SessionWorktreeResponse['action']> = {
+            add: 'new',
+            clean: 'prune',
+            create: 'new',
+            gc: 'prune',
+            list: 'list',
+            ls: 'list',
+            new: 'new',
+            prune: 'prune',
+            show: 'status',
+            status: 'status'
+          }
+
+          const action = aliases[rawAction.toLowerCase()]
+
+          if (!action) {
+            renderSlashOutput('usage: /worktree [new [name] | list | prune [--dry-run] | status]')
+
+            return
+          }
+
+          const params: Record<string, unknown> = { action, session_id: sessionId }
+
+          if (action === 'new') {
+            const name = rest.join(' ').trim()
+
+            if (name) {
+              params.name = name
+            }
+          } else if (action === 'prune') {
+            if (rest.some(value => value !== '--dry-run' && value !== '-n')) {
+              renderSlashOutput('usage: /worktree prune [--dry-run]')
+
+              return
+            }
+
+            params.dry_run = rest.includes('--dry-run') || rest.includes('-n')
+          } else if (rest.length) {
+            renderSlashOutput(`usage: /worktree ${action}`)
+
+            return
+          }
+
+          try {
+            const result = await requestGateway<SessionWorktreeResponse>(
+              'session.worktree',
+              params,
+              WORKTREE_TIMEOUT_MS
+            )
+
+            if (action === 'new') {
+              updateSessionState(sessionId, state => ({ ...state, cwd: result.cwd }))
+              renderSlashOutput(`Worktree ready: ${result.cwd}`)
+              renderSlashOutput(`Branch: ${result.worktree?.branch || '(detached)'}`)
+              renderSlashOutput('Terminal and file tools now operate in the worktree.')
+
+              return
+            }
+
+            if (action === 'list') {
+              const worktrees = result.worktrees ?? []
+              renderSlashOutput(
+                worktrees.length
+                  ? worktrees
+                      .map(tree => `${tree.isMain ? '[main] ' : ''}${tree.branch || '(detached)'} — ${tree.path}`)
+                      .join('\n')
+                  : 'No worktrees found.'
+              )
+
+              return
+            }
+
+            if (action === 'prune') {
+              const actions = result.actions ?? []
+              renderSlashOutput(
+                actions.length
+                  ? `${actions.join('\n')}\n${actions.length} action(s) ${result.dry_run ? 'planned' : 'done'}.`
+                  : 'Nothing to reclaim — remaining worktrees and branches carry real work.'
+              )
+
+              return
+            }
+
+            if (result.worktree) {
+              renderSlashOutput(`Active worktree: ${result.worktree.path}`)
+              renderSlashOutput(`Branch: ${result.worktree.branch || '(detached)'}`)
+            } else if (result.repo_root) {
+              renderSlashOutput(`No linked worktree is active. Repository: ${result.repo_root}`)
+            } else {
+              renderSlashOutput('Session cwd is not inside a git repository.')
+            }
+          } catch (err) {
+            renderSlashOutput(
+              isMissingRpcMethod(err)
+                ? 'error: This gateway is too old for Desktop /worktree. Update the Hermes backend and try again.'
+                : `error: ${err instanceof Error ? err.message : String(err)}`
+            )
+          }
         },
         // /browser connect|disconnect|status manages the live CDP connection on
         // the gateway host, mirroring the TUI's browser.manage RPC. It mutates

@@ -85,6 +85,7 @@ def test_worktree_add_initializes_plain_folder(client, tmp_path):
     ).json()
 
     assert added["branch"] == "feature/plain"
+    assert added["createdBranch"] is True
     assert Path(added["path"]).is_dir()
     assert (folder / ".git").exists()
     _git(folder, "rev-parse", "--verify", "HEAD")
@@ -96,6 +97,19 @@ def test_worktree_add_initializes_plain_folder(client, tmp_path):
     assert any(file["path"] == "notes.txt" and file["untracked"] for file in status["files"])
 
 
+
+
+def test_worktree_add_reports_reused_existing_branch(client, repo):
+    _git(repo, "branch", "feature/reused")
+
+    added = client.post(
+        "/api/git/worktree/add",
+        json={"path": str(repo), "branch": "feature/reused"},
+    ).json()
+
+    assert added["branch"] == "feature/reused"
+    assert added["createdBranch"] is False
+    assert Path(added["path"]).is_dir()
 
 
 def test_git_endpoints_require_auth(repo):

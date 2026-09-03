@@ -713,7 +713,7 @@ def worktree_add(cwd: str, options: dict) -> dict:
         existing = requested.split("/", 1)[1] if remote else requested
         if not remote and existing == _default_branch(root):
             _git_ok(root, ["switch", existing])
-            return {"path": root, "branch": existing, "repoRoot": root}
+            return {"path": root, "branch": existing, "repoRoot": root, "createdBranch": False}
         target = _unique_dir(os.path.join(root, ".worktrees", _slugify(existing)))
         if remote:
             # Best-effort freshness: the remote-tracking ref is stale if the
@@ -721,9 +721,9 @@ def worktree_add(cwd: str, options: dict) -> dict:
             # the last known ref is still there to branch from.
             _git(root, ["fetch", remote, existing])
             _git_ok(root, ["worktree", "add", "--track", "-b", existing, target, requested])
-            return {"path": target, "branch": existing, "repoRoot": root}
+            return {"path": target, "branch": existing, "repoRoot": root, "createdBranch": True}
         _git_ok(root, ["worktree", "add", target, existing])
-        return {"path": target, "branch": existing, "repoRoot": root}
+        return {"path": target, "branch": existing, "repoRoot": root, "createdBranch": False}
 
     slug = _slugify(options.get("name") or f"work-{os.urandom(4).hex()}")
     branch = _sanitize_branch(options.get("branch") or "") or f"hermes/{slug}"
@@ -745,12 +745,13 @@ def worktree_add(cwd: str, options: dict) -> dict:
             args.append("--no-track")
         args.append(base)
     code, _, err = _git(root, args)
+    created_branch = code == 0
     if code != 0:
         if "already exists" in (err or "").lower():
             _git_ok(root, ["worktree", "add", target, branch])
         else:
             raise RuntimeError(err.strip() or "git worktree add failed")
-    return {"path": target, "branch": branch, "repoRoot": root}
+    return {"path": target, "branch": branch, "repoRoot": root, "createdBranch": created_branch}
 
 
 def worktree_remove(cwd: str, worktree_path: str, force: bool) -> dict:

@@ -173,7 +173,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("branch", "Branch the current session (explore a different path)", "Session",
                aliases=("fork",), args_hint="[name]"),
     CommandDef("worktree", "Show, list, create, or prune isolated git worktrees", "Session",
-               cli_only=True, args_hint="[new [name]|list|prune [--dry-run]]",
+               cli_only=True, desktop="advanced", args_hint="[new [name]|list|prune [--dry-run]]",
                subcommands=("new", "list", "prune")),
     CommandDef("compress", "Compress conversation context (add 'here [N]' to keep recent N turns; --preview shows what would happen)", "Session",
                aliases=("compact",), args_hint="[here [N] | focus topic | --preview|--dry-run]"),

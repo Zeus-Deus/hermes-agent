@@ -11368,6 +11368,7 @@ def test_commands_catalog_includes_desktop_meta_without_skills():
     assert commands["/review"] == {"argument_mode": "text", "desktop": None}
     assert commands["/clear"]["desktop"] == "terminal"
     assert commands["/model"]["desktop"] == "hidden"
+    assert commands["/worktree"]["desktop"] == "advanced"
     assert commands["/compact"]["argument_mode"] == commands["/compress"]["argument_mode"]
 
     for skill in resp["result"]["skills"]:

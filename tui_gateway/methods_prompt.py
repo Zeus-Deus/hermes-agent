@@ -476,6 +476,8 @@ def _(rid, params: dict) -> dict:
     while True:
         busy_transport = None
         with session["history_lock"]:
+            if session.get("_workspace_mutating"):
+                return _err(rid, 4009, "session workspace operation in progress")
             if session.get("running"):
                 if internal_hosted_submit:
                     return _err(rid, 4091, "hosted room member session is busy")
@@ -512,6 +514,8 @@ def _(rid, params: dict) -> dict:
         else None
     )
     with session["history_lock"]:
+        if session.get("_workspace_mutating"):
+            return _err(rid, 4009, "session workspace operation in progress")
         # A watch session's run lives in the PARENT turn, so its own running
         # flag is False — without this, typing mid-run builds a second agent
         # racing the in-flight child on the same stored session (interleaved

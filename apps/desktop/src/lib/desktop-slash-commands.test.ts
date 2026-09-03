@@ -197,6 +197,13 @@ describe('desktop slash command curation', () => {
     expect(desktopSlashCommandArgumentMode('/browser')).toBe('options')
   })
 
+  it('routes /worktree through a first-class desktop action', () => {
+    expect(resolveDesktopCommand('/worktree')?.surface).toEqual({ kind: 'action', action: 'worktree' })
+    expect(desktopSlashCommandArgumentMode('/worktree')).toBe('options')
+    expect(isDesktopSlashSuggestion('/worktree')).toBe(true)
+    expect(desktopSlashUnavailableMessage('/worktree')).toBeNull()
+  })
+
   it('routes /compress through the session-compression action', () => {
     // /compress must be an action (session.compress RPC), not exec: the slash
     // worker route times out on large sessions (#44456).

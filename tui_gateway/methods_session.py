@@ -1236,79 +1236,379 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, info)
 
 
+@method("session.worktree")
+def _(rid, params: dict) -> dict:
+    """Inspect or mutate worktrees for this live session's repository only.
+
+    The gateway process cwd is deliberately irrelevant: a desktop may connect
+    to a gateway launched from an unrelated checkout, while each live session
+    remains anchored to its own workspace.  All git entry points therefore
+    receive the cwd read from ``_sess_nowait``'s live session record.
+    """
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    if _effective_terminal_backend() != "local" or _session_uses_compute_host(session):
+        return _err(rid, 4028, "worktree operations require a gateway-local terminal backend")
+
+    action = str(params.get("action") or "status").strip().lower()
+    if action not in {"status", "list", "new", "prune"}:
+        return _err(
+            rid,
+            -32602,
+            "invalid params: action must be status, list, new, or prune",
+        )
+
+    # Never fall back through _session_cwd() to the process cwd.  A live record
+    # without a cwd is malformed for this RPC and must fail closed instead of
+    # making the gateway launch directory an accidental mutation target.
+    cwd = str(session.get("cwd") or "").strip()
+    if not cwd:
+        return _err(rid, 4016, "session working directory is unavailable")
+
+    from hermes_cli import web_git
+
+    def _path_within(path: str, root: str) -> bool:
+        try:
+            path_real = os.path.normcase(os.path.realpath(path))
+            root_real = os.path.normcase(os.path.realpath(root))
+            return os.path.commonpath((path_real, root_real)) == root_real
+        except (OSError, ValueError):
+            return False
+
+    def _repo_state() -> tuple[str, list[dict]]:
+        # This explicit probe is load-bearing for ``new``: web_git.worktree_add
+        # helpfully initializes plain directories, which is correct for its web
+        # project flow but forbidden for a session-scoped worktree mutation.
+        if not _git_repo_root_for_cwd(cwd):
+            return "", []
+        trees = web_git.worktree_list(cwd)
+        root = next(
+            (str(tree.get("path") or "") for tree in trees if tree.get("isMain")),
+            "",
+        )
+        return root, trees
+
+    if action in {"status", "list"}:
+        repo_root, trees = _repo_state()
+        if action == "status":
+            matches = [
+                tree
+                for tree in trees
+                if tree.get("path") and _path_within(cwd, str(tree["path"]))
+            ]
+            active = max(
+                matches,
+                key=lambda tree: len(os.path.realpath(str(tree["path"]))),
+                default=None,
+            )
+            return _ok(
+                rid,
+                {
+                    "action": action,
+                    "cwd": cwd,
+                    "repo_root": repo_root,
+                    "worktree": active,
+                },
+            )
+        if not repo_root:
+            return _err(rid, 4028, "session cwd is not inside a git repository")
+        return _ok(
+            rid,
+            {
+                "action": action,
+                "cwd": cwd,
+                "repo_root": repo_root,
+                "worktrees": trees,
+            },
+        )
+
+    # Serialize add/move and prune against each other.  In particular, the
+    # busy check and creation stay in the same critical section so two racing
+    # requests cannot both observe an idle session and move it independently.
+    with _session_worktree_lock:
+        # The RPC may have waited behind another workspace mutation. Re-read the
+        # live cwd only after acquiring the shared lock so `new` and `prune`
+        # cannot act on a stale repository.
+        cwd = str(session.get("cwd") or "").strip()
+        if not cwd:
+            return _err(rid, 4016, "session working directory is unavailable")
+
+        def _create_new():
+            # Re-check under the mutation lock, before even probing git.  A busy
+            # session must create no directory, branch, or repository metadata.
+            if session.get("running"):
+                return _err(rid, 4009, "session busy")
+
+            repo_root, _trees = _repo_state()
+            if not repo_root:
+                return _err(rid, 4028, "session cwd is not inside a git repository")
+            expected_parent = os.path.join(repo_root, ".worktrees")
+            if not _path_within(expected_parent, repo_root):
+                return _err(
+                    rid,
+                    -32602,
+                    "invalid repository: worktree directory escapes its repository",
+                )
+
+            options: dict = {}
+            if "name" in params:
+                import ntpath
+                import re
+
+                raw_name = str(params.get("name") or "").strip()
+                sanitized = web_git._sanitize_branch(raw_name)
+                path_parts = [part for part in re.split(r"[/\\\\]+", raw_name) if part]
+                if (
+                    not sanitized
+                    or os.path.isabs(raw_name)
+                    or ntpath.isabs(raw_name)
+                    or ".." in path_parts
+                ):
+                    return _err(
+                        rid,
+                        -32602,
+                        "invalid params: worktree name is empty or traverses outside its repository",
+                    )
+                # Pass the original through: web_git owns the canonical branch
+                # sanitization and directory slugging rules.
+                options["name"] = raw_name
+
+            session_key = str(session.get("session_key") or "")
+            persisted_row = False
+            persisted_cwd = cwd
+            try:
+                with _session_db(session) as owner_db:
+                    if owner_db is None:
+                        return _err(rid, 4028, "session database is unavailable")
+                    row = owner_db.get_session(session_key) if session_key else None
+                    if row:
+                        persisted_row = True
+                        persisted_cwd = str(row.get("cwd") or cwd)
+            except Exception as exc:
+                return _err(rid, 5008, f"worktree persistence check failed: {exc}")
+
+            try:
+                created = web_git.worktree_add(cwd, options)
+            except Exception as exc:
+                return _err(rid, 5008, f"worktree creation failed: {exc}")
+
+            created_path = str(created.get("path") or "")
+            if not created_path or not _path_within(created_path, expected_parent):
+                # Defense in depth around the shared helper's slug invariant.
+                # Compensate without a shell if that invariant is ever broken.
+                if created_path:
+                    try:
+                        web_git.worktree_remove(repo_root, created_path, True)
+                    except Exception:
+                        pass
+                return _err(rid, 5008, "worktree creation escaped its repository")
+
+            previous = {
+                key: session.get(key)
+                for key in ("cwd", "explicit_cwd", "cwd_from_settle")
+            }
+            try:
+                new_cwd = _set_session_cwd(session, created_path)
+                if persisted_row:
+                    with _session_db(session) as owner_db:
+                        row = owner_db.get_session(session_key) if owner_db is not None else None
+                    if not row or os.path.abspath(str(row.get("cwd") or "")) != os.path.abspath(new_cwd):
+                        raise RuntimeError("could not persist the session worktree cwd")
+            except Exception as exc:
+                # Treat create+move as one gateway mutation.  If moving the
+                # session fails, remove the just-created checkout and branch,
+                # then restore the in-memory cwd fields before surfacing error.
+                try:
+                    web_git.worktree_remove(repo_root, created_path, True)
+                    branch = str(created.get("branch") or "")
+                    if branch and created.get("createdBranch"):
+                        web_git._git_ok(repo_root, ["branch", "-D", branch])
+                except Exception:
+                    logger.exception("failed to roll back worktree %s", created_path)
+                if persisted_row:
+                    try:
+                        with _session_db(session) as owner_db:
+                            if owner_db is not None:
+                                owner_db.update_session_cwd(session_key, persisted_cwd)
+                    except Exception:
+                        logger.exception("failed to restore persisted cwd for %s", session_key)
+                for key, value in previous.items():
+                    if value is None:
+                        session.pop(key, None)
+                    else:
+                        session[key] = value
+                try:
+                    _register_session_cwd(session)
+                except Exception:
+                    logger.exception("failed to restore runtime cwd for %s", session_key)
+                git_probe.invalidate()
+                return _err(rid, 5008, f"worktree session move failed: {exc}")
+
+            git_probe.invalidate()
+            agent = session.get("agent")
+            info = (
+                _session_info(agent, session)
+                if agent is not None
+                else {
+                    "cwd": new_cwd,
+                    "branch": _git_branch_for_cwd(new_cwd),
+                    "project": _project_info_for_cwd(new_cwd),
+                    "lazy": True,
+                }
+            )
+            sid = str(params.get("session_id") or "")
+            _emit("session.info", sid, info)
+            return _ok(
+                rid,
+                {
+                    "action": action,
+                    "cwd": new_cwd,
+                    "repo_root": repo_root,
+                    "worktree": created,
+                    "info": info,
+                },
+            )
+
+        if action == "new":
+            history_lock = session.get("history_lock") or _session_worktree_lock
+            with history_lock:
+                if session.get("running") or session.get("_workspace_mutating"):
+                    return _err(rid, 4009, "session busy")
+                session["_workspace_mutating"] = True
+            try:
+                return _create_new()
+            finally:
+                with history_lock:
+                    session.pop("_workspace_mutating", None)
+
+        repo_root, _trees = _repo_state()
+        if not repo_root:
+            return _err(rid, 4028, "session cwd is not inside a git repository")
+
+        from hermes_cli import worktree_gc
+
+        dry_run = is_truthy_value(params.get("dry_run", False))
+        try:
+            # Snapshot every genuinely live runtime under the registry lock.
+            # Protect by containment, not exact cwd equality: tools commonly
+            # settle in a subdirectory of their checkout.
+            with _sessions_lock:
+                if any(record.get("running") for record in _sessions.values()):
+                    return _err(rid, 4009, "cannot prune while a live session is running")
+                live_cwds = [
+                    cwd,
+                    *(
+                        str(record.get("cwd") or "")
+                        for record in _sessions.values()
+                        if record is not session
+                        and not record.get("_finalized")
+                        and record.get("cwd")
+                    ),
+                ]
+                records = worktree_gc.audit_worktrees(repo_root, with_sizes=False)
+                protected_records = [
+                    record
+                    for record in records
+                    if any(
+                        _path_within(live_cwd, record.path)
+                        for live_cwd in live_cwds
+                    )
+                ]
+                protected_paths = {record.path for record in protected_records}
+                reclaimable_records = [
+                    record for record in records if record.path not in protected_paths
+                ]
+                actions = worktree_gc.reclaim_worktrees(
+                    repo_root,
+                    dry_run=dry_run,
+                    records=reclaimable_records,
+                )
+                actions += worktree_gc.reclaim_branches(
+                    repo_root, dry_run=dry_run
+                )
+        except Exception as exc:
+            return _err(rid, 5008, f"worktree prune failed: {exc}")
+
+        if not dry_run:
+            git_probe.invalidate()
+        return _ok(
+            rid,
+            {
+                "action": action,
+                "cwd": cwd,
+                "repo_root": repo_root,
+                "dry_run": dry_run,
+                "actions": actions,
+                "protected": sorted(protected_paths),
+            },
+        )
+
+
 @method("session.workspace.move")
 def _(rid, params: dict) -> dict:
-    """Re-home a STORED session's workspace into another folder/project.
+    """Re-home a stored session while serializing against worktree cleanup."""
+    with _session_worktree_lock:
+        target = str(params.get("session_key") or "").strip()
+        if not target:
+            return _err(rid, 4007, "session_key required")
+        raw = str(params.get("cwd", "") or "").strip()
+        if not raw:
+            return _err(rid, 4016, "cwd required")
 
-    Unlike ``session.cwd.set`` (which acts on a live runtime session by its UI
-    id), this targets a persisted row by ``session_key`` so the desktop can fix
-    a session that was created in the wrong directory — no live agent required.
-    The git branch/root columns are REPLACED (not merely enriched), because the
-    whole point of the move is to change which project claims the session; a
-    stale ``git_repo_root`` would keep it grouped under the project it left.
+        from hermes_constants import translate_cwd_for_wsl_backend
 
-    A live agent bound to the row follows through the runtime path too, so its
-    terminal/file tools re-anchor immediately. An explicit move wins even
-    mid-turn: refusing a running session made the desktop's "Move to project"
-    claim success in the UI while ``state.db`` kept the old cwd — two sources
-    of truth disagreeing (#86626). In-flight tool calls keep the cwd they were
-    launched with; the NEXT tool call uses the new workspace.
-    """
-    target = str(params.get("session_key") or "").strip()
-    if not target:
-        return _err(rid, 4007, "session_key required")
-    raw = str(params.get("cwd", "") or "").strip()
-    if not raw:
-        return _err(rid, 4016, "cwd required")
-    from hermes_constants import translate_cwd_for_wsl_backend
+        resolved = os.path.abspath(os.path.expanduser(translate_cwd_for_wsl_backend(raw)))
+        if not os.path.isdir(resolved):
+            return _err(rid, 4017, f"working directory does not exist: {raw}")
 
-    resolved = os.path.abspath(os.path.expanduser(translate_cwd_for_wsl_backend(raw)))
-    if not os.path.isdir(resolved):
-        return _err(rid, 4017, f"working directory does not exist: {raw}")
+        # Snapshot under both locks so prune cannot derive a protection set
+        # between the stored-row move and the matching live-session update.
+        live = None
+        live_sid = ""
+        with _sessions_lock:
+            for sid, sess in list(_sessions.items()):
+                if sess.get("session_key") == target:
+                    live, live_sid = sess, sid
+                    break
 
-    # Snapshot under the lock — concurrent RPCs mutate _sessions (same pattern
-    # as _cwd_for_session_key).
-    live = None
-    live_sid = ""
-    with _sessions_lock:
-        for sid, sess in list(_sessions.items()):
-            if sess.get("session_key") == target:
-                live, live_sid = sess, sid
-                break
+        branch = _git_branch_for_cwd(resolved)
+        root = _git_common_repo_root_for_cwd(resolved)
+        with _profile_db(params) as db:
+            if db is None:
+                return _db_unavailable_error(rid, code=5007)
+            # A brand-new draft has no persisted row yet; the live re-home below
+            # still applies and its first durable write inherits this cwd.
+            row_exists = bool(db.get_session(target))
+            if not row_exists and live is None:
+                return _err(rid, 4007, "session not found")
+            if row_exists:
+                try:
+                    db.update_session_cwd(
+                        target, resolved, branch, root, replace_git_meta=True
+                    )
+                except Exception as e:
+                    return _err(rid, 5007, f"move failed: {e}")
 
-    branch = _git_branch_for_cwd(resolved)
-    root = _git_common_repo_root_for_cwd(resolved)
-    with _profile_db(params) as db:
-        if db is None:
-            return _db_unavailable_error(rid, code=5007)
-        # A brand-new draft has no persisted row yet; the live re-home below
-        # still applies and the row inherits the cwd when it is first written.
-        row_exists = bool(db.get_session(target))
-        if not row_exists and live is None:
-            return _err(rid, 4007, "session not found")
-        if row_exists:
+        if live is not None:
             try:
-                db.update_session_cwd(
-                    target, resolved, branch, root, replace_git_meta=True
-                )
-            except Exception as e:
-                return _err(rid, 5007, f"move failed: {e}")
+                _set_session_cwd(live, resolved)
+            except ValueError as e:
+                return _err(rid, 4017, str(e))
+            agent = live.get("agent")
+            info = (
+                _session_info(agent, live)
+                if agent is not None
+                else {
+                    "cwd": resolved,
+                    "branch": branch,
+                    "project": _project_info_for_cwd(resolved),
+                    "lazy": True,
+                }
+            )
+            _emit("session.info", live_sid, info)
 
-    if live is not None:
-        try:
-            _set_session_cwd(live, resolved)
-        except ValueError as e:
-            return _err(rid, 4017, str(e))
-        agent = live.get("agent")
-        info = _session_info(agent, live) if agent is not None else {
-            "cwd": resolved,
-            "branch": branch,
-            "project": _project_info_for_cwd(resolved),
-            "lazy": True,
-        }
-        _emit("session.info", live_sid, info)
-
-    return _ok(rid, {"cwd": resolved, "branch": branch, "git_repo_root": root})
+        return _ok(rid, {"cwd": resolved, "branch": branch, "git_repo_root": root})
 
 
 @method("session.active_list")
@@ -3877,3 +4177,6 @@ def _(rid, params: dict) -> dict:
 def register(server) -> None:
     """Bind this module's handlers onto ``server``'s globals and registry."""
     _registry.install(server)
+    # Worktree add/audit/prune spawn git and can run for seconds on large repos;
+    # never block the gateway's socket reader while they execute.
+    server._LONG_HANDLERS = server._LONG_HANDLERS | {"session.worktree"}

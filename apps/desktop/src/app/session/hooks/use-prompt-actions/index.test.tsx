@@ -424,6 +424,111 @@ function renderedSeedTexts(seeds: Record<string, unknown>[]): string[] {
   })
 }
 
+describe('usePromptActions /worktree', () => {
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  it('creates and enters a worktree through the session-scoped RPC only', async () => {
+    const calls: Array<{ method: string; params?: Record<string, unknown>; timeout?: number }> = []
+    const states: Record<string, unknown>[] = []
+    const refreshSessions = vi.fn(async () => undefined)
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>, timeout?: number) => {
+      calls.push({ method, params, timeout })
+
+      if (method === 'session.worktree') {
+        return {
+          action: 'new',
+          cwd: '/repo/.worktrees/fix-login',
+          repo_root: '/repo',
+          worktree: {
+            branch: 'hermes/fix-login',
+            path: '/repo/.worktrees/fix-login'
+          }
+        } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={state => states.push(state)}
+        refreshSessions={refreshSessions}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/worktree new fix-login', { sessionId: 'rt-target-session' })
+
+    expect(calls).toContainEqual({
+      method: 'session.worktree',
+      params: { action: 'new', name: 'fix-login', session_id: 'rt-target-session' },
+      timeout: 120_000
+    })
+    expect(calls.map(call => call.method)).not.toContain('slash.exec')
+    expect(calls.map(call => call.method)).not.toContain('command.dispatch')
+    expect(states.at(-1)).toMatchObject({ cwd: '/repo/.worktrees/fix-login' })
+    expect(renderedSeedTexts(states).join('\n')).toContain('Worktree ready: /repo/.worktrees/fix-login')
+  })
+
+  it.each([
+    ['/worktree', { action: 'status', session_id: RUNTIME_SESSION_ID }],
+    ['/worktree list', { action: 'list', session_id: RUNTIME_SESSION_ID }],
+    ['/worktree prune', { action: 'prune', dry_run: false, session_id: RUNTIME_SESSION_ID }],
+    ['/worktree prune --dry-run', { action: 'prune', dry_run: true, session_id: RUNTIME_SESSION_ID }]
+  ])('maps %s to session.worktree parameters', async (command, expectedParams) => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.worktree') {
+        return { action: expectedParams.action, actions: [], cwd: '/repo', worktree: null, worktrees: [] } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
+
+    await handle!.submitText(command)
+
+    expect(requestGateway).toHaveBeenCalledWith('session.worktree', expectedParams, 120_000)
+    expect(requestGateway).not.toHaveBeenCalledWith('slash.exec', expect.anything())
+  })
+
+  it('fails closed when the gateway lacks session.worktree', async () => {
+    const states: Record<string, unknown>[] = []
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.worktree') {
+        throw new Error('Method not found: session.worktree')
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={state => states.push(state)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/worktree new safe-tree')
+
+    expect(requestGateway).not.toHaveBeenCalledWith('slash.exec', expect.anything())
+    expect(renderedSeedTexts(states).join('\n')).toContain('gateway is too old for Desktop /worktree')
+  })
+})
+
 // The HUD floats over the app the user is really working in, so the gateway
 // turns this flag into a per-turn hint: read the window underneath and work in
 // it, rather than reaching for Hermes's own browser and panes.

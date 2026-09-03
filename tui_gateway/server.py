@@ -159,6 +159,7 @@ _cfg_lock = threading.Lock()
 # dedicated lock rather than the unrelated process-config cache lock.
 _profile_ui_meta_lock = threading.Lock()
 _sessions_lock = threading.RLock()  # reentrant: _close_session_by_id may run under callers that already hold it
+_session_worktree_lock = threading.RLock()
 _prompt_lock = threading.Lock()
 _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
@@ -3973,6 +3974,12 @@ def _display_session_cwd(session: dict | None) -> str:
 
 
 def _reconcile_session_cwd_from_terminal(session: dict | None) -> bool:
+    """Serialize terminal-settle adoption against worktree add/prune."""
+    with _session_worktree_lock:
+        return _reconcile_session_cwd_from_terminal_locked(session)
+
+
+def _reconcile_session_cwd_from_terminal_locked(session: dict | None) -> bool:
     """Re-anchor a session that SETTLED in another git checkout. Returns moved.
 
     An agent told to work in a fresh worktree does exactly that — `git worktree
@@ -4594,6 +4601,12 @@ def _persist_session_cwd_and_schedule_git_meta(
 
 
 def _set_session_cwd(session: dict, cwd: str) -> str:
+    """Move one session while serializing against worktree add/prune."""
+    with _session_worktree_lock:
+        return _set_session_cwd_locked(session, cwd)
+
+
+def _set_session_cwd_locked(session: dict, cwd: str) -> str:
     from hermes_constants import translate_cwd_for_wsl_backend
 
     cwd = translate_cwd_for_wsl_backend(str(cwd))
@@ -8586,7 +8599,13 @@ def _agent_cbs(sid: str) -> dict:
     return callbacks
 
 
-def _apply_project_workspace(task_id: str, path: str, _name: str = "") -> None:
+def _apply_project_workspace(task_id: str, path: str, name: str = "") -> None:
+    """Serialize explicit project moves against worktree add/prune."""
+    with _session_worktree_lock:
+        _apply_project_workspace_locked(task_id, path, name)
+
+
+def _apply_project_workspace_locked(task_id: str, path: str, _name: str = "") -> None:
     """Intentional workspace move from the project_* tools: re-anchor the live
     session's cwd to the chosen project's folder and push session.info so the
     desktop follows (refresh tree + scope into the project). This is the ONLY
