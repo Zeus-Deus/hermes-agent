@@ -57,6 +57,8 @@ This is cooperative routing, **not an OS security sandbox**. Same-user host file
 
 ## Private driver runtime and desktop scope
 
+`runtime_dir` and `desktop_only` require POSIX UID ownership validation and are explicitly rejected where it is unavailable; generic env-only routing is unaffected.
+
 `runtime_dir` is optional and requires `private_daemon=True`. It must already exist as an owned private directory; replacement or permission changes fail validation. Its path must be short enough for Unix sockets. The daemon socket is created there without global TMPDIR mutation. Any applicable already-configured capability manifest is copied byte-for-byte to an exclusive mode-0600 file there, then removed on stop. The wrapper must expose that runtime at the same path to every driver subprocess. Manifest contents and existing approval semantics are not changed.
 
 `desktop_only=True` requires a private daemon and explicit owned private Wayland runtime/display socket, checks endpoint identity, and refuses the host Wayland endpoint. Native-Wayland enablement must be explicit (`CUA_DRIVER_RS_ENABLE_WAYLAND=1`). Host display/control environment must be explicitly replaced or unset. Existing Hermes permission configuration still determines standard/bounded/unrestricted mode; private standard-mode daemons are supported.

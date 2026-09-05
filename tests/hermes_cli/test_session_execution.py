@@ -121,3 +121,104 @@ def test_prefix_and_runtime_validation_fail_closed(tmp_path):
             api.get_session_execution_context(session_id='runtime')
     finally:
         api.remove_session_execution_context('runtime')
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize("kind", ["runtime", "desktop"])
+@pytest.mark.parametrize("operation", ["identity", "construction", "registration", "lease", "resolution"])
+def test_ownership_capability_loss_fails_closed(monkeypatch, request, kind, operation):
+    import socket
+    import tempfile
+    from pathlib import Path
+    from hermes_cli import session_execution as api
+
+    temporary = tempfile.TemporaryDirectory(prefix="hse-")
+    request.addfinalizer(temporary.cleanup)
+    runtime = Path(temporary.name)
+    env = {"XDG_RUNTIME_DIR": str(runtime), "WAYLAND_DISPLAY": "wayland-test",
+           "CUA_DRIVER_RS_ENABLE_WAYLAND": "1"}
+    if kind == "desktop":
+        sock = socket.socket(socket.AF_UNIX)
+        request.addfinalizer(sock.close)
+        sock.bind(str(runtime / env["WAYLAND_DISPLAY"]))
+
+    def build_context():
+        launch = (api.ComputerUseLaunchContext(private_daemon=True, runtime_dir=str(runtime))
+                  if kind == "runtime" else api.ComputerUseLaunchContext(private_daemon=True, desktop_only=True))
+        return api.SessionExecutionContext(env_set=env, computer_use=launch)
+
+    def no_private_filesystem(*args, **kwargs):
+        pytest.fail("private filesystem accessed without ownership capability")
+
+    context = build_context()
+    api.register_session_execution_context("guarded", context, task_ids=("guarded-task",))
+    lease = api.resolve_session_execution_context(session_id="guarded")
+    assert lease is not None
+    actions = {
+        "identity": lambda: api._runtime_identity(str(runtime)) if kind == "runtime" else api._desktop_identity(env),
+        "construction": build_context,
+        "registration": lambda: api.register_session_execution_context(
+            "guarded", context, task_ids=("new-task",)),
+        "lease": lambda: lease.apply_env({}),
+        "resolution": lambda: api.resolve_session_execution_context(task_id="guarded-task"),
+    }
+    try:
+        # Capability fault injection on the native host, not OS impersonation.
+        with monkeypatch.context() as scoped:
+            scoped.delattr(api.os, "getuid")
+            generic = api.SessionExecutionContext(env_set={"ROUTE": "generic"}, env_unset=frozenset({"DROP"}))
+            api.register_session_execution_context("generic", generic, task_ids=("generic-task",))
+            generic_lease = api.resolve_session_execution_context(task_id="generic-task")
+            assert generic_lease is not None
+            assert generic_lease.apply_env({"DROP": "host"}) == {"ROUTE": "generic"}
+            assert generic_lease.wrap_argv(["child", "arg"]) == ["child", "arg"]
+            scoped.setattr(api, "Path", no_private_filesystem)
+            with pytest.raises(api.SessionExecutionError, match="requires POSIX ownership"):
+                actions[operation]()
+        assert api.resolve_session_execution_context(session_id="guarded") is lease
+        assert api.resolve_session_execution_context(task_id="new-task") is None
+    finally:
+        api.remove_session_execution_context("guarded")
+        api.remove_session_execution_context("generic")
+
+
+@pytest.mark.windows_only
+@pytest.mark.parametrize("kind", ["runtime", "desktop"])
+def test_windows_rejects_private_ownership_but_allows_generic_execution(tmp_path, monkeypatch, kind):
+    from hermes_cli import session_execution as api
+
+    runtime = str(tmp_path / "private-runtime")
+    env = {"XDG_RUNTIME_DIR": runtime, "WAYLAND_DISPLAY": "wayland-test",
+           "CUA_DRIVER_RS_ENABLE_WAYLAND": "1"}
+
+    def no_private_filesystem(*args, **kwargs):
+        pytest.fail("private filesystem accessed without ownership capability")
+
+    def build_context():
+        launch = (api.ComputerUseLaunchContext(private_daemon=True, runtime_dir=runtime)
+                  if kind == "runtime" else api.ComputerUseLaunchContext(private_daemon=True, desktop_only=True))
+        return api.SessionExecutionContext(env_set=env, computer_use=launch)
+
+    assert not hasattr(api.os, "getuid")
+    try:
+        generic = api.SessionExecutionContext(env_set={"ROUTE": "generic"}, env_unset=frozenset({"DROP"}))
+        api.register_session_execution_context("generic", generic, task_ids=("generic-task",))
+        lease = api.resolve_session_execution_context(task_id="generic-task")
+        assert lease is not None
+        assert lease.apply_env({"DROP": "host"}) == {"ROUTE": "generic"}
+        assert lease.wrap_argv(["child", "arg"]) == ["child", "arg"]
+        with monkeypatch.context() as scoped:
+            scoped.setattr(api, "Path", no_private_filesystem)
+            with pytest.raises(api.SessionExecutionError, match="requires POSIX ownership"):
+                if kind == "runtime":
+                    api._runtime_identity(runtime)
+                else:
+                    api._desktop_identity(env)
+            with pytest.raises(api.SessionExecutionError, match="requires POSIX ownership"):
+                build_context()
+            with pytest.raises(api.SessionExecutionError, match="requires POSIX ownership"):
+                api.register_session_execution_context("private", build_context())
+        assert api.resolve_session_execution_context(session_id="private") is None
+    finally:
+        api.remove_session_execution_context("generic")
+        api.remove_session_execution_context("private")

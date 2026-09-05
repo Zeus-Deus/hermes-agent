@@ -36,9 +36,12 @@ def _command_prefix(value) -> tuple[str, ...]:
 
 
 def _runtime_identity(path: str) -> tuple:
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        raise SessionExecutionError("runtime_dir requires POSIX ownership validation")
     try:
         info = Path(path).stat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != getuid() or info.st_mode & 0o077:
             raise SessionExecutionError("runtime_dir must be an owned private directory")
         return (info.st_dev, info.st_ino)
     except OSError as exc:
@@ -89,12 +92,15 @@ def _desktop_endpoint(env: Mapping[str, str]) -> Path:
 
 
 def _desktop_identity(env: Mapping[str, str]) -> tuple:
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        raise SessionExecutionError("desktop-only context requires POSIX ownership validation")
     endpoint = _desktop_endpoint(env)
     try:
         runtime = Path(env["XDG_RUNTIME_DIR"]).resolve()
         info, directory = endpoint.stat(), runtime.stat()
         if (endpoint.parent != runtime or not stat.S_ISSOCK(info.st_mode)
-                or directory.st_uid != os.getuid() or info.st_uid != os.getuid()
+                or directory.st_uid != getuid() or info.st_uid != getuid()
                 or directory.st_mode & 0o077):
             raise SessionExecutionError("desktop endpoint must be in an owned private runtime directory")
         return (str(endpoint), info.st_dev, info.st_ino)
