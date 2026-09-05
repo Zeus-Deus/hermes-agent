@@ -31,6 +31,7 @@ import {
 } from 'electron'
 
 import { classifyActiveRuntime } from './active-runtime-state'
+import { createAgentOverviewReader, gatherOverviewBackends } from './agent-overview'
 import { destroyKeepaliveAgents, downloadAgentFor, httpStatusError, jsonAgentFor, withRetry } from './api-transport'
 import { appIconCandidates, resolveAppIcon } from './app-icon'
 import { stopBackendChild as stopBackendChildImpl, stopBackendTreesForUpdate } from './backend-child'
@@ -15779,6 +15780,66 @@ async function enumerateRegistryAgentSources(registry = readDesktopConnectionsRe
     })
   )
 }
+
+const readAgentOverview = createAgentOverviewReader<any>()
+ipcMain.handle('hermes:agents:overview', async (_event, options) => {
+  const registry = readDesktopConnectionsRegistry()
+
+  const promises = [
+    backendConnectionState.getPromise(),
+    ...[...backendPool.values()].map(entry => entry.connectionPromise)
+  ].filter(Boolean)
+
+  const pooled = await gatherOverviewBackends(promises, descriptor => resolvedConnectionId(registry, descriptor))
+
+  return readAgentOverview(
+    {
+      sources: registry.connections,
+      pooled,
+      discoverParked: async connectionId => {
+        const source = registry.connections.find(entry => entry.id === connectionId)
+
+        if (source?.kind === 'local') {
+          return (readLocalProfileInventory() ?? []).map(name => ({ name }))
+        }
+
+        if (source?.kind === 'ssh') {
+          // Reuse the roster's TTL/cached credential-free directory probe. No
+          // ensureRegistryBackend / profile activation on this read-only path.
+          await probeSshProfileInventory(source)
+
+          return (sshRosterCache.get(connectionId) ?? []).map(name => ({ name }))
+        }
+
+        return []
+      },
+      // URL/cloud discovery builds an HTTP descriptor only. In particular do NOT
+      // use ensureRegistryBackend: its primary fallback may start a runtime.
+      connect: async connectionId => {
+        const source = registry.connections.find(entry => entry.id === connectionId)
+
+        if (!source || (source.kind !== 'remote' && source.kind !== 'cloud')) {
+          return []
+        }
+
+        return [
+          await buildRemoteConnection(
+            source.url,
+            normAuthMode(source.authMode),
+            source.authMode === 'oauth' ? null : decryptDesktopSecret(source.token),
+            `registry:${source.id}`,
+            undefined,
+            source.kind === 'cloud' ? 'cloud' : 'url',
+            undefined,
+            source.headers
+          )
+        ]
+      },
+      fetch: (descriptor, requestPath) => getJsonForBackend(descriptor, requestPath, { timeoutMs: 8_000 })
+    },
+    { force: options?.force === true }
+  )
+})
 
 ipcMain.handle('hermes:agents:roster', async () => {
   const registry = readDesktopConnectionsRegistry()
