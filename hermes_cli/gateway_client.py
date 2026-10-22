@@ -19,6 +19,9 @@ DEFAULT_RPC_TIMEOUT = 30
 # A typed ``--api-key`` on a resume that the owner does not bind (``rebind_launch_key``): every CLI says this.
 RESUME_KEY_MISMATCH = ("--api-key on resume must be the key this session was launched with "
                        "(a session launched without --api-key keeps its profile credentials).")
+# A request lost with its socket: it may have reached the gateway, so it must not be sent again.
+DISCONNECTED = ("Gateway disconnected; turn outcome is unknown. Resume the printed session ID to check "
+                "whether it completed or was interrupted; do not resend the work.")
 # Canonical ``/compress`` answers only after the summary call(s) and the commit: a long session's
 # summary routinely takes more than 30 s (``auxiliary.compression.timeout`` defaults to 120 s per
 # request, ``compression.context_total_ceiling_seconds`` to 600 s). Same budget as Desktop's
@@ -194,8 +197,7 @@ class GatewayClient:
         except (ConnectionClosed, OSError, ValueError, TimeoutError):
             pass
         finally:
-            error = GatewayClientError("Gateway disconnected; turn outcome is unknown. "
-                "Resume the printed session ID to check whether it completed or was interrupted; do not resend the work.")
+            error = GatewayClientError(DISCONNECTED)
             for future in self.pending.values():
                 if not future.done():
                     future.set_exception(error)
@@ -209,6 +211,7 @@ class GatewayClient:
         """Send one request and await its answer; ``_timeout`` (seconds, never sent on the wire)
         overrides ``DEFAULT_RPC_TIMEOUT`` for a verb that legitimately takes longer (``math.inf``: no
         deadline; the answer, a hang-up or the caller's cancel ends the wait)."""
+        from websockets.exceptions import ConnectionClosed
         self.sequence += 1
         rid = self.sequence
         future = asyncio.get_running_loop().create_future()
@@ -218,6 +221,13 @@ class GatewayClient:
             await self.websocket.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}))
             budget = DEFAULT_RPC_TIMEOUT if _timeout is None else _timeout
             return await asyncio.wait_for(future, None if budget == float("inf") else budget)
+        except ConnectionClosed as exc:
+            # The send hit a socket that died before the reader noticed (a keepalive timeout leaves
+            # it closing for up to close_timeout). Fail as the reader fails a waiting request: callers
+            # handle gateway errors, and a raw websockets one ended the CLI's footer poller for good.
+            if future.done():
+                future.exception()  # the reader failed it as well: mark that copy read so asyncio never logs it
+            raise GatewayClientError(DISCONNECTED) from exc
         finally:
             self.pending.pop(rid, None)
 

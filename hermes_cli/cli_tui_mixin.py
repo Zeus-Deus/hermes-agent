@@ -402,21 +402,8 @@ class CLITuiMixin:
         return [item for item in ordered if item is not None]
 
     def _tui_spinner_loop(self):
-        while not self._should_exit:
-            if not self._app:
-                time.sleep(0.1)
-                continue
-            monitor = getattr(self, "_subagent_monitor", None)
-            if monitor is not None:
-                monitor.tick()
-            if self._command_running:
-                self._invalidate(min_interval=0.1)
-                time.sleep(0.1)
-            else:
-                # Never repaint the idle prompt on a timer: in non-full-screen mode background
-                # redraws fight tmux/Ghostty/cmux viewport restoration after focus changes and
-                # visually move the input area. Input/agent events invalidate explicitly.
-                time.sleep(0.2)
+        from hermes_cli.cli_tui_spinner import run_spinner_loop
+        run_spinner_loop(self)
 
     def _get_clarify_display_fragments(self):
         """Batch (multi-question) clarify panel: "N questions" header, one status line per question
