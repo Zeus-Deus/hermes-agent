@@ -904,6 +904,14 @@ class CLISessionMixin:
 
             write_breadcrumb(self.session_id)
 
+    def _report_terminal_session(self) -> None:
+        """In a Herdr pane, report this session as the one a Herdr restart reopens here. Called once
+        the session holds a conversation (after a turn, on resume), so a restart never reopens an
+        empty session that was discarded. Best-effort and non-blocking (``terminal_herdr``)."""
+        from hermes_cli.terminal_herdr import report_session
+
+        report_session(self.session_id)
+
     def _is_session_yolo_active(self) -> bool:
         """Whether YOLO bypass is on for this session: reads ``tools.approval._session_yolo``
         (not a stale env var) and honors the frozen process-start ``--yolo`` flag."""

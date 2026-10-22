@@ -495,6 +495,7 @@ class CLIChatTurnMixin:
             self.session_id = self.agent.session_id
             self._write_terminal_breadcrumb()
             self._pending_title = None
+        self._report_terminal_session()
 
     def _chat_render_turn(self, turn, agent_thread, interrupt_msg):
         """Post-turn display: errors, interrupt marker, reasoning/response panels, bell, re-queues.
