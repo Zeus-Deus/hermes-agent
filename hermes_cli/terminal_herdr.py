@@ -60,7 +60,9 @@ def resume_argv(session_id: str) -> list[str] | None:
     profile = get_active_profile_name()
     if profile == "custom":
         return None
-    return ["hermes", "-p", profile, "--cli", "--resume", session_id]
+    # Hermes Personal: this build is only reachable through the `hp` launcher; a bare `hermes` in
+    # the restored login shell is the official install.
+    return ["hp", "hermes", "-p", profile, "--cli", "--resume", session_id]
 
 
 def report_session(session_id: str | None) -> None:

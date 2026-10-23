@@ -82,7 +82,7 @@ def test_reports_the_profile_resume_command_to_the_pane(herdr, coder_profile):
     assert call[4:8] == ["hermes", "--agent", "hermes", "--seq"]
     assert call[8].isdigit()
     assert call[9:11] == ["--agent-session-id", "sess-1"]
-    assert _resume_command(call) == ["hermes", "-p", "coder", "--cli", "--resume", "sess-1"]
+    assert _resume_command(call) == ["hp", "hermes", "-p", "coder", "--cli", "--resume", "sess-1"]
 
 
 def test_retries_until_herdr_sees_hermes_then_reports_each_session_once(herdr, coder_profile, monkeypatch):
@@ -104,7 +104,7 @@ def test_default_profile_is_named_so_a_sticky_profile_cannot_move_the_pane(herdr
     monkeypatch.setenv("HERMES_HOME", str(home))
     terminal_herdr.report_session("sess-1")
     wait_until(herdr.settled, timeout=15)
-    assert _resume_command(herdr.calls()[0]) == ["hermes", "-p", "default", "--cli", "--resume", "sess-1"]
+    assert _resume_command(herdr.calls()[0]) == ["hp", "hermes", "-p", "default", "--cli", "--resume", "sess-1"]
 
 
 @pytest.mark.parametrize("case", ["outside_herdr", "no_terminal", "custom_home"])
@@ -140,7 +140,7 @@ def test_cli_resume_command_moves_the_pane_to_the_resumed_session(herdr, coder_p
 
     wait_until(herdr.settled, timeout=15)
     assert cli.session_id == "older"
-    assert [_resume_command(c) for c in herdr.calls()] == [["hermes", "-p", "coder", "--cli", "--resume", "older"]]
+    assert [_resume_command(c) for c in herdr.calls()] == [["hp", "hermes", "-p", "coder", "--cli", "--resume", "older"]]
 
 
 def test_a_stopped_herdr_never_reaches_the_caller(herdr, coder_profile, monkeypatch):
