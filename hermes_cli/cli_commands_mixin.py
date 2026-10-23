@@ -872,6 +872,7 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
         with suppress(Exception):  # re-open the target session so it's not marked as ended
             self._session_db.reopen_session(target_id)
         _sync_agent_to_session(self, target_id, parent_session_id=old_session_id, reason="resume")
+        self._report_terminal_session()  # a Herdr restart now reopens this conversation
         title_part = f" \"{session_meta['title']}\"" if session_meta.get("title") else ""
         from agent.context_compressor import is_user_originated_turn
         # Count only user-originated turns: legacy compaction handoffs are durable role=user rows
@@ -991,6 +992,7 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
         if self.agent:
             self.agent.session_start = now
         _sync_agent_to_session(self, new_session_id, parent_session_id=parent_session_id, reason="branch")
+        self._report_terminal_session()  # a Herdr restart now reopens this conversation
         msg_count = len([m for m in self.conversation_history if m.get("role") == "user"])
         _cp("  " + _tn("branch.branched", msg_count, title=branch_title),
             f"  {_t('branch.original_session', session_id=parent_session_id)}",
