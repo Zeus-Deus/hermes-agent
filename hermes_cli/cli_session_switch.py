@@ -8,6 +8,10 @@ from __future__ import annotations
 from contextlib import suppress
 
 
+def _without_session_meta(messages) -> list:
+    return [m for m in (messages or []) if m.get("role") != "session_meta"]
+
+
 def _end_current_session(cli, reason: str) -> None:
     """Flush un-persisted messages, then end the current session row with ``reason``.
     Best-effort on both steps (the switch proceeds even if the DB write fails)."""

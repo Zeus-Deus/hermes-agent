@@ -36,7 +36,7 @@ from hermes_cli.cli_commands_session_tools import (
     CLICommandsSessionToolsMixin, _TTYBuf, _accent, _accent_line, _command_arg, _cp, _dim,
     _dim_line, _gt, _lines, _pr, _probe, _rollback_kept, _save, _say_block, _shlex_args, _t, _tn)
 from hermes_cli.cli_session_switch import (
-    _end_current_session, _sync_agent_to_session)
+    _end_current_session, _sync_agent_to_session, _without_session_meta)
 from hermes_cli.browser_connect import (
     DEFAULT_BROWSER_CDP_URL, discover_local_cdp_url, find_free_debug_port, is_browser_debug_ready,
     launch_chrome_debug, local_port_in_use, manual_chrome_debug_command)
@@ -178,10 +178,6 @@ def _cron_api(**kwargs) -> dict:
 
 
 # Session-switch plumbing (end, repoint) lives in ``hermes_cli/cli_session_switch.py``.
-
-
-def _without_session_meta(messages) -> list:
-    return [m for m in (messages or []) if m.get("role") != "session_meta"]
 
 
 def _db_unavailable_line() -> str:
