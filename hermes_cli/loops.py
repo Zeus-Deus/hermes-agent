@@ -117,6 +117,8 @@ def parse_loop_args(text: str) -> dict[str, Any]:
         tokens = raw.split(None, 1)
 
     interval = parse_interval_token(tokens[0]) if tokens else None
+    if tokens and "," in tokens[0] and parse_interval_token(tokens[0].partition(",")[0]) is not None:
+        return {**result, "error": "remove the comma after the interval (usage: /loop 5m <prompt>)"}
     if interval is not None:
         raw = tokens[1].strip() if len(tokens) > 1 else ""
 

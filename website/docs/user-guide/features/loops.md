@@ -43,7 +43,12 @@ Loop a slash command just as easily:
 
 ```
 /loop 10m /recap
+/loop 5m /my-skill
 ```
+
+In the classic CLI, typing `/` at the start of the loop's task opens the normal command and skill completions; Tab accepts a selection without changing the interval. This also works with `/loop every 5m …` and the `/proactive` alias.
+
+Separate the interval and task with a space, not a comma: `/loop 5m /my-skill`, not `/loop 5m, /my-skill`. A comma immediately after a valid interval is rejected with a correction instead of silently creating a self-paced loop.
 
 ## The two cadence modes
 

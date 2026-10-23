@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional, Tuple
 from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
 from prompt_toolkit.completion import Completer, Completion
 
-from hermes_cli.commands import COMMANDS, SUBCOMMANDS
+from hermes_cli.commands import COMMANDS, SUBCOMMANDS, resolve_command
 
 # (config-file signature, personalities) memo for /personality completion.
 _personalities_memo: Optional[
@@ -257,6 +257,29 @@ def _score_path(filepath: str, query: str) -> int:
     return 0 if qi < len(lower_q) else 35 if boundary_hits >= len(lower_q) * 0.5 else 25
 
 
+def _loop_slash_payload(text: str) -> str | None:
+    """Find a leading slash payload without treating prose or loop flags as commands."""
+    parts = text.split(None, 1)
+    if len(parts) != 2 or not parts[0].startswith("/"):
+        return None
+    command = resolve_command(parts[0])
+    if command is None or command.name != "loop":
+        return None
+    payload = parts[1]
+    parts = payload.split(None, 1)
+    if parts[0].lower() == "every":
+        if len(parts) != 2:
+            return None
+        payload = parts[1]
+        parts = payload.split(None, 1)
+    from hermes_cli.loops import parse_interval_token
+    if parse_interval_token(parts[0]) is not None:
+        if len(parts) != 2:
+            return None
+        payload = parts[1]
+    return payload if payload.startswith("/") else None
+
+
 class SlashCommandCompleter(Completer):
     """Autocomplete for built-in slash commands, subcommands, and skill commands."""
 
@@ -418,6 +441,9 @@ class SlashCommandCompleter(Completer):
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
+        payload = _loop_slash_payload(text)
+        if payload is not None and self._command_allowed(text.split(None, 1)[0].lower()):
+            text = payload
         if not text.startswith("/"):
             ctx_word = self._extract_context_word(text)
             path_word = _extract_path_word(text)
@@ -494,6 +520,9 @@ class SlashCommandAutoSuggest(AutoSuggest):
 
     def get_suggestion(self, buffer, document):
         text = document.text_before_cursor
+        payload = _loop_slash_payload(text)
+        if payload is not None and self._allowed(text.split(None, 1)[0].lower()):
+            text = payload
         if not text.startswith("/"):
             return self._history_suggestion(buffer, document)
         parts = text.split(maxsplit=1)
