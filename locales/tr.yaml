@@ -2014,6 +2014,7 @@ cli:
     confirm_choice_prompt: "Seçim [1/2]: "
     switch_cancelled: "Model değişikliği iptal edildi."
     selection_failed: "✗ Model seçimi başarısız oldu: {error}"
+    code_skew_restart: "code_skew: ağ geçidi eski kodla çalışıyor; hermes gateway restart komutunu çalıştırın, ardından /model komutunu yeniden deneyin"
     switch_failed: "⚠ {model} modeline geçiş başarısız oldu ({error}); {old_model} modelinde kalınıyor."
     cleared_picker_cache: "Model seçici önbelleği temizlendi. Yenileniyor..."
     moa_one_shot_queued: "MoA tek seferlik çalıştırma {preset} ön ayarıyla sıraya alındı; bu turdan sonra önceki model geri yüklenecek."

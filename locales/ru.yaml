@@ -2014,6 +2014,7 @@ cli:
     confirm_choice_prompt: "Выбор [1/2]: "
     switch_cancelled: "Переключение модели отменено."
     selection_failed: "✗ Не удалось выбрать модель: {error}"
+    code_skew_restart: "code_skew: шлюз выполняет устаревший код; выполните hermes gateway restart, затем повторите /model"
     switch_failed: "⚠ Не удалось переключиться на {model} ({error}); остаёмся на {old_model}."
     cleared_picker_cache: "Кэш списка моделей очищен. Обновляю..."
     moa_one_shot_queued: "Разовый запуск MoA с пресетом {preset} поставлен в очередь; после этого хода вернётся предыдущая модель."

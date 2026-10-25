@@ -2104,15 +2104,8 @@ def cached_provider_model_ids(
         return []
     is_ollama = normalized == "ollama"
 
-    cache = _load_provider_models_cache()
-    fp = _credential_fingerprint(normalized)
-    entry = cache.get(normalized)
-    if normalized == "openai-codex" and isinstance(entry, dict) and entry.get("fallback") is True:
-        # A persisted offline list is not account discovery. Rebuild it from this
-        # version's defaults so an older fallback cannot hide new context choices.
-        # Leave authoritative live catalogs and the stored row untouched.
-        from hermes_cli.codex_models import DEFAULT_CODEX_MODELS, _finalize_codex_models
-        entry = {**entry, "models": _finalize_codex_models(DEFAULT_CODEX_MODELS)}
+    from hermes_cli.models_cached_catalog import provider_cache_state
+    fp, entry = provider_cache_state(normalized)
     now = time.time()
 
     if not force_refresh:

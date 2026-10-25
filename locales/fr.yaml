@@ -2266,6 +2266,7 @@ cli:
     confirm_choice_prompt: "Choix [1/2] : "
     switch_cancelled: "Changement de modèle annulé."
     selection_failed: "✗ Échec de la sélection du modèle : {error}"
+    code_skew_restart: "code_skew : la passerelle exécute du code obsolète ; lancez hermes gateway restart, puis réessayez /model"
     switch_failed: "⚠ Échec du passage au modèle {model} ({error}) ; {old_model} est conservé."
     cleared_picker_cache: "Cache du sélecteur de modèles vidé. Actualisation..."
     moa_one_shot_queued: "MoA en une passe mis en file avec le preset {preset} ; le modèle précédent sera rétabli après ce tour."

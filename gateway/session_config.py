@@ -212,6 +212,8 @@ async def model_options(connection, ref, params):
             or any(type(params[k]) is not bool for k in flags & params.keys())):
         raise RuntimeStoreError('invalid_params')
     policy = _authorize(connection, ref, params)
+    from gateway.code_skew import require_current_model_code
+    require_current_model_code()
     agent = connection.authority.agent(ref) if ref.session_id else None
     provider = getattr(agent, 'provider', None) or (policy.provider if policy else None)
     model = getattr(agent, 'model', None) or (policy.model if policy else None)

@@ -43,6 +43,8 @@ def _current_route(authority, live, old):
 
 
 async def prepare_model(authority, live, payload, prepared):
+    from gateway.code_skew import require_current_model_code
+    require_current_model_code()
     from gateway.session_policy import restore_policy, bind_launch_key, bound_route_holds, route_launch_key
     from gateway.session_policy_credentials import recover_config_secrets
     from hermes_cli.model_switch import apply_model_selection, switch_model

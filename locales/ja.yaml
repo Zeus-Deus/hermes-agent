@@ -2014,6 +2014,7 @@ cli:
     confirm_choice_prompt: "選択 [1/2]: "
     switch_cancelled: "モデルの切り替えをキャンセルしました。"
     selection_failed: "✗ モデルの選択に失敗しました: {error}"
+    code_skew_restart: "code_skew: ゲートウェイは古いコードで動作しています。hermes gateway restart を実行してから /model を再試行してください"
     switch_failed: "⚠ {model} への切り替えに失敗しました（{error}）。{old_model} を引き続き使用します。"
     cleared_picker_cache: "モデル選択のキャッシュをクリアしました。更新中..."
     moa_one_shot_queued: "プリセット {preset} で MoA を 1 回だけ実行するようキューに入れました。このターンの後に元のモデルに戻ります。"

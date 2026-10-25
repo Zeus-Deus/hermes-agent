@@ -2031,6 +2031,7 @@ cli:
     confirm_choice_prompt: "Választás [1/2]: "
     switch_cancelled: "Modellváltás megszakítva."
     selection_failed: "✗ A modell kiválasztása nem sikerült: {error}"
+    code_skew_restart: "code_skew: az átjáró elavult kódot futtat; futtasd a hermes gateway restart parancsot, majd próbáld újra a /model parancsot"
     switch_failed: "⚠ Nem sikerült átváltani a(z) {model} modellre ({error}); marad: {old_model}."
     cleared_picker_cache: "A modellválasztó gyorsítótára törölve. Frissítés..."
     moa_one_shot_queued: "Egyszeri MoA-futás sorba állítva a {preset} előbeállítással; a kör után az előző modell visszaáll."

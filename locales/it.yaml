@@ -2014,6 +2014,7 @@ cli:
     confirm_choice_prompt: "Scelta [1/2]: "
     switch_cancelled: "Cambio di modello annullato."
     selection_failed: "✗ Selezione del modello non riuscita: {error}"
+    code_skew_restart: "code_skew: il gateway sta eseguendo codice obsoleto; esegui hermes gateway restart, poi riprova /model"
     switch_failed: "⚠ Passaggio al modello {model} non riuscito ({error}); resto su {old_model}."
     cleared_picker_cache: "Cache del selettore di modelli svuotata. Aggiornamento..."
     moa_one_shot_queued: "MoA one-shot in coda con il preset {preset}; il modello precedente verrà ripristinato dopo questo turno."

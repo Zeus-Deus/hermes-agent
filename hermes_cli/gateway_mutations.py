@@ -94,6 +94,16 @@ def model_refusal_text(refusal, *, confirmed=False):
     return f"{refusal['confirm_message']}\n\nModel not switched: {reason}"
 
 
+def model_switch_error_text(error):
+    """Local repair copy for a typed stale-code refusal; never echo remote diagnostics."""
+    from agent.i18n import t
+    from hermes_cli.gateway_client import GatewayRPCError
+
+    if isinstance(error, GatewayRPCError) and error.code == 5098 and str(error) == 'code_skew':
+        return t('cli.model.code_skew_restart')
+    return str(error)
+
+
 def confirmation_title(refusal):
     """The one prompt title for the owner's guard warnings (as ``combined_selection_warning``)."""
     warnings = refusal.get('warnings') or []

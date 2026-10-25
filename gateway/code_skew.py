@@ -55,3 +55,23 @@ def detect_code_skew() -> tuple[str, str] | None:
     if current is None or current == _boot_fingerprint:
         return None
     return _short(_boot_fingerprint), _short(current)
+
+
+def require_current_model_code() -> None:
+    """Refuse new model work, not authorized replay of a durable receipt.
+
+    Canonical callers authorize first and invoke this only after exact-retry
+    lookup, before discovery, resolution or accepting a deferred selection.
+    """
+    skew = detect_code_skew()
+    if skew is None:
+        return
+    from agent.i18n import t
+    from hermes_state_runtime import RuntimeStoreError
+
+    boot_rev, disk_rev = skew
+    error = RuntimeStoreError('code_skew')
+    error.wire_code = 5098
+    error.wire_message = t('gateway.model.error_prefix', error=t(
+        'gateway.model.err_skew', boot_rev=boot_rev, disk_rev=disk_rev))
+    raise error

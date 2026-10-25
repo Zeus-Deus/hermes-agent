@@ -33,6 +33,8 @@ def defer_pick(authority, actor, ref, params):
         replay = replay_mutation_receipt(conn, key, digest)
         if replay is not None:
             return replay
+        from gateway.code_skew import require_current_model_code
+        require_current_model_code()
         row = conn.execute('SELECT runtime_revision, runtime_generation FROM sessions WHERE id=?',
                            (ref.session_id,)).fetchone()
         if row is None:

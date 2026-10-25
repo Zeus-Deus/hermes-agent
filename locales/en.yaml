@@ -2108,6 +2108,7 @@ cli:
     switch_cancelled: "Model switch cancelled."
     selection_failed: "✗ Model selection failed: {error}"
     switch_failed: "⚠ Model switch to {model} failed ({error}); staying on {old_model}."
+    code_skew_restart: "code_skew: the gateway is running stale code; run hermes gateway restart, then retry /model"
     cleared_picker_cache: "Cleared model picker cache. Refreshing..."
     moa_one_shot_queued: "MoA one-shot queued with preset {preset}; previous model will be restored after this turn."
     # model-id normalization notices (yellow)

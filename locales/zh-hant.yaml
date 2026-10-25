@@ -2014,6 +2014,7 @@ cli:
     confirm_choice_prompt: "選擇 [1/2]："
     switch_cancelled: "已取消切換模型。"
     selection_failed: "✗ 選擇模型失敗：{error}"
+    code_skew_restart: "code_skew：閘道正在執行舊版程式碼；請執行 hermes gateway restart，然後重試 /model"
     switch_failed: "⚠ 切換至模型 {model} 失敗（{error}）；維持使用 {old_model}。"
     cleared_picker_cache: "已清除模型選擇器快取。正在重新整理..."
     moa_one_shot_queued: "已排入 MoA 單次執行（預設集 {preset}）；本輪結束後將還原先前的模型。"

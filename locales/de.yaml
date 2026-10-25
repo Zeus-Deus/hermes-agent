@@ -2014,6 +2014,7 @@ cli:
     confirm_choice_prompt: "Auswahl [1/2]: "
     switch_cancelled: "Modellwechsel abgebrochen."
     selection_failed: "✗ Modellauswahl fehlgeschlagen: {error}"
+    code_skew_restart: "code_skew: das Gateway führt veralteten Code aus; führe hermes gateway restart aus und versuche /model erneut"
     switch_failed: "⚠ Modellwechsel zu {model} fehlgeschlagen ({error}); {old_model} bleibt aktiv."
     cleared_picker_cache: "Cache der Modellauswahl gelöscht. Wird aktualisiert..."
     moa_one_shot_queued: "MoA-Einmaldurchlauf mit Preset {preset} eingereiht; das vorherige Modell wird nach diesem Zug wiederhergestellt."

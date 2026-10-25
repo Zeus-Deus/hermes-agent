@@ -831,8 +831,7 @@ class CLIModelSwitchMixin:
                 # The agent rolled itself back to the old working model/client. Roll the CLI's own staged
                 # fields back too and abort the rest of the commit (note + success print) so a failed switch
                 # is a no-op rather than a dead session (#50163).
-                # Agent rolled itself back; roll the CLI back too and abort so a failed switch is a no-op
-                # rather than a dead session (#50163).
+                from hermes_cli.gateway_mutations import model_switch_error_text
                 for _k, _v in _cli_snapshot.items():
                     setattr(self, _k, _v)
                 if str(exc) == "launch_credentials_unavailable":
@@ -840,7 +839,7 @@ class CLIModelSwitchMixin:
                     from hermes_cli.cli_chat_error_copy import refusal_text
                     _cprint(f"  {refusal_text(exc)}")
                     return False
-                _cprint(f"  {t('cli.model.switch_failed', model=result.new_model, error=exc, old_model=old_model)}")
+                _cprint(f"  {t('cli.model.switch_failed', model=result.new_model, error=model_switch_error_text(exc), old_model=old_model)}")
                 return False
             finally:
                 self._confirmed_switch_warning = None  # this switch's confirmation only

@@ -2014,6 +2014,7 @@ cli:
     confirm_choice_prompt: "Keuse [1/2]: "
     switch_cancelled: "Modelverandering gekanselleer."
     selection_failed: "✗ Modelkeuse het misluk: {error}"
+    code_skew_restart: "code_skew: die poort voer verouderde kode uit; voer hermes gateway restart uit en probeer /model dan weer"
     switch_failed: "⚠ Modelverandering na {model} het misluk ({error}); bly op {old_model}."
     cleared_picker_cache: "Modelkieser-kasie uitgevee. Verfris..."
     moa_one_shot_queued: "MoA-eenmalige lopie in tou geplaas met voorafinstelling {preset}; die vorige model word na hierdie beurt herstel."

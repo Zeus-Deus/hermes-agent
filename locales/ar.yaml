@@ -2014,6 +2014,7 @@ cli:
     confirm_choice_prompt: "الاختيار [1/2]: "
     switch_cancelled: "أُلغي تبديل النموذج."
     selection_failed: "✗ فشل اختيار النموذج: {error}"
+    code_skew_restart: "code_skew: تشغّل البوابة شيفرة قديمة؛ شغّل hermes gateway restart ثم أعد محاولة /model"
     switch_failed: "⚠ فشل التبديل إلى النموذج {model} ({error})؛ البقاء على {old_model}."
     cleared_picker_cache: "تم مسح ذاكرة التخزين المؤقت لمنتقي النماذج. جارٍ التحديث..."
     moa_one_shot_queued: "وُضع تشغيل MoA لمرة واحدة في قائمة الانتظار بالإعداد المسبق {preset}؛ سيُستعاد النموذج السابق بعد هذا الدور."

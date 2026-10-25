@@ -95,6 +95,12 @@ def one_turn_runtime(override, model, runtime_kwargs, config):
     written: the session's route, policy and cached agent are untouched, so the next turn runs its own
     route again (main's ``/model --once`` restore). Raises ``RuntimeError`` with the switch's own
     sentence when the target cannot be resolved; the caller fails the turn with it."""
+    from gateway.code_skew import require_current_model_code
+    try:
+        require_current_model_code()
+    except RuntimeStoreError as exc:
+        # Turn failures carry str(error), not the RPC-only wire_message projection.
+        raise RuntimeError(exc.wire_message) from exc
     from hermes_cli.config import get_compatible_custom_providers
     from hermes_cli.model_switch import switch_model
     result = switch_model(

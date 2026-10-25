@@ -2014,6 +2014,7 @@ cli:
     confirm_choice_prompt: "Rogha [1/2]: "
     switch_cancelled: "Athrú samhla cealaithe."
     selection_failed: "✗ Theip ar roghnú samhla: {error}"
+    code_skew_restart: "code_skew: tá cód as dáta á rith ag an ngeata; rith hermes gateway restart, ansin bain triail as /model arís"
     switch_failed: "⚠ Theip ar athrú samhla go {model} ({error}); ag fanacht ar {old_model}."
     cleared_picker_cache: "Glanadh taisce roghnóir na samhlacha. Á athnuachan..."
     moa_one_shot_queued: "Aonurchar MoA curtha i scuaine leis an réamhshocrú {preset}; cuirfear an tsamhail roimhe seo ar ais tar éis an tseala seo."
