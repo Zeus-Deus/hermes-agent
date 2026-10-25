@@ -24,6 +24,26 @@ def _refuse(action: str, message: str, **fields: Any) -> ActionResult:
 class _InputMixin:
     """Pointer / keyboard / value-setter actions against the sticky target."""
 
+    def _prepare_element_target(self, action: str, args: dict[str, Any]) -> Optional[ActionResult]:
+        """Translate cached indices only when a snapshot token can carry their authority."""
+        idx = args.get("element_index")
+        if idx is None:
+            return None
+        supports_token = (self._session.supports_input_property(action, "element_token")
+                          or self._session.supports_capability("accessibility.element_tokens", tool=action))
+        if not supports_token:
+            return None  # Minimum-runtime drivers retain their index-based addressing.
+        token = self._snapshot_tokens.get(idx) if isinstance(idx, int) else None
+        if token:
+            args["element_token"] = token
+        if not self._session.supports_input_property(action, "element_index"):
+            # 0.38 removed indices. Never drop the sole target or invent a handle for an uncaptured row.
+            if not args.get("element_token"):
+                return _refuse(action, "No snapshot token for this element — call capture() again.",
+                               code="snapshot_token_required")
+            del args["element_index"]
+        return None
+
     def _target_args(self, action: str, *, need_window: bool = False) -> tuple[Optional[ActionResult], dict[str, Any]]:
         """``(refusal, base args)`` for an input action against the sticky target."""
         if self._active_pid is None or (need_window and self._active_window_id is None):
@@ -92,16 +112,17 @@ class _InputMixin:
         refusal, args = self._target_args("click")
         if refusal is not None:
             return refusal
-        # Tool is chosen by click_count only; `button` goes through click's enum (the driver rejects unknown
-        # buttons). `right_click` / `middle_click` MCP tools are deprecated aliases and never invoked here.
-        # Choose tool by click_count only — single-vs-double — and pass the button through to `click`'s
-        # `button` enum (Surface 5 of NousResearch/hermes-agent#47072). cua-driver-rs gained an explicit
-        # `button: "left"|"right"|"middle"` arg on `click` in trycua/cua#1961 which rejects unknown buttons;
-        # before that, `middle` was silently mapped to a left-click via name-routing through `right_click`.
+        # Keep single-click button routing (Surface 5 of NousResearch/hermes-agent#47072).
+        # Double-click is left-only unless its own live schema advertises button support.
         button_norm = (button or "left").lower()
         if button_norm not in {"left", "right", "middle"}:
             return _refuse("click", f"unknown button {button!r} — expected left, right, middle.")
-        tool, args["button"] = ("double_click" if click_count == 2 else "click"), button_norm
+        tool = "double_click" if click_count == 2 else "click"
+        if tool == "click" or self._session.supports_input_property(tool, "button"):
+            args["button"] = button_norm
+        elif button_norm != "left":
+            return _refuse(tool, "The connected cua-driver double_click schema does not accept a non-left button.",
+                           code="button_unsupported")
         refusal = self._pointer_args(tool, args, (
             ("element_index click", {"element_index": element} if element is not None else None),
             ("coordinate click", {"x": x, "y": y} if x is not None and y is not None else None),
