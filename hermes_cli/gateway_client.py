@@ -18,7 +18,8 @@ GATEWAY_WS_TICKET_PREFIX = "hermes-gateway-ticket."
 DEFAULT_RPC_TIMEOUT = 30
 # A typed ``--api-key`` on a resume that the owner does not bind (``rebind_launch_key``): every CLI says this.
 RESUME_KEY_MISMATCH = ("--api-key on resume must be the key this session was launched with "
-                       "(a session launched without --api-key keeps its profile credentials).")
+                       "(a session launched without --api-key keeps its profile credentials). "
+                       "A session never switches keys: start a new one (without --resume) to use a different key.")
 # A request lost with its socket: it may have reached the gateway, so it must not be sent again.
 DISCONNECTED = ("Gateway disconnected; turn outcome is unknown. Resume the printed session ID to check "
                 "whether it completed or was interrupted; do not resend the work.")
