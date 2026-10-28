@@ -26,6 +26,15 @@ describe('providerWaitText', () => {
 
     expect(providerWaitText(frame)).toBe(frame)
   })
+
+  // Minted by wait_notice_text for the 'pre_progress' phase: the stream is live but the
+  // model has produced no output yet. It must name the model working, not a provider wait.
+  it.each([
+    '⏳ gpt-6.1-sol is thinking — no output yet',
+    '⏳ gpt-6.1-sol is still thinking — no output yet (reconnecting in 15s if nothing arrives)'
+  ])('accepts the model-working frame %s', frame => {
+    expect(providerWaitText(frame)).toBe(frame)
+  })
 })
 
 describe('providerWaitText accepts retry and auto-recovery frames', () => {

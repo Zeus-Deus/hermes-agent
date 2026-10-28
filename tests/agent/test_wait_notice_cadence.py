@@ -52,6 +52,24 @@ def test_nonstream_notice_once_per_phase_then_near_deadline_only():
     assert not any(copy in n for n in notices for copy in WARNING_COPY)
 
 
+def test_live_stream_without_model_output_reads_as_model_working_not_provider_wait():
+    """#145756: a reasoning model on a live stream is working, not an unresponsive provider.
+    The notice names the model thinking, and mentions a reconnect only as it nears."""
+    request, notices, _ = _nonstream_request()
+    request.wd.progress_timeout = 300.0
+    request.wd.idle_requires_progress = True
+    request.codex_watchdog_state.last_event_ts = 1001.0  # lifecycle frame, no model output
+    for heartbeat in range(1, 10):  # 30s .. 270s
+        request._emit_wait_notice(30.0 * heartbeat)
+    shown = [n for n in notices if n]
+    assert len(shown) == 1
+    assert "test-model is thinking" in shown[0]
+    assert "waiting on" not in shown[0] and "reconnect" not in shown[0]
+    request._emit_wait_notice(290.0)  # first-progress watchdog fires at 300s
+    near = [n for n in notices if n][-1]
+    assert "test-model is still thinking" in near and "reconnecting in 10s" in near
+
+
 def test_stream_monitor_notice_does_not_repeat_every_heartbeat():
     call = h._StreamingCall.__new__(h._StreamingCall)
     notices, touches = [], []

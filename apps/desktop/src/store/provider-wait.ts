@@ -41,11 +41,13 @@ export function clearAllProviderWaits(): void {
 }
 
 /** Only the core's explained wait/reconnect frames belong in Desktop's status
- * row. Generic kawaii spinner rewrites remain presentation noise. */
+ * row. Generic kawaii spinner rewrites remain presentation noise.
+ * `⏳ <model> is thinking — no output yet` is the core's frame for a live
+ * stream whose model has not produced output yet. */
 export function providerWaitText(text: string): string {
   const value = text.trim()
 
-  return /^(?:⏳|⚠|↻|⚙)\s*(?:(?:still\s+)?waiting on|loading|processing prompt|no (?:output|response)|model returned|rate limited|provider (?:overloaded|temporarily unavailable))/i.test(
+  return /^(?:⏳|⚠|↻|⚙)\s*(?:(?:still\s+)?waiting on|\S+ is (?:still )?thinking —|loading|processing prompt|no (?:output|response)|model returned|rate limited|provider (?:overloaded|temporarily unavailable))/i.test(
     value
   )
     ? value

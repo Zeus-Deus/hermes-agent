@@ -22,17 +22,31 @@ _PHASE_TEXT = {
     # Codex Responses (non-stream request path)
     "first_event": "{n}s waiting for the first provider event",
     "reconnect": "{n}s waiting for the first provider event after reconnect",
-    "pre_progress": "provider stream open; {n}s without substantive model progress",
     "post_event": "provider stream active; {n}s without stream events",
     # Chat-completions streaming path
     "first_chunk": "{n}s waiting for the first stream chunk",
     "post_chunk": "stream open; {n}s without stream output",
 }
 
+# The provider accepted the request and its stream is live, but the model has not
+# produced visible output yet. A reasoning model routinely spends minutes here, so
+# this reads as the model working, not as a wait on the provider (#145756). The
+# reconnect only becomes worth naming once it is about to happen.
+_MODEL_WORKING_PHASES = frozenset({"pre_progress"})
+
+
+def _model_working_text(model: str, watchdog: Optional[tuple[str, float]]) -> str:
+    if watchdog is None or not _near_deadline(watchdog):
+        return f"⏳ {model} is thinking — no output yet"
+    return (f"⏳ {model} is still thinking — no output yet "
+            f"(reconnecting in {max(0, int(watchdog[1]))}s if nothing arrives)")
+
 
 def wait_notice_text(model: str, silence_secs: float, phase: str,
                      watchdog: Optional[tuple[str, float]] = None) -> str:
     """One neutral status line. ``watchdog`` is ``(label, seconds_until_it_fires)``."""
+    if phase in _MODEL_WORKING_PHASES:
+        return _model_working_text(model, watchdog)
     lead = "still waiting on" if _near_deadline(watchdog) else "waiting on"
     text = f"⏳ {lead} {model} — " + _PHASE_TEXT[phase].format(n=int(silence_secs))
     if watchdog is not None:
