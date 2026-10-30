@@ -523,3 +523,36 @@ def test_dead_unmanaged_start_is_a_prompt_terminal_verdict(tmp_path, monkeypatch
     assert "RuntimeError: boot failed with key" in result.detail, result.detail
     assert secret not in result.detail and "OLD_RUN_TRACEBACK" not in result.detail
     assert "gateway-stdio.log" in result.detail
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_one_client_starts_the_install_gateway_while_the_others_wait(tmp_path, monkeypatch):
+    """Clients that find no owner at the same moment must not each start a gateway: while one holds
+    the install's launch claim (named profiles share the root's), the others start nothing and keep
+    waiting; the claim is released when that ensure returns."""
+    from hermes_cli import gateway_runtime as runtime, gateway_runtime_service as service, gateway_runtime_start as start
+
+    root = tmp_path / ".hermes"
+    alpha, beta = root / "profiles" / "alpha", root / "profiles" / "beta"
+    for home in (alpha, beta):
+        home.mkdir(parents=True, mode=0o700)
+    spawned = []
+    monkeypatch.setattr(runtime, "_update_fenced", lambda homes: False)
+    monkeypatch.setattr(runtime, "discover_gateway_endpoint", lambda *a, **k: runtime.GatewayDiscovery("absent"))
+    monkeypatch.setattr(service, "discover_existing_gateway_service", lambda *a, **k: None)
+    monkeypatch.setattr(start, "spawn_unmanaged_gateway", lambda target, **k: spawned.append(Path(target)))
+
+    other_client = start.claim_launch(beta)
+    assert other_client is not None and start.claim_launch(alpha) is None
+    try:
+        result = runtime.ensure_gateway_runtime(alpha, timeout=0.5)
+    finally:
+        other_client.release()
+    assert (result.state, result.reason_code) == ("starting", "deadline")
+    assert spawned == []
+
+    runtime.ensure_gateway_runtime(alpha, timeout=0.3)
+    assert spawned == [root.resolve()]
+    again = start.claim_launch(alpha)  # the starter's claim ended with its ensure
+    assert again is not None
+    again.release()

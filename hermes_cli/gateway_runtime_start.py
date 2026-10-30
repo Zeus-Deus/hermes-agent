@@ -40,6 +40,53 @@ DAEMON_STRIPPED_ENV = (
 )
 
 
+LAUNCH_LOCK_NAME = "gateway-launch.lock"
+
+
+class LaunchClaim:
+    """This client's claim on starting its install's gateway; ``release()`` once its ensure returns."""
+
+    def __init__(self, handle=None):
+        self._handle = handle  # None: the lock file was unusable, so the start runs unserialized
+
+    def release(self) -> None:
+        if self._handle is not None:
+            from gateway.status import _release_file_lock
+            _release_file_lock(self._handle)
+            self._handle.close()
+            self._handle = None
+
+
+def claim_launch(profile_home: Path) -> LaunchClaim | None:
+    """The install's cold-start claim, or None while another client holds it.
+
+    Clients that find no owner at the same moment (terminal panes resuming after a reboot) would
+    each start a gateway. Those starts fight over the same profile locks and the losers exit, often
+    before the winner holds anything a client can observe, so the client of a losing start reported
+    its exit as fatal. One claimant per install (named profiles share the default root's lock) starts
+    the gateway; the others keep polling and find its owner. The OS drops the lock if the claimant
+    dies, and the detached gateway never inherits the descriptor.
+    """
+    from gateway.runtime_ownership import _open_lock
+    from gateway.status import _try_acquire_file_lock
+    from hermes_cli.gateway_runtime_multiplex import multiplexer_root_for
+    try:
+        fd = _open_lock((multiplexer_root_for(profile_home) or profile_home) / LAUNCH_LOCK_NAME)
+    except OSError:
+        return LaunchClaim()
+    handle = os.fdopen(fd, "r+", encoding="utf-8")
+    if _try_acquire_file_lock(handle):
+        return LaunchClaim(handle)
+    handle.close()
+    return None
+
+
+def release_launch(claim: LaunchClaim | None) -> None:
+    """End a :func:`claim_launch` claim; ``None`` (never claimed) is a no-op."""
+    if claim is not None:
+        claim.release()
+
+
 def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: bool = False,
                             force: bool = False) -> subprocess.Popen | GatewayJob:
     """Request a daemon, not readiness. Refuse Windows no-breakaway fallback.

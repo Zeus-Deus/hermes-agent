@@ -408,6 +408,7 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float = DEFAULT
         RuntimeStartError, discover_existing_gateway_service, remaining,
         start_existing_gateway_service,
     )
+    from hermes_cli.gateway_runtime_start import claim_launch, release_launch
     from hermes_constants import get_default_hermes_root, get_process_hermes_home
 
     if not math.isfinite(timeout) or timeout <= 0:
@@ -423,6 +424,7 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float = DEFAULT
     retiring = False
     replaced: set[Path] = set()
     delay = 0.025
+    launch = None  # this install's cold-start claim (see claim_launch), held until this call returns
     try:
         while True:
             # The install-root marker also covers profiles.
@@ -458,7 +460,8 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float = DEFAULT
             # spawn a competing per-profile daemon while its reservation is pending.
             if reserved is not None:
                 requested = True
-            if observed.state == "absent" and not requested:
+            # Another client already starting this install's gateway is waited for, never raced.
+            if observed.state == "absent" and not requested and (launch := launch or claim_launch(home)):
                 # A named profile the default multiplexer serves has no daemon of its own: start
                 # (or await) the MULTIPLEXER. A per-profile spawn here would become a second owner
                 # that blocks the multiplexer's next all-or-nothing reserve.
@@ -493,3 +496,5 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float = DEFAULT
         return _refused(home)
     except OSError:
         return GatewayDiscovery("inaccessible", reason_code="runtime_start_failed")
+    finally:
+        release_launch(launch)
