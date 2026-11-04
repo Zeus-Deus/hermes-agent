@@ -224,6 +224,13 @@ def _supports_fast_mode(model: str) -> bool:
     return is_anthropic_fast_mode_model(model)
 
 
+def _fast_mode_opted_in(base_url: str | None) -> bool:
+    """True when the custom endpoint at *base_url* opted in to fast-mode params."""
+    from hermes_cli.config_providers import custom_provider_fast_mode_opt_in
+
+    return custom_provider_fast_mode_opt_in(None, base_url)
+
+
 # Beta headers safe on ordinary/native Anthropic requests. GA on Claude 4.6+ (harmless no-op
 # there) but older Claude and compatible endpoints still gate on them. Do NOT add
 # ``context-1m-2025-08-07``: accounts without the long-context beta get HTTP 400, breaking short
@@ -706,9 +713,12 @@ def build_anthropic_kwargs(
         for key in ("temperature", "top_p", "top_k"):
             kwargs.pop(key, None)
     # Fast mode: native Anthropic only — third-party providers reject the unknown beta/param and
-    # Anthropic scopes it to the Claude API (not Bedrock/Vertex/Foundry). Per-request extra_headers
-    # OVERRIDE the client-level anthropic-beta header, so rebuild the full beta list.
-    if fast_mode and not _is_third_party_anthropic_endpoint(base_url) and _supports_fast_mode(model):
+    # Anthropic scopes it to the Claude API (not Bedrock/Vertex/Foundry) — unless the endpoint's
+    # ``providers:`` entry opts in with ``capabilities: {fast_mode: true}`` (a proxy that forwards
+    # it). Per-request extra_headers OVERRIDE the client-level anthropic-beta header, so rebuild the
+    # full beta list.
+    if fast_mode and _supports_fast_mode(model) and (
+            not _is_third_party_anthropic_endpoint(base_url) or _fast_mode_opted_in(base_url)):
         kwargs.setdefault("extra_body", {})["speed"] = "fast"
         betas = _common_betas_for_base_url(base_url, drop_context_1m_beta=drop_context_1m_beta)
         kwargs["extra_headers"] = _beta_header(betas + (_OAUTH_ONLY_BETAS if is_oauth else []) + [_FAST_MODE_BETA])

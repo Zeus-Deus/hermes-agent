@@ -2111,7 +2111,19 @@ agent:
 
 `/fast normal|fast|ultrafast|auto|cold` switches the mode for the session (`/fast ultra` is shorthand for `ultrafast`). On a ChatGPT/Codex subscription, Ultrafast is offered only when your account's Codex model catalog lists it for the current model; the backend otherwise accepts the request and serves standard speed. Add `--global` to persist to `config.yaml`. `/fast` alone shows the current mode.
 
-**Cost note:** both providers bill fast requests at a multiplier on standard rates (Anthropic: $8 / $40 per MTok in/out on Opus 5.5, $10 / $50 on Opus 5 and Opus 4.8), stacking with prompt-cache pricing. Hermes prices each Anthropic response from the speed the API reports in `usage.speed`. `auto`/`cold` bound that premium to the window only. Fast params are only sent to the first-party endpoint that supports them (`api.openai.com` / Codex subscription, `api.anthropic.com`, `api.x.ai`); OpenRouter, Nous Portal, Azure, Bedrock, and custom `base_url` routes never receive them in any mode.
+**Cost note:** both providers bill fast requests at a multiplier on standard rates (Anthropic: $8 / $40 per MTok in/out on Opus 5.5, $10 / $50 on Opus 5 and Opus 4.8), stacking with prompt-cache pricing. Hermes prices each Anthropic response from the speed the API reports in `usage.speed`. `auto`/`cold` bound that premium to the window only. Fast params are only sent to the first-party endpoint that supports them (`api.openai.com` / Codex subscription, `api.anthropic.com`, `api.x.ai`); OpenRouter, Nous Portal, Azure, Bedrock, and custom `base_url` routes never receive them in any mode, unless you opt a custom endpoint in.
+
+**Proxies that forward fast mode:** if a named custom provider is a proxy or gateway that passes `service_tier` / `speed` through to the first-party API (for example a self-hosted gateway in front of an OpenAI, Codex or Anthropic account), declare it on that provider:
+
+```yaml
+providers:
+  my-proxy:
+    api: http://127.0.0.1:8080/v1
+    capabilities:
+      fast_mode: true
+```
+
+`/fast` and the Fast toggle in Desktop and the TUI then become available for that endpoint and send the same params the first-party route would. The opt-in is off by default, must be a YAML boolean, and applies only to requests sent to that provider's `api` URL; fallbacks and other providers do not inherit it. If several provider entries point at the same URL, every one of them must opt in. The model must still support fast mode, and `ultrafast` still needs a model that offers it. Hermes cannot check whether your proxy forwards the params or what the upstream bills for them, so only set it for an endpoint you run or trust.
 
 **Prompt cache:** only the per-request parameter changes between requests; the system prompt, tools, and messages stay byte-identical. Anthropic keeps a separate prompt cache for each speed, so on Anthropic every `auto`/`cold` window boundary re-writes the conversation prefix at the new speed. For long Anthropic sessions, `fast` or `normal` keeps a single warm cache.
 

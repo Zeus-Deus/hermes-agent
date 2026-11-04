@@ -1247,25 +1247,23 @@ def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
 
 def _fast_mode_route_supported(
     model_id: Optional[str], provider: Optional[str], base_url: Optional[str]) -> bool:
-    """Only the first-party endpoint that bills for fast mode may receive its params."""
+    """Only the first-party endpoint that bills for fast mode may receive its params, or a custom
+    endpoint the user opted in with ``capabilities: {fast_mode: true}`` (a proxy that forwards them)."""
     from urllib.parse import urlparse
 
     from agent.model_metadata import is_grok_46_family
+    from hermes_cli.config_providers import custom_provider_fast_mode_opt_in
 
     if _is_anthropic_fast_model(model_id):
         allowed = {"anthropic": "api.anthropic.com"}
     elif is_grok_46_family(str(model_id or "")):
         allowed = {"xai": "api.x.ai"}
     else:
-        allowed = {
-            "openai": "api.openai.com",
-            "openai-api": "api.openai.com",
-            "openai-codex": "chatgpt.com",
-        }
-    if provider and normalize_provider(provider) not in allowed:
-        return False
+        allowed = {"openai": "api.openai.com", "openai-api": "api.openai.com", "openai-codex": "chatgpt.com"}
     host = (urlparse(str(base_url or "")).hostname or "").lower()
-    return not host or host in allowed.values()
+    if (not provider or normalize_provider(provider) in allowed) and (not host or host in allowed.values()):
+        return True
+    return custom_provider_fast_mode_opt_in(provider, base_url)
 
 
 def model_supports_ultrafast(model_id: Optional[str]) -> bool:
@@ -1285,7 +1283,8 @@ def resolve_fast_mode_overrides(
     ``tier="ultrafast"`` asks for OpenAI Ultrafast instead: ``{"service_tier": "ultrafast"}`` on an
     Ultrafast model, None elsewhere (never a silent downgrade to a different paid tier).
     With ``provider``/``base_url`` the route is gated too (``_fast_mode_route_supported``) so proxies
-    never see the params. Single fast-mode gate for ``/fast`` and ``agent.fast_mode`` windows."""
+    never see the params unless their ``providers:`` entry opts in. Single fast-mode gate for ``/fast``
+    and ``agent.fast_mode`` windows."""
     if not model_supports_fast_mode(model_id):
         return None
     if (provider or base_url) and not _fast_mode_route_supported(model_id, provider, base_url):

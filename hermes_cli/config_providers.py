@@ -528,6 +528,32 @@ def get_custom_provider_session_affinity_header(
     return ""
 
 
+def custom_provider_fast_mode_opt_in(
+    provider: Any, base_url: Any, config: Optional[dict[str, Any]] = None) -> bool:
+    """Whether the custom endpoint at *base_url* declares ``capabilities: {fast_mode: true}``.
+
+    Fast-mode params otherwise reach only the first-party endpoint that bills for them; this flag is
+    the user's statement that a proxy forwards them. Off by default and keyed on the endpoint URL,
+    never on a provider label: every entry declaring that URL (deduplication skipped, so an alias
+    cannot hide) must opt in. With no URL, a named provider stands for the URL the runtime would
+    route it to (same credential-free lookup).
+    """
+    from hermes_cli.config import load_config_readonly
+    from hermes_cli.runtime_provider_custom import _get_named_custom_provider
+    if config is None:
+        config = load_config_readonly()
+    if not base_url and str(provider or "").strip().lower() not in ("", "custom"):
+        named = _get_named_custom_provider(str(provider), config=config, resolve_credentials=False)
+        base_url = (named or {}).get("base_url")
+    legacy = config.get("custom_providers")
+    entries = [e for e in map(_normalize_custom_provider_entry, legacy if isinstance(legacy, list) else []) if e]
+    entries += providers_dict_to_custom_providers(config.get("providers"))
+    target = normalize_route_base_url(base_url)
+    flags = {(e.get("capabilities") or {}).get("fast_mode") is True
+             for e in entries if target and normalize_route_base_url(e["base_url"]) == target}
+    return flags == {True}
+
+
 def get_custom_provider_context_length(
     model: str,
     base_url: str,

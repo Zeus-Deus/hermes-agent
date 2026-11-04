@@ -1429,6 +1429,8 @@ providers:
 
 `catalog_provider` accepts a Hermes provider id (`deepseek`, `anthropic`, `openai`, …) or a models.dev id. It affects metadata lookups only — requests still go to your `api` URL with your credentials — and an explicit `model_overrides` entry for the same model still wins.
 
+**Fast mode through a proxy (`capabilities.fast_mode`).** `/fast` params (`service_tier`, Anthropic `speed`) normally go only to first-party endpoints, so a named custom provider shows Fast as unavailable. If the endpoint is a proxy that forwards them to the first-party API, opt it in with `capabilities: {fast_mode: true}` on that provider entry. It is off by default and applies only to that entry's URL. See [Fast Mode](../user-guide/configuration.md#fast-mode).
+
 Switch between them mid-session with the triple syntax:
 
 ```
