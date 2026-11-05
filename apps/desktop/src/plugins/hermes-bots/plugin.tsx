@@ -35,8 +35,8 @@ import {
   $selectedBot,
   $selectedRosterHydrated,
   $selectedRosterKey,
-  focusedMentionProfile,
-  focusedMentionSender
+  liveConnectionId,
+  mentionSender
 } from './bot-state'
 import { isCanonicalChatOnScreen, openBotCanonicalChat } from './canonical-chat'
 import { BotChatEmpty } from './chat-empty'
@@ -157,14 +157,10 @@ export default {
             return []
           }
 
-          const active = focusedMentionProfile()
           const q = (query || '').toLowerCase()
           const items: MentionCompletionItem[] = []
 
-          const live = focusedMentionSender() || {
-            name: active,
-            connectionId: String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || 'local')
-          }
+          const live = mentionSender(roster?.servedConnectionId)
 
           const offered = profiles.filter(profile => profile?.name && !isActiveRosterBot(profile, live))
           // Two rows tagging alike (two remote defaults both titled "CoS Bot")
@@ -809,13 +805,6 @@ export default {
             return draft
           }
 
-          const sender = focusedMentionSender()
-
-          const live = sender || {
-            name: focusedMentionProfile(),
-            connectionId: String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || 'local')
-          }
-
           let cached = cachedUnionRoster()
 
           if (!Array.isArray(cached?.profiles)) {
@@ -827,9 +816,13 @@ export default {
           }
 
           const roster = Array.isArray(cached?.profiles) ? cached.profiles : null
-          let mentionedBots = roster ? resolveRosterMentions(text, roster, live) : []
+          let sender = mentionSender(cached?.servedConnectionId)
+          let mentionedBots = roster ? resolveRosterMentions(text, roster, sender) : []
 
           if (!roster) {
+            // host.request answers on the live socket: note which one before asking.
+            sender = mentionSender(liveConnectionId())
+
             try {
               const res = await host.request<{ profiles?: RosterRow[] }>('profiles.list', {
                 include_sessions: false
@@ -839,20 +832,12 @@ export default {
               // / ui_meta title) stay taggable when the roster cache is cold.
               // The same handle claim the pane applies: a real 'hermes'
               // profile keeps @hermes, so the default must not answer it too.
-              // Rows of the active gateway: stamp it, so a sender on another
-              // connection gets them qualified rather than bare.
-              const activeId = String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || '').trim()
-
-              mentionedBots = resolveRosterMentions(
-                text,
-                claimDefaultHandles(res?.profiles ?? []).map(bot =>
-                  activeId ? { ...bot, connectionId: activeId } : bot
-                ),
-                live
-              ).map(bot => ({
-                ...bot,
-                remoteSource: false
-              }))
+              mentionedBots = resolveRosterMentions(text, claimDefaultHandles(res?.profiles ?? []), sender).map(
+                bot => ({
+                  ...bot,
+                  remoteSource: false
+                })
+              )
             } catch {
               return draft
             }
@@ -894,7 +879,7 @@ export default {
             // otherwise the agent has only the alias to go on and the local
             // path rejects it the same way (#97678).
             const where = targetConnection
-              ? ` — on ${bot.connectionLabel || bot.connectionId} (message_agent target: "${target}")`
+              ? ` — on ${bot.connectionLabel || targetConnection} (message_agent target: "${target}")`
               : handle !== target
                 ? ` (message_agent target: "${target}")`
                 : ''

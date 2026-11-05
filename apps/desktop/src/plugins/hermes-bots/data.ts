@@ -767,6 +767,9 @@ interface RosterSnapshot {
   fetchedAt?: number
   primaryConnectionId?: string
   profiles?: RosterRow[]
+  /** The connection whose profiles.list answered (the cache key). Its rows
+   *  carry no connectionId when the union enumeration failed or skipped them. */
+  servedConnectionId?: string
   sources?: GatewaySource[]
 }
 
@@ -826,6 +829,13 @@ function traceRosterSnapshot(
 /** One roster snapshot for `activeConnectionId` — the pane's query and the
  *  composer's cold-cache prime (`primeRoster`) share it, so both see the same
  *  cross-connection rows. */
+/** The snapshot's serving connection, when the query key names one. */
+function servedBy(activeConnectionId: null | string | undefined): Pick<RosterSnapshot, 'servedConnectionId'> {
+  const servedConnectionId = String(activeConnectionId || '').trim()
+
+  return servedConnectionId ? { servedConnectionId } : {}
+}
+
 async function fetchRosterSnapshot(activeConnectionId: null | string | undefined): Promise<RosterSnapshot> {
   // Stamp the ISSUE time on the snapshot: mergeServerMeta compares it
   // against each bot's last local meta write, and a fetch issued before
@@ -884,6 +894,8 @@ async function fetchRosterSnapshot(activeConnectionId: null | string | undefined
   // carry a second copy. Older gateways lack the flag: keep appending.
   serverInjectsProtocol = Boolean(local?.bot_mode_protocol)
 
+  const served = servedBy(activeConnectionId)
+
   // Multi-source desktops (hermes-agent #86875) also expose the union
   // agent roster across every registered connection. Merge agents from
   // OTHER sources in as additional rows. Feature-detected + best-effort:
@@ -903,6 +915,7 @@ async function fetchRosterSnapshot(activeConnectionId: null | string | undefined
         ...merged,
         profiles,
         sources,
+        ...served,
         fetchedAt: issuedAt
       }
     } catch {
@@ -923,6 +936,7 @@ async function fetchRosterSnapshot(activeConnectionId: null | string | undefined
       return {
         ...merged,
         profiles,
+        ...served,
         fetchedAt: issuedAt
       }
     }
@@ -934,6 +948,7 @@ async function fetchRosterSnapshot(activeConnectionId: null | string | undefined
   return {
     ...(local && typeof local === 'object' ? local : {}),
     ...(Array.isArray(local?.profiles) ? { profiles } : {}),
+    ...served,
     fetchedAt: issuedAt
   }
 }
@@ -1339,26 +1354,36 @@ export function botMentionTag(bot: GroupMember | RosterRow): string {
  *  row with no connection, keep the roster's own remote/local split. */
 export function mentionTargetConnection(
   bot: Partial<RosterRow>,
-  sender: { connectionId: string } | null
+  sender: RosterOwnerRef | null | undefined
 ): string | undefined {
-  const botId = String(bot?.connectionId || '').trim()
+  const rowId = rowConnectionId(bot, sender)
 
-  if (sender && botId) {
-    return botId === sender.connectionId ? undefined : botId
+  if (sender?.exact && sender.connectionId && rowId) {
+    return rowId === sender.connectionId ? undefined : rowId
   }
 
+  const botId = String(bot?.connectionId || '').trim()
+
   return bot?.remoteSource && botId ? botId : undefined
+}
+
+/** The connection a row lives on: its own, else — for a rich (non-remote)
+ *  row — the gateway that answered the roster, when the ref knows it. */
+function rowConnectionId(bot: Partial<RosterRow> | null | undefined, ref: RosterOwnerRef | null | undefined): string {
+  return String(bot?.connectionId || (bot?.remoteSource ? '' : ref?.unscopedConnectionId) || '').trim()
 }
 
 /** Who a roster row is being compared against: a profile name plus the
  *  registry connection it lives on. Covers the focused chat's owner, the live
  *  gateway pair, and the bare `{ name }` the mention provider builds. */
-interface RosterOwnerRef {
+export interface RosterOwnerRef {
   connectionId?: null | string
   /** The pair is a known chat owner, not a guess: a row carrying a
    *  connection is the owner only when both halves match, 'local' included. */
   exact?: boolean
   name?: null | string
+  /** Where rows without a connectionId live: the roster's serving gateway. */
+  unscopedConnectionId?: null | string
 }
 
 export function isActiveRosterBot(
@@ -1374,8 +1399,10 @@ export function isActiveRosterBot(
   const botId = String(bot?.connectionId || '').trim()
   const botName = String(bot?.name || '').trim() || 'default'
 
-  if (active.exact && botId) {
-    return activeId === botId && botName === activeName
+  const rowId = rowConnectionId(bot, active)
+
+  if (active.exact && rowId) {
+    return activeId === rowId && botName === activeName
   }
 
   if (bot?.remoteSource) {

@@ -158,16 +158,28 @@ export const $focusedBotOwner = host.state.focusedSessionOwner || {
   }
 }
 
-/** The bot sending from the focused chat, as its complete connection/profile
- *  pair — what mention resolution must compare against. A Bot Chat opened on
- *  another connection leaves the Desktop's active connection elsewhere. Null
- *  unless the owner is authoritatively known. */
-export function focusedMentionSender(): { connectionId: string; exact: true; name: string } | null {
+/** The connection of the live gateway socket ('' when unknown). */
+export function liveConnectionId(): string {
+  return String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || '').trim()
+}
+
+/** The bot that reads a mention note: the focused chat's owner as its
+ *  complete connection/profile pair (`exact`) — a Bot Chat opened on another
+ *  connection leaves the Desktop's active connection elsewhere (#130260).
+ *  `unscopedConnectionId` names the gateway that served the roster rows
+ *  carrying no connection of their own. Without an authoritative owner, the
+ *  previous guess: focused profile on the active connection, not exact. */
+export function mentionSender(unscopedConnectionId?: string): {
+  connectionId: string
+  exact?: boolean
+  name: string
+  unscopedConnectionId?: string
+} {
   const owner = focusedRosterOwner($focusedBotOwner.get?.() ?? null)
 
   return owner?.authoritative && owner.connectionId
-    ? { connectionId: owner.connectionId, exact: true, name: owner.name }
-    : null
+    ? { connectionId: owner.connectionId, exact: true, name: owner.name, unscopedConnectionId }
+    : { connectionId: liveConnectionId() || 'local', name: focusedMentionProfile() }
 }
 
 export function focusedRosterOwner(

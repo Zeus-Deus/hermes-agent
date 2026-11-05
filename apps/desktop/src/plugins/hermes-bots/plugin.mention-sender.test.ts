@@ -175,6 +175,8 @@ beforeAll(async () => {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  hostMock.request.mockReset().mockResolvedValue({})
+  hostMock.agents.mockReset().mockResolvedValue({ agents: [], sources: [] })
   live.active = 'local'
   live.focused = 'ops'
   live.owner = { connectionId: 'server', profile: 'ops' }
@@ -253,6 +255,53 @@ describe('mention targets follow the focused chat owner, not the active connecti
     const { text } = await handler({ text: 'ask @writer' })
 
     expect(text).toContain('(message_agent target: "writer@local")')
+  })
+
+  it('names the connection the cold profiles.list was sent to, not the one active when it answers', async () => {
+    let answer: (value: unknown) => void = () => undefined
+
+    let asked = false
+
+    // The prime's profiles.list fails; the middleware's own fallback hangs until answered.
+    hostMock.request.mockImplementation(async (...args: unknown[]) => {
+      if (args[0] !== 'profiles.list') {
+        return {}
+      }
+
+      if ((args[1] as Record<string, unknown>)?.include_sessions !== false) {
+        throw new Error('offline')
+      }
+
+      asked = true
+
+      return new Promise(resolve => (answer = resolve))
+    })
+
+    const { handler } = await contributions({ profiles: null })
+    const pending = handler({ text: 'ask @writer' })
+
+    await vi.waitFor(() => expect(asked).toBe(true))
+    // The window moves to the server while this device's list is in flight.
+    live.active = 'server'
+    answer({ profiles: [{ name: 'default' }, { name: 'writer' }] })
+
+    expect((await pending).text).toContain('(message_agent target: "writer@local")')
+  })
+
+  it('places rows the union enumeration failed to scope on the gateway that served them', async () => {
+    // profiles.list answers, host.agents fails: the cached rows carry no connectionId.
+    hostMock.request.mockResolvedValue({ profiles: [{ name: 'default' }, { name: 'writer' }] })
+    hostMock.agents.mockRejectedValue(new Error('offline'))
+
+    const { handler } = await contributions({ profiles: null })
+
+    expect((await handler({ text: 'ask @writer' })).text).toContain('(message_agent target: "writer@local")')
+
+    // The server's own default is sending: this device's default is not "self".
+    live.owner = { connectionId: 'server', profile: 'default' }
+    live.focused = 'default'
+
+    expect((await handler({ text: 'ask @hermes' })).text).toContain('(message_agent target: "default@local")')
   })
 })
 
