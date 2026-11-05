@@ -158,3 +158,126 @@ def test_reply_waiter_prints_the_reply_whatever_the_dependency_state(tmp_path, r
 
     assert result.returncode == 0, result
     assert result.stdout.splitlines() == ["Reply from @researcher on ssh-vps:", "pong"]
+
+
+@pytest.fixture
+def home_without_ruamel(tmp_path, committed_home):
+    """``committed_home`` whose dependency generation lacks one package the live lane imports
+    (``ruamel``, via ``utils`` -> ``hermes_yaml``): the runner boots, then its admission import fails,
+    as when an update left the runner's environment short of a dependency."""
+    home, env = committed_home
+    shim = tmp_path / "shim"
+    (shim / "ruamel").mkdir(parents=True)
+    (shim / "ruamel" / "__init__.py").write_text(
+        "raise ModuleNotFoundError(\"No module named 'ruamel'\", name='ruamel')\n", encoding="utf-8")
+    pth = next(install_state_dir(REPO).glob("environments/gen/venv/**/hermes-test-deps.pth"))
+    pth.write_text(f"{shim}\n" + pth.read_text(encoding="utf-8"), encoding="utf-8")
+    return home, env
+
+
+def _admitted_dm(tmp_path, status="queued", **receipt):
+    """A DM the sender already admitted: its pinned intent, and the owner's receipt for it."""
+    profile_home = (tmp_path / "hermes" / "profiles" / "bob").resolve()
+    dm_file = tmp_path / "dm.txt"
+    dm_file.write_text("hello bob", encoding="utf-8")
+    delivery_id = _dm_delivery_id(str(dm_file))
+    owner = dict(profile_home=str(profile_home), session_id="s1", lease_id="l1", live_session_id="s1",
+                 canonical=True)
+    intent = Path(str(dm_file) + ".live.json")
+    intent.write_text(json.dumps(dict(owner=owner, message="hello bob", delivery_id=delivery_id)), encoding="utf-8")
+    receipts = profile_home / "runtime" / "bot_live_delivery"
+    receipts.mkdir(parents=True)
+    (receipts / f"{delivery_id}.json").write_text(json.dumps(dict(
+        delivery_id=delivery_id, profile_home=str(profile_home), session_id="s1", principal_id="alice",
+        message="hello bob", status=status, admission_id="adm-1", **receipt)), encoding="utf-8")
+    return profile_home, dm_file, intent
+
+
+def _live_runner(dm_file, profile_home):
+    return [*BARE, str(RUNNER), "--run-delivery", "query-file", str(dm_file), "--profile-home", str(profile_home),
+            "hermes", "-p", "bob"]
+
+
+def test_runner_import_failure_after_admission_reports_the_owners_receipt(tmp_path, home_without_ruamel):
+    """The sender admitted the DM and was told it is queued; its runner then dies on a missing
+    dependency. The owner's receipt proves the message reached the teammate, so the runner reports
+    that receipt, never 'Live admission outcome unknown' for a delivered message."""
+    _home, env = home_without_ruamel
+    profile_home, dm_file, intent = _admitted_dm(tmp_path)
+
+    result = _run(_live_runner(dm_file, profile_home), env)
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "queued", result
+    assert payload["delivery_id"] == _dm_delivery_id(str(dm_file))
+    assert "outcome unknown" not in result.stdout
+    assert "Delivered" in payload["detail"] and "No module named 'ruamel'" in payload["detail"]
+    assert "Do not resend" in payload["detail"]
+    assert payload["outcome"].startswith("@bob received the request")
+    assert result.returncode == 0  # as a lapsed wait on a queued receipt (``_wait_live_dm``)
+    assert dm_file.exists() and intent.exists()  # still pending: kept for a same-id replay
+
+
+def test_runner_import_failure_after_a_settled_reply_carries_the_reply(tmp_path, home_without_ruamel):
+    _home, env = home_without_ruamel
+    profile_home, dm_file, intent = _admitted_dm(tmp_path, status="settled", reply="pong")
+
+    result = _run(_live_runner(dm_file, profile_home), env)
+
+    payload = json.loads(result.stdout)
+    assert (payload["status"], payload["reply"], result.returncode) == ("settled", "pong", 0), result
+    assert payload["outcome"] == "@bob answered."
+    assert not dm_file.exists() and not intent.exists()  # settled: nothing replays it
+
+
+def test_runner_import_failure_without_an_owner_receipt_stays_ambiguous(tmp_path, home_without_ruamel):
+    """A pinned intent with no admission-backed receipt (the owner's pre-admission pin, or none)
+    proves nothing either way: the outcome stays unknown and the evidence is kept."""
+    _home, env = home_without_ruamel
+    profile_home, dm_file, intent = _admitted_dm(tmp_path)
+    receipt = profile_home / "runtime" / "bot_live_delivery" / f"{_dm_delivery_id(str(dm_file))}.json"
+    pin = {k: v for k, v in json.loads(receipt.read_text(encoding="utf-8")).items() if k != "admission_id"}
+    receipt.write_text(json.dumps({**pin, "status": "ambiguous"}), encoding="utf-8")
+
+    result = _run(_live_runner(dm_file, profile_home), env)
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ambiguous" and "No module named 'ruamel'" in payload["error"], result
+    assert result.returncode == 1
+    assert dm_file.exists() and intent.exists()
+
+
+def test_runner_import_failure_before_any_intent_is_a_definite_no_send(tmp_path, home_without_ruamel):
+    """Admission happens only under a pinned intent. A runner that dies on an import before one
+    exists sent nothing: a typed, resendable refusal, not 'outcome unknown, do not resend'."""
+    _home, env = home_without_ruamel
+    profile_home = tmp_path / "hermes" / "profiles" / "bob"
+    profile_home.mkdir(parents=True)
+    dm_file = tmp_path / "dm.txt"
+    dm_file.write_text("hello bob", encoding="utf-8")
+
+    result = _run(_live_runner(dm_file, profile_home), env)
+
+    payload = json.loads(result.stdout)
+    assert payload["reason"] == "runtime_unavailable" and "status" not in payload, result
+    assert "NOT sent" in payload["error"] and "No module named 'ruamel'" in payload["error"]
+    assert "Do not resend" not in payload["error"]
+    assert result.returncode == 1
+    assert dm_file.read_text(encoding="utf-8") == "hello bob"
+    assert not Path(str(dm_file) + ".live.json").exists()
+
+
+def test_runner_that_cannot_activate_after_admission_reports_the_owners_receipt(tmp_path, uncommittable_home):
+    """Boot failure (no dependency environment at all) with an admitted DM: the stdlib receipt
+    read still proves delivery, so the outcome is the receipt's, alongside the repair remedy."""
+    _home, env = uncommittable_home
+    profile_home, dm_file, intent = _admitted_dm(tmp_path, status="claimed")
+
+    result = _run(_live_runner(dm_file, profile_home), env)
+
+    assert result.returncode == 1, result
+    assert "hermes pm repair" in result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "claimed" and "Delivered" in payload["detail"]
+    assert "outcome unknown" not in result.stdout
+    assert dm_file.exists() and intent.exists()

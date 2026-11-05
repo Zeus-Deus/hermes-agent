@@ -371,3 +371,68 @@ def test_pre_dial_failure_on_a_retried_intent_stays_ambiguous(tmp_path, monkeypa
     with pytest.raises(live.PreDialError):
         bot_mode_dm._admit_live_dm(None, dm_file)
     assert intent.exists() and Path(dm_file).exists()
+
+
+def test_sender_failure_before_the_intent_is_pinned_is_a_definite_no_send(tmp_path, monkeypatch):
+    """The sender's own admission dying on an import (a stale or partial install) before it pinned
+    the intent admitted nothing: 'NOT sent, safe to resend', never 'could not be confirmed'."""
+    import sys
+
+    from tools import bot_mode_dm
+
+    dm_files = _spy_dm_files(bot_mode_dm, monkeypatch)
+    monkeypatch.setitem(sys.modules, "tools.bot_live_delivery", None)  # the import raises
+
+    payload = json.loads(bot_mode_dm._start_delivery(
+        ["hermes", "-p", "researcher"], "hello", "@researcher",
+        stdin_file=False, task_id=None, agent=None, profile_home=tmp_path))
+
+    assert payload["reason"] == "runtime_unavailable" and "status" not in payload
+    assert "NOT sent" in payload["error"] and "Do not resend" not in payload["error"]
+    assert not Path(dm_files[0]).exists()
+    assert not Path(dm_files[0] + ".live.json").exists()
+
+
+def test_sender_failure_after_the_intent_is_pinned_stays_ambiguous(tmp_path, monkeypatch):
+    """Past the pin the RPC may have admitted: the unknown outcome and its evidence are kept."""
+    from tools import bot_live_delivery as live
+    from tools import bot_mode_dm
+
+    def lost(home, params):
+        raise RuntimeError("connection reset after the RPC went out")
+
+    monkeypatch.setattr(live, "find_canonical_live_owner", lambda home: _owner(tmp_path))
+    monkeypatch.setattr(live, "authority_delivery", lost)
+    dm_files = _spy_dm_files(bot_mode_dm, monkeypatch)
+
+    payload = json.loads(bot_mode_dm._start_delivery(
+        ["hermes", "-p", "researcher"], "hello", "@researcher",
+        stdin_file=False, task_id=None, agent=None, profile_home=tmp_path))
+
+    assert payload["status"] == "ambiguous" and "Do not resend" in payload["error"]
+    assert Path(dm_files[0]).exists() and Path(dm_files[0] + ".live.json").exists()
+
+
+@pytest.mark.parametrize("change", ["message", "no_admission", "pin_status"])
+def test_owner_receipt_proves_admission_only_for_this_delivery(tmp_path, monkeypatch, change):
+    """The stdlib receipt read trusts only an admission-backed receipt of this exact delivery."""
+    from tools import bot_mode_dm
+
+    authority = _FakeAuthority()
+    monkeypatch.setattr(mailbox, "authority_delivery", authority)
+    monkeypatch.setattr(mailbox, "find_canonical_live_owner", lambda home: _owner(tmp_path))
+    dm_file = bot_mode_dm._write_dm_file("hello")
+    assert bot_mode_dm._admit_live_dm(tmp_path, dm_file)["status"] == "queued"
+    assert bot_mode_dm._owner_receipt(dm_file)["status"] == "queued"
+
+    path = tmp_path / "runtime" / mailbox.DELIVERY_DIR_NAME / f"{bot_mode_dm._dm_delivery_id(dm_file)}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if change == "message":
+        record["message"] = "something else"
+    elif change == "no_admission":
+        record.pop("admission_id")
+    else:
+        record["status"] = "ambiguous"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    assert bot_mode_dm._owner_receipt(dm_file) is None
+    assert bot_mode_dm._runner_failed_after_admission(dm_file, "boom") is None

@@ -510,6 +510,14 @@ class LiveTargetHeldError(LiveTargetUnavailableError):
         return HELD_NOT_SENT
 
 
+class DeliveryNotStartedError(LiveTargetUnavailableError):
+    """This side failed (a missing dependency, an unreadable payload) before any live intent was
+    pinned. Admission happens only under a pinned intent (``_admit_live_dm``), so nothing was sent
+    whatever the target's state: a definite no-send, never the ambiguous outcome."""
+
+    resend = "once that error is fixed"
+
+
 def _unavailable_payload(dm_file: str, exc: LiveTargetUnavailableError) -> str:
     return json.dumps({"reason": exc.reason, "delivery_id": _dm_delivery_id(dm_file),
                        "error": f"{exc} — the message was NOT sent; it is safe to resend {exc.resend}."})
@@ -684,6 +692,62 @@ def _live_outcome_unknown(dm_file: str, cause: object) -> str:
                        "evidence_file": dm_file})
 
 
+def _owner_receipt(dm_file: str) -> Optional[dict]:
+    """The target owner's own receipt for this DM's pinned delivery, or None when it does not
+    prove admission. Read straight from the receipt file the owner publishes (the
+    ``bot_live_delivery._root`` layout ``_poll_receipt`` reads, lock-free like it) with the stdlib
+    only, so a runner whose Hermes imports fail can still tell an admitted DM from an unknown one.
+    Only an ``admission_id`` proves admission: a pre-admission pin (``ambiguous``, no id) or a
+    refusal stays unknown here, as do a mismatched id or message."""
+    try:
+        intent = json.loads(Path(_live_intent_file(dm_file)).read_text(encoding="utf-8-sig"))
+        key = intent["delivery_id"]
+        if not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{32,64}", key) is None:
+            return None
+        path = Path(intent["owner"]["profile_home"]).resolve() / "runtime" / "bot_live_delivery" / f"{key}.json"
+        record = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if (not isinstance(record, dict) or record.get("delivery_id") != key or not record.get("admission_id")
+            or record.get("message") != intent.get("message")):
+        return None
+    status = "queued" if record.get("status") == "canonical" else record.get("status")
+    if status not in ("queued", "claimed", "settled", "failed", "cancelled"):
+        return None
+    return {**record, "status": status, "profile_home": str(path.parents[2])}
+
+
+def _runner_failed_after_admission(dm_file: str, cause: object) -> Optional[tuple[str, int]]:
+    """``(stdout, exit code)`` for a runner that failed (an import, a replay dial) after the owner
+    admitted its DM, or None when no owner receipt proves that admission. The sender pinned the
+    intent and admitted before it launched this runner, so the message reached the target: say so
+    with the receipt's own status, instead of 'admission outcome unknown'. The same shape and exit
+    code as ``_wait_live_dm`` for that status; its reply, if already published, is carried."""
+    record = _owner_receipt(dm_file)
+    if record is None:
+        return None
+    status = record["status"]
+    home = Path(record["profile_home"])
+    who = f"@{home.name}" if home.parent.name == "profiles" else "Your teammate"
+    payload = {key: record[key] for key in ("reply", "error", "reason") if record.get(key)}
+    payload.update(status=status, delivery_id=record["delivery_id"])
+    if status in ("queued", "claimed"):
+        payload["detail"] = (f"Delivered: the teammate's Bot Chat holds this request ({status}), but the delivery "
+                             f"runner failed before it could wait for the reply ({cause}). Do not resend; the "
+                             "reply will NOT wake you.")
+        outcome = (f"{who} received the request, but its answer will NOT wake you: the delivery runner failed "
+                   "before it could wait for it. Tell your user; do not resend.")
+    else:
+        if status == "settled":
+            # Settled: nothing replays this id any more (``_wait_live_dm`` drops the same files).
+            _unlink_dm_file(_live_intent_file(dm_file))
+            _unlink_dm_file(dm_file)
+        from tools.bot_mode_dm_outcome import outcome_line
+
+        outcome = outcome_line(who, payload)
+    return json.dumps({"outcome": outcome, **payload}), 0 if status in ("settled", "queued", "claimed") else 1
+
+
 def _runner_argv(args: list[str]) -> tuple[Optional[str], str, str, list[str]] | None:
     """Split ``--run-delivery [--author <json>] <mode> <dm_file> <argv…>`` into
     ``(author_json, mode, dm_file, argv)``; None when malformed. Stdlib only: the boot-failure
@@ -720,6 +784,15 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool,
                 print(_unavailable_payload(dm_file, exc))
                 return 1
             except Exception as exc:
+                if not os.path.exists(_live_intent_file(dm_file)):
+                    # No intent was ever pinned, so nothing could be admitted: a definite no-send.
+                    print(_unavailable_payload(dm_file, DeliveryNotStartedError(
+                        f"the delivery runner failed before live admission ({exc})")))
+                    return 1
+                known = _runner_failed_after_admission(dm_file, exc)
+                if known is not None:
+                    print(known[0])
+                    return known[1]
                 print(_live_outcome_unknown(dm_file, exc))
                 return 1
             if record is not None:
@@ -770,6 +843,10 @@ def _start_delivery(argv: list[str], content: str, label: str, *, stdin_file: bo
         except LiveTargetUnavailableError as exc:
             return _settled_no_send(dm_file, exc)
         except Exception as exc:
+            if not os.path.exists(_live_intent_file(dm_file)):
+                # Failed before the intent was pinned (e.g. an import): nothing could be admitted.
+                return _settled_no_send(dm_file, DeliveryNotStartedError(f"live admission failed before "
+                                                                          f"anything was sent ({exc})"))
             return json.dumps({"status": "ambiguous", "delivery_id": _dm_delivery_id(dm_file),
                 "error": f"Live delivery admission could not be confirmed: {exc}. Do not resend.",
                 "evidence_file": dm_file})
@@ -1043,7 +1120,9 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a background proce
             booted = getattr(exc, "relaunched", False) or (isinstance(exc, SystemExit) and not exc.code)
             parsed = _runner_argv(sys.argv[1:])
             if not booted and parsed and os.path.exists(_live_intent_file(parsed[2])):
-                print(_live_outcome_unknown(parsed[2], "the delivery runner could not activate "
-                                                       "Hermes dependencies (see stderr)"))
+                # The owner's own receipt, read with the stdlib, may prove the admission happened.
+                cause = "the delivery runner could not activate Hermes dependencies (see stderr)"
+                known = _runner_failed_after_admission(parsed[2], cause)
+                print(known[0] if known is not None else _live_outcome_unknown(parsed[2], cause))
             raise
     raise SystemExit(_delivery_main(sys.argv[1:]))
