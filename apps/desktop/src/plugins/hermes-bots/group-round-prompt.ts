@@ -8,6 +8,7 @@ import {
   groupThreadOf
 } from './group-chat'
 import { groupMemberKey } from './group-membership'
+import { agentFacingConnectionLabel, isDesktopLocalConnection } from './labels'
 import type { GroupMember, GroupMessage, GroupMessageAuthor } from './types'
 
 // Openers of Hermes' own control frames (the mid-turn steer marker, the compaction
@@ -222,11 +223,19 @@ export function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLine
   const viewerKey = groupMemberKey(viewer)
   const peers = members.filter(m => groupMemberKey(m) !== viewerKey)
 
+  // A viewer with no connection is local by the room's resolution rule (routing.ts).
+  const viewerOnDesktop = isDesktopLocalConnection(viewer) || (!viewer.connectionId && !viewer.remoteSource)
+
   const peerNames = peers
     .map(m => {
       const handle = m.title ? `${m.title} (@${botMentionTag(m)})` : `@${botMentionTag(m)}`
 
-      return m.remoteSource ? `${handle} [on ${m.connectionLabel || m.connectionId}]` : handle
+      // "This device" names the Desktop's machine only to a viewer on that machine.
+      const where =
+        agentFacingConnectionLabel(String(m.connectionLabel || ''), isDesktopLocalConnection(m) && !viewerOnDesktop) ||
+        m.connectionId
+
+      return m.remoteSource ? `${handle} [on ${where}]` : handle
     })
     .join(', ')
 

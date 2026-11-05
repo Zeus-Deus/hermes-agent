@@ -70,7 +70,7 @@ import { stickyGroupEngine } from './group-engine'
 import { groupWorkspaceOwnerKey } from './group-membership'
 import { annotateOrphanedGroupChatMembers } from './hygiene'
 import { BOTS_LOCALES } from './i18n'
-import { displayName } from './labels'
+import { agentFacingConnectionLabel, displayName, isDesktopLocalConnection } from './labels'
 import { startBotRelay, stopBotRelay } from './relay'
 import { $activityToasts } from './roster-actions'
 import {
@@ -872,12 +872,18 @@ export default {
                 ? `${bot.name}@${bot.connectionId}`
                 : botHandle(bot.name, { hermesHandleTaken: bot.hermesHandleTaken })
 
+            // The note is read by the active gateway's agent, which never lives on a
+            // remoteSource row's machine: the Desktop's own "This device" is not its device.
+            const machine =
+              agentFacingConnectionLabel(String(bot.connectionLabel || ''), isDesktopLocalConnection(bot)) ||
+              bot.connectionId
+
             // Local rows get the same annotation whenever their UI alias
             // ('default-this-device') differs from the resolvable handle —
             // otherwise the agent has only the alias to go on and the local
             // path rejects it the same way (#97678).
             const where = bot.remoteSource
-              ? ` — on ${bot.connectionLabel || bot.connectionId} (message_agent target: "${target}")`
+              ? ` — on ${machine} (message_agent target: "${target}")`
               : handle !== target
                 ? ` (message_agent target: "${target}")`
                 : ''

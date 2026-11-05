@@ -773,6 +773,38 @@ describe('the roster loop pushes the OTHER connections’ agents', () => {
     stopBotRelay()
   })
 
+  it.each([
+    ['This device', 'the machine running the Desktop app'],
+    ['Laptop', 'Laptop (the machine running the Desktop app)'],
+    ['', 'the machine running the Desktop app']
+  ])('names the Desktop’s own machine from the receiving gateway’s side (%j)', async (label, expected) => {
+    // Every pushed row is read by a gateway OTHER than its own. The registry calls the Desktop's
+    // own connection "This device"; a bot on the remote gateway told a teammate is "on This
+    // device" searched its OWN machine for it and gave up.
+    hostMock.connections = vi.fn(async () => [
+      { id: 'a', kind: 'local', label },
+      { id: 'b', kind: 'remote', label: 'Server' }
+    ])
+
+    const calls = respondWith(call =>
+      call.method === 'profiles.list' ? { profiles: [{ name: call.connectionId }] } : {}
+    )
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+
+    const pushedTo = (id: string) =>
+      calls.find(call => call.method === 'bot_relay.roster.sync' && call.connectionId === id)?.params.agents
+
+    expect(pushedTo('b')).toEqual([expect.objectContaining({ connection_id: 'a', connection_label: expected })])
+    // A remote connection keeps its own label.
+    expect(pushedTo('a')).toEqual([expect.objectContaining({ connection_id: 'b', connection_label: 'Server' })])
+
+    stopBotRelay()
+  })
+
   it('drops the cached rows of a connection that genuinely disconnected', async () => {
     const calls = respondWith(call =>
       call.method === 'profiles.list' ? { profiles: [{ name: call.connectionId }] } : {}

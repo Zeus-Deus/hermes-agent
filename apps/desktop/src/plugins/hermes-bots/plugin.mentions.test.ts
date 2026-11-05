@@ -61,7 +61,7 @@ const ROSTER = {
 }
 
 const { cache, hostMock, live } = vi.hoisted(() => {
-  const live = { focused: 'default', profile: 'default', stored: null as string | null }
+  const live = { connection: 'local', focused: 'default', profile: 'default', stored: null as string | null }
 
   return {
     cache: new Map<string, { key: unknown[]; value: unknown }>(),
@@ -76,7 +76,7 @@ const { cache, hostMock, live } = vi.hoisted(() => {
         })
       ),
       state: {
-        connectionId: { get: () => 'local', listen: () => () => undefined },
+        connectionId: { get: () => live.connection, listen: () => () => undefined },
         focusedSessionProfile: { get: () => live.focused, listen: () => () => undefined },
         focusedStoredSessionId: { get: () => live.stored, listen: () => () => undefined },
         gateway: { get: () => null, listen: () => () => undefined },
@@ -191,6 +191,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  live.connection = 'local'
   live.focused = 'default'
   live.profile = 'default'
   live.stored = null
@@ -530,6 +531,37 @@ describe('the mention middleware', () => {
     expect(result.text).toMatch(/message_agent target: "default@vps"/)
     // The prime filled the cache: the picker now completes the remote title slug too.
     expect(provide('cos').map(item => item.insert)).toEqual(['@cos-bot'])
+  })
+
+  it('names the Desktop’s own machine from the reading agent’s side, never as "This device"', async () => {
+    // The note is read by the ACTIVE gateway's agent. Chatting with a bot on the server, a tag of
+    // a bot on the Desktop's own machine said "on This device" — the server's bot searched its own
+    // machine for it and concluded it was unreachable.
+    live.connection = 'server'
+
+    const { handler } = await contributions({
+      cacheKeyConnection: 'server',
+      focused: 'bob',
+      profiles: [
+        { connectionId: 'server', connectionKind: 'remote', connectionLabel: 'Server', name: 'bob', sourceScoped: true },
+        {
+          connectionId: 'local',
+          connectionKind: 'local',
+          connectionLabel: 'This device',
+          handle: 'alice',
+          name: 'alice',
+          remoteSource: true,
+          sourceScoped: true
+        }
+      ]
+    })
+
+    const result = await handler({ text: 'ask @alice for the notes' })
+
+    expect(result.text).toMatch(
+      /@alice = agent profile "alice" — on the machine running the Desktop app \(message_agent target: "alice@local"\)/
+    )
+    expect(result.text).not.toMatch(/This device/)
   })
 
   it('ignores an email address', async () => {

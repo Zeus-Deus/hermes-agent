@@ -127,6 +127,27 @@ export function botProfileIdentity(name: string, title: string) {
   }
 }
 
+/** The Desktop's own connection (registry id `local`, kind `local`). */
+export function isDesktopLocalConnection(connection: { connectionId?: unknown; connectionKind?: unknown }): boolean {
+  return connection.connectionKind === 'local' || connection.connectionId === 'local'
+}
+
+/** How a machine is named to an AGENT. The registry labels the Desktop's own
+ *  connection "This device" — true for the person at the Desktop, false for an
+ *  agent on another gateway: told a teammate is "on This device", it searched
+ *  its own machine and gave up. Other connections keep their label. */
+export function agentFacingConnectionLabel(label: string, desktopLocal: boolean): string {
+  const shown = label.trim()
+
+  if (!desktopLocal) {
+    return shown
+  }
+
+  return shown && shown.toLowerCase() !== 'this device'
+    ? `${shown} (the machine running the Desktop app)`
+    : 'the machine running the Desktop app'
+}
+
 /** Flatten markdown syntax out of a one-line roster preview so rows read
  *  like Discord's — no raw **bold**, `code`, > quotes, or [link](url)
  *  characters in the preview line. */

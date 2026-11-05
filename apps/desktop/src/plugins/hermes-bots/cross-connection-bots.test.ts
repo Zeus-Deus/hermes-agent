@@ -176,6 +176,26 @@ describe('a group room seats members from several machines', () => {
     ).toMatch(/@dixie \[on Mac Mini\]/)
   })
 
+  it('names the Desktop’s own machine from a remote viewer’s side in turn prompts', () => {
+    // "This device" is the Desktop's own connection — the viewer's machine only when the viewer
+    // lives there too. A viewer on another gateway reading "[on This device]" took it for its own.
+    const members = [
+      { connectionId: 'local', connectionKind: 'local', connectionLabel: 'This device', name: 'alice', remoteSource: true },
+      { connectionId: 'server', connectionKind: 'remote', connectionLabel: 'Server', name: 'bob', remoteSource: true },
+      { connectionId: 'local', connectionKind: 'local', connectionLabel: 'This device', name: 'carol', remoteSource: true }
+    ] as GroupMember[]
+
+    const header = (viewer: GroupMember) =>
+      buildGroupChatTurnPrompt({ deltaLines: [], groupName: 'g', members, viewer }).split('\n')[0]
+
+    const fromServer = header(members[1])
+    expect(fromServer).toMatch(/@alice \[on the machine running the Desktop app\]/)
+    expect(fromServer).not.toMatch(/This device/)
+
+    // A viewer on the Desktop's machine keeps the label it shares with the user.
+    expect(header(members[2])).toMatch(/@alice \[on This device\], @bob \[on Server\]/)
+  })
+
   it('does not self-attribute a same-named default on another connection (#106851)', () => {
     // Cross-connection same profile name must not self-attribute in model prompt lines.
     const line = formatGroupChatLine(

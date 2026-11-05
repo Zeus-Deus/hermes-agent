@@ -10,6 +10,7 @@
 import { host, LruCache } from '@hermes/plugin-sdk'
 
 import { botHandle, clearBotAttention, noteBotAttention } from './data'
+import { agentFacingConnectionLabel, isDesktopLocalConnection } from './labels'
 import { RELAY_DELIVER_TIMEOUT_MS } from './relay-budget'
 import { ID } from './shared'
 import type { ProfileRoute, RosterRow } from './types'
@@ -295,7 +296,8 @@ function peerCount(connections: RelayConnection[]): number {
  *  A `host.profileRoutes()` route carries identity alone, so without this the roster a
  *  peer gateway shows its bots ("@chii on 127-0-0-1-9119", tools/bot_mode_probe.py) and
  *  its refusal text name machines by raw connection id. A build with no registry rejects
- *  the call, and ids stay. */
+ *  the call, and ids stay. Every row is read by a gateway OTHER than its own, so the
+ *  Desktop's own connection is named from that reader's side, never "This device". */
 async function connectionLabels(): Promise<Map<string, string>> {
   if (typeof host.connections !== 'function') {
     return new Map()
@@ -306,7 +308,12 @@ async function connectionLabels(): Promise<Map<string, string>> {
 
     return new Map(
       (Array.isArray(rows) ? rows : [])
-        .map(row => [String(row?.id || ''), String(row?.label || '').trim()] as const)
+        .map(row => {
+          const id = String(row?.id || '')
+          const desktopLocal = isDesktopLocalConnection({ connectionId: id, connectionKind: row?.kind })
+
+          return [id, agentFacingConnectionLabel(String(row?.label || ''), desktopLocal)] as const
+        })
         .filter(([id, label]) => Boolean(id && label))
     )
   } catch {
