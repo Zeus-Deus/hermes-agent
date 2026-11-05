@@ -158,6 +158,18 @@ export const $focusedBotOwner = host.state.focusedSessionOwner || {
   }
 }
 
+/** The bot sending from the focused chat, as its complete connection/profile
+ *  pair — what mention resolution must compare against. A Bot Chat opened on
+ *  another connection leaves the Desktop's active connection elsewhere. Null
+ *  unless the owner is authoritatively known. */
+export function focusedMentionSender(): { connectionId: string; exact: true; name: string } | null {
+  const owner = focusedRosterOwner($focusedBotOwner.get?.() ?? null)
+
+  return owner?.authoritative && owner.connectionId
+    ? { connectionId: owner.connectionId, exact: true, name: owner.name }
+    : null
+}
+
 export function focusedRosterOwner(
   owner: {
     authoritative?: boolean

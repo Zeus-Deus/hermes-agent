@@ -1331,11 +1331,33 @@ export function botMentionTag(bot: GroupMember | RosterRow): string {
   return botHandle(bot?.name, bot)
 }
 
+/** The connection a mention of `bot` must be qualified with for the bot that
+ *  sends it, or undefined for the bare local form. Locality is decided
+ *  against the SENDER's connection, never the Desktop's active one: the
+ *  sender's gateway resolves bare names to its own bots, and its relay roster
+ *  lists only the other connections (#130260). Without a known sender, or a
+ *  row with no connection, keep the roster's own remote/local split. */
+export function mentionTargetConnection(
+  bot: Partial<RosterRow>,
+  sender: { connectionId: string } | null
+): string | undefined {
+  const botId = String(bot?.connectionId || '').trim()
+
+  if (sender && botId) {
+    return botId === sender.connectionId ? undefined : botId
+  }
+
+  return bot?.remoteSource && botId ? botId : undefined
+}
+
 /** Who a roster row is being compared against: a profile name plus the
  *  registry connection it lives on. Covers the focused chat's owner, the live
  *  gateway pair, and the bare `{ name }` the mention provider builds. */
 interface RosterOwnerRef {
   connectionId?: null | string
+  /** The pair is a known chat owner, not a guess: a row carrying a
+   *  connection is the owner only when both halves match, 'local' included. */
+  exact?: boolean
   name?: null | string
 }
 
@@ -1351,6 +1373,10 @@ export function isActiveRosterBot(
   const activeId = String(active?.connectionId || '').trim()
   const botId = String(bot?.connectionId || '').trim()
   const botName = String(bot?.name || '').trim() || 'default'
+
+  if (active.exact && botId) {
+    return activeId === botId && botName === activeName
+  }
 
   if (bot?.remoteSource) {
     return Boolean(activeId) && activeId === botId && botName === activeName

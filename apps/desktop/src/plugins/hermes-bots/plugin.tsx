@@ -35,7 +35,8 @@ import {
   $selectedBot,
   $selectedRosterHydrated,
   $selectedRosterKey,
-  focusedMentionProfile
+  focusedMentionProfile,
+  focusedMentionSender
 } from './bot-state'
 import { isCanonicalChatOnScreen, openBotCanonicalChat } from './canonical-chat'
 import { BotChatEmpty } from './chat-empty'
@@ -49,6 +50,7 @@ import {
   cachedUnionRoster,
   claimDefaultHandles,
   isActiveRosterBot,
+  mentionTargetConnection,
   migrateBotMeta,
   primeRoster,
   resolveRosterMentions
@@ -159,7 +161,7 @@ export default {
           const q = (query || '').toLowerCase()
           const items: MentionCompletionItem[] = []
 
-          const live = {
+          const live = focusedMentionSender() || {
             name: active,
             connectionId: String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || 'local')
           }
@@ -807,7 +809,9 @@ export default {
             return draft
           }
 
-          const live = {
+          const sender = focusedMentionSender()
+
+          const live = sender || {
             name: focusedMentionProfile(),
             connectionId: String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || 'local')
           }
@@ -835,7 +839,17 @@ export default {
               // / ui_meta title) stay taggable when the roster cache is cold.
               // The same handle claim the pane applies: a real 'hermes'
               // profile keeps @hermes, so the default must not answer it too.
-              mentionedBots = resolveRosterMentions(text, claimDefaultHandles(res?.profiles ?? []), live).map(bot => ({
+              // Rows of the active gateway: stamp it, so a sender on another
+              // connection gets them qualified rather than bare.
+              const activeId = String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || '').trim()
+
+              mentionedBots = resolveRosterMentions(
+                text,
+                claimDefaultHandles(res?.profiles ?? []).map(bot =>
+                  activeId ? { ...bot, connectionId: activeId } : bot
+                ),
+                live
+              ).map(bot => ({
                 ...bot,
                 remoteSource: false
               }))
@@ -867,16 +881,19 @@ export default {
             // neither resolver accepts — annotate the canonical form instead.
             // The default's canonical form is 'hermes' only while no real
             // 'hermes' profile holds it; then it is 'default' itself.
-            const target =
-              bot.remoteSource && bot.connectionId
-                ? `${bot.name}@${bot.connectionId}`
-                : botHandle(bot.name, { hermesHandleTaken: bot.hermesHandleTaken })
+            // A row on the sender's own connection is local to it, whatever
+            // the roster's remote flag says (#130260).
+            const targetConnection = mentionTargetConnection(bot, sender)
+
+            const target = targetConnection
+              ? `${bot.name}@${targetConnection}`
+              : botHandle(bot.name, { hermesHandleTaken: bot.hermesHandleTaken })
 
             // Local rows get the same annotation whenever their UI alias
             // ('default-this-device') differs from the resolvable handle —
             // otherwise the agent has only the alias to go on and the local
             // path rejects it the same way (#97678).
-            const where = bot.remoteSource
+            const where = targetConnection
               ? ` — on ${bot.connectionLabel || bot.connectionId} (message_agent target: "${target}")`
               : handle !== target
                 ? ` (message_agent target: "${target}")`
