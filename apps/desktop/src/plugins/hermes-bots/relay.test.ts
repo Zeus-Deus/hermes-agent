@@ -1677,33 +1677,60 @@ describe("the Desktop's own machine goes out under its install id, never the sha
     stopBotRelay()
   })
 
-  it('refuses a target that names both this machine and a registry connection', async () => {
-    hostMock.profileRoutes = vi.fn(async () => [route('local', { mode: 'local' }), route('srv'), route(OWN)])
+  it('never relays a registry connection whose id falls in the local-<hex> namespace', async () => {
+    // Its label slugged into the name every Desktop gives its own machine: on this Desktop it
+    // would shadow this machine, on another it would capture that Desktop's machine.
+    hostMock.profileRoutes = vi.fn(async () => [
+      route('local', { mode: 'local' }),
+      route('srv'),
+      route(OWN),
+      route('local-aaaaaaaaaaaa')
+    ])
 
-    const calls = serve({ envelopes: { srv: [envelope] } })
+    const calls = serve({
+      envelopes: {
+        [OWN]: [{ ...envelope, id: 'env-shadow', target_connection: 'srv', target_profile: 'scout' }],
+        srv: [envelope, { ...envelope, id: 'env-other', target_connection: 'local-aaaaaaaaaaaa' }]
+      }
+    })
+
     const { startBotRelay, stopBotRelay } = await loadRelay()
 
     startBotRelay()
     await vi.advanceTimersByTimeAsync(0)
     await pushAndSettle()
 
-    expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
-    expect(calls.find(call => call.method === 'bot_relay.reply')?.params.error).toMatch(/names two machines/)
+    const reserved = new Set([OWN, 'local-aaaaaaaaaaaa'])
+
+    expect(calls.filter(call => reserved.has(call.connectionId))).toEqual([])
+    expect(
+      calls.filter(call => call.method === 'bot_relay.deliver').map(call => [call.params.id, call.connectionId])
+    ).toEqual([['env-l', 'local']])
+    expect(calls.filter(call => call.method === 'bot_relay.reply').map(call => call.params.id)).toEqual(['env-l'])
 
     stopBotRelay()
   })
 
-  it('a registry connection that happens to be named local-… is still that connection', async () => {
-    hostMock.profileRoutes = vi.fn(async () => [route('local', { mode: 'local' }), route('local-0000aaaa1111')])
-
-    const calls = serve({ envelopes: { local: [{ ...envelope, target_connection: 'local-0000aaaa1111' }] } })
+  it('leaves its own id to whoever relays this machine once its local route drops out', async () => {
+    const calls = serve({ envelopes: { srv: [] } })
     const { startBotRelay, stopBotRelay } = await loadRelay()
 
     startBotRelay()
     await vi.advanceTimersByTimeAsync(0)
+
+    // Identity learned; then the Desktop switches to a remote primary and stops relaying 'local'.
+    hostMock.profileRoutes = vi.fn(async () => [route('srv'), route('nas')])
+    calls.length = 0
+    ;(hostMock.requestProfile as ReturnType<typeof vi.fn>).mockImplementation(
+      async (target: ProfileRoute, method: string) => {
+        calls.push({ connectionId: target.connectionId, method, params: {}, route: target })
+
+        return method === 'bot_relay.outbox.drain' && target.connectionId === 'srv' ? { envelopes: [envelope] } : {}
+      }
+    )
     await pushAndSettle()
 
-    expect(calls.find(call => call.method === 'bot_relay.deliver')?.connectionId).toBe('local-0000aaaa1111')
+    expect(calls.filter(call => call.method === 'bot_relay.deliver' || call.method === 'bot_relay.reply')).toEqual([])
 
     stopBotRelay()
   })

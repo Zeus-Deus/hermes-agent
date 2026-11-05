@@ -325,7 +325,14 @@ async function relayConnections(): Promise<RelayConnection[]> {
 
   try {
     const rawRoutes = await host.profileRoutes()
-    const routes = relayEligibleRoutes(Array.isArray(rawRoutes) ? rawRoutes : [])
+
+    // `local-<hex>` is the relay's name for a Desktop's OWN machine on every gateway: a registry
+    // connection whose label slugs into that namespace would be indistinguishable from one (on
+    // this Desktop or any other), so it is not relayed at all.
+    const routes = relayEligibleRoutes(Array.isArray(rawRoutes) ? rawRoutes : []).filter(
+      route => !LOCAL_RELAY_ID_RE.test(String(route?.connectionId || '').toLowerCase())
+    )
+
     const byConnection = new Map<string, ProfileRoute>()
 
     for (const route of routes) {
@@ -780,16 +787,17 @@ async function settleRelayDelivery(
 
 /** The connection an envelope's `target_connection` names on THIS Desktop; 'foreign' when it
  *  names another Desktop's local machine, 'unresolved' when that depends on an id this Desktop
- *  has not learned yet. A registry id wins over the local-machine forms (a connection may be
- *  named 'local-…'), except the bare 'local' once this Desktop hands out its own
- *  `local-<install>`: from then on only an older Desktop's roster says 'local'. */
+ *  has not learned yet. Registry ids never use the `local-<hex>` namespace (relayConnections),
+ *  and the bare 'local' is this machine only while its gateway reports no install id: from
+ *  then on only an older Desktop's roster says 'local'. */
 function relayTargetOf(
   id: string,
   byId: Map<string, RelayConnection>
-): RelayConnection | 'collision' | 'foreign' | 'unresolved' | undefined {
+): RelayConnection | 'foreign' | 'unresolved' | undefined {
   if (localRelayId !== null && id.toLowerCase() === localRelayId) {
-    // A registry connection labelled into the very same id: two machines answer to it here.
-    return byId.has(id) && id !== LOCAL_CONNECTION_ID ? 'collision' : byId.get(LOCAL_CONNECTION_ID)
+    // Our machine, but not relayed by this renderer right now (e.g. a remote primary): leave it
+    // to whoever relays it — a "not connected" reply would beat that delivery's real answer.
+    return byId.get(LOCAL_CONNECTION_ID) ?? 'foreign'
   }
 
   if (id !== LOCAL_CONNECTION_ID && byId.has(id)) {
@@ -858,7 +866,7 @@ function actionableTarget(
   envelopeId: string,
   byId: Map<string, RelayConnection>,
   pending: Map<string, RelayEnvelope>
-): RelayConnection | 'collision' | null | undefined {
+): RelayConnection | null | undefined {
   const target = relayTargetOf(String(envelope?.target_connection || ''), byId)
 
   if (target === 'foreign') {
@@ -910,12 +918,9 @@ async function deliverRelayEnvelope(
     }
   }
 
-  if (!target || target === 'collision') {
+  if (!target) {
     await postReply({
-      error:
-        target === 'collision'
-          ? `connection '${envelope?.target_connection}' names two machines on this Desktop — rename that connection`
-          : `connection '${envelope?.target_connection}' is not connected to this Desktop right now`
+      error: `connection '${envelope?.target_connection}' is not connected to this Desktop right now`
     })
 
     return
