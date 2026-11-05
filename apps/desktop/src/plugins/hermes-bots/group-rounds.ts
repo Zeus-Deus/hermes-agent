@@ -908,12 +908,19 @@ export function sendToGroupChat(
   }
 
   const target = thread || mintGroupThreadId()
-  // A seat on a connection this Desktop does not have answers no mention and
-  // takes no hold: it would shadow the reachable member's @handle.
+  // A seat on a connection this Desktop does not have must not shadow the
+  // reachable seat of the same bot: mentions and holds resolve last-wins,
+  // and the phantom is seated after live rows. Only such a twin is dropped —
+  // the registry view may lag a just-added connection, and a seat with no
+  // reachable twin keeps its mention and hold (the drive re-checks).
   const registered = lastRegisteredConnections
 
+  const suspect = (member: GroupMember) =>
+    Boolean(member?.sourceMissing) || Boolean(registered && onUnregisteredConnection(member, registered))
+
   const reachable = members.filter(
-    (member: GroupMember) => !member?.sourceMissing && !(registered && onUnregisteredConnection(member, registered))
+    (member: GroupMember) =>
+      !suspect(member) || !members.some(other => other !== member && other.name === member.name && !suspect(other))
   )
 
   $groupNeedsYou.set({

@@ -201,6 +201,20 @@ describe('a member seated on a connection this Desktop does not have', () => {
     expect(byKey.get('local::alice')?.sourceMissing).toBeUndefined()
   })
 
+  it('still holds a member on a connection added after the last registry read', async () => {
+    const room = await loadRoom(['local'], { turn: () => 'on it' })
+    room.chat.$groupChats.set({ g: { log: [], members: [ALICE, BOB], roomId: 'room', sessions: {}, watermarks: {} } })
+    // The send path's view predates the new `server` connection …
+    await room.rounds.registeredConnectionIds()
+    // … which the registry (and so the drive) already has.
+    host.connections = async () => [{ id: 'local' }, { id: 'server' }]
+
+    await send(room, 'stop @bob')
+
+    expect(Object.keys(room.chat.$groupChats.get().g.holds || {})).toEqual(['server::bob'])
+    expect(room.routed).not.toContain('server::bob')
+  })
+
   it('does not start a thread that a Stop cancelled while the registry was being read', async () => {
     const room = await loadRoom(null, { turn: () => 'on it' })
     let release: (rows: unknown[]) => void = () => undefined
