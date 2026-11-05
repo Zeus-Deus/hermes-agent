@@ -1246,8 +1246,10 @@ async function runGroupChatMemberTurnLeased(
       return null
     }
 
+    const room = $groupChats.get()[group]
+
     const roomContext = fresh
-      ? formatFreshThreadRoomContext($groupChats.get()[group]?.log || [], member, thread, group)
+      ? formatFreshThreadRoomContext(room?.log || [], member, thread, group, room?.members || [])
       : []
 
     const contextualPrompt = addFreshThreadRoomContext(prompt, roomContext)

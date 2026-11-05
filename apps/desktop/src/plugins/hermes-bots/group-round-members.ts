@@ -134,7 +134,7 @@ function prepareGroupRoundMember(context: GroupRoundMemberContext, member: Group
     groupName: context.group,
     members,
     viewer: member,
-    deltaLines: formatGroupDeltaLines(visibleDelta, member, context.group)
+    deltaLines: formatGroupDeltaLines(visibleDelta, member, context.group, members)
   })
 
   // Images riding this delta (user attachments — member entries don't

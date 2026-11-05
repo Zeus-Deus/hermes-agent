@@ -228,6 +228,58 @@ describe('a group room seats members from several machines', () => {
     )
   })
 
+  it('badges a transcript speaker by its connection, not by the label text', () => {
+    // The user renamed the Desktop's own connection "Laptop" and named a remote one "This
+    // device" — the registry accepts both. The label no longer says which machine is whose.
+    const members = [
+      { connectionId: 'local', connectionKind: 'local', connectionLabel: 'Laptop', installId: 'gw-laptop', name: 'alice', remoteSource: true },
+      { connectionId: 'server', connectionKind: 'remote', connectionLabel: 'This device', installId: 'gw-server', name: 'bob', remoteSource: true },
+      { connectionId: 'mini', connectionKind: 'remote', connectionLabel: 'Mini', name: 'carol', remoteSource: true }
+    ] as GroupMember[]
+
+    const fromAlice = { at: 1, from: groupMemberAuthor(members[0]), text: 'Notes are on my disk.' }
+    const fromBob = { at: 2, from: groupMemberAuthor(members[1]), text: 'Build is green.' }
+
+    const lines = (viewer: GroupMember) => formatGroupDeltaLines([fromAlice, fromBob], viewer, 'g', members)
+
+    // A viewer on another gateway: alice is on the Desktop's machine, bob is on his own.
+    expect(lines(members[2])).toEqual([
+      'alice [Laptop (the machine running the Desktop app)]: Notes are on my disk.',
+      'bob [This device]: Build is green.'
+    ])
+
+    // A viewer on the Desktop's machine reads the labels it shares with the user.
+    const local = { connectionId: 'local', connectionKind: 'local', connectionLabel: 'Laptop', name: 'dave' } as GroupMember
+    expect(lines(local)).toEqual(['alice [Laptop]: Notes are on my disk.', 'bob [This device]: Build is green.'])
+
+    // A pre-rename entry still resolves by its gateway identity, whatever its stored label.
+    const stale = { at: 3, from: { gateway: 'gw-laptop', kind: 'member' as const, name: 'alice', source: 'This device' }, text: 'old' }
+    expect(formatGroupChatLine(stale, members[2], 'g', members)).toBe('alice [the machine running the Desktop app]: old')
+
+    // A badge no roster connection claims is a name, not a point of view: it stays verbatim
+    // once the roster shows the Desktop's own connection goes by another label.
+    const departed = { at: 4, from: { kind: 'member' as const, name: 'erin', source: 'This device' }, text: 'bye' }
+    expect(formatGroupChatLine(departed, members[2], 'g', members)).toBe('erin [This device]: bye')
+
+    // A same-labelled connection with a different gateway identity is not the speaker's.
+    const twin = [
+      { connectionId: 'local', connectionKind: 'local', connectionLabel: 'This device', installId: 'gw-a', name: 'alice' },
+      members[2]
+    ] as GroupMember[]
+
+    const mirrored = { at: 5, from: { gateway: 'gw-b', kind: 'member' as const, name: 'alice', source: 'This device' }, text: 'hi' }
+    expect(formatGroupChatLine(mirrored, members[2], 'g', twin)).toBe('alice [This device]: hi')
+    expect(formatGroupChatLine({ ...mirrored, from: { ...mirrored.from, gateway: 'gw-a' } }, members[2], 'g', twin)).toBe(
+      'alice [the machine running the Desktop app]: hi'
+    )
+
+    // Only with no roster at all is the registry's default label read as the Desktop's machine.
+    expect(formatGroupChatLine(departed, members[2], 'g')).toBe('erin [the machine running the Desktop app]: bye')
+
+    // The stored stamp is the identity token and is never rewritten.
+    expect(fromBob.from.source).toBe('This device')
+  })
+
   it('does not self-attribute a same-named default on another connection (#106851)', () => {
     // Cross-connection same profile name must not self-attribute in model prompt lines.
     const line = formatGroupChatLine(

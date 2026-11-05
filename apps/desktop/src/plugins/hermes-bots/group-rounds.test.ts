@@ -384,6 +384,44 @@ describe('round lifecycle', () => {
       expect([...presence.$activeGroupMemberKeys.get()]).toEqual(outcome === 'newer-turn' ? ['remote::default'] : [])
     }
   })
+  it('badges transcript speakers from the room roster, not from the label text', async () => {
+    // The Desktop's own connection was renamed "Laptop"; a remote one is called "This device".
+    const room = await loadRoom()
+    const { runGroupRoundMember } = await import('./group-round-members')
+    const { groupMemberAuthor } = await import('./group-membership')
+
+    const members: GroupMember[] = [
+      { connectionId: 'local', connectionKind: 'local', connectionLabel: 'Laptop', name: 'alice', sourceScoped: true },
+      { connectionId: 'server', connectionKind: 'remote', connectionLabel: 'This device', name: 'bob', remoteSource: true, sourceScoped: true },
+      { connectionId: 'mini', connectionKind: 'remote', connectionLabel: 'Mini', name: 'carol', remoteSource: true, sourceScoped: true }
+    ]
+
+    room.chat.updateGroupChat('Room', state => ({ ...state, members, running: true, epoch: 1 }))
+    // An older thread the viewer's fresh session gets as room context, and the live thread.
+    room.chat.appendGroupChatEntry('Room', groupMemberAuthor(members[1]), 'Old build is green.', 't0')
+    room.chat.appendGroupChatEntry('Room', groupMemberAuthor(members[0]), 'Old notes are on my disk.', 't0')
+    room.chat.appendGroupChatEntry('Room', { kind: 'user', name: 'You' }, 'status?', 't1')
+    room.chat.appendGroupChatEntry('Room', groupMemberAuthor(members[1]), 'Build is green.', 't1')
+
+    await runGroupRoundMember(
+      {
+        group: 'Room',
+        members,
+        thread: 't1',
+        startEpoch: 1,
+        binding: { isLive: () => true },
+        isCurrent: () => room.chat.$groupChats.get().Room.epoch === 1
+      },
+      members[2]
+    )
+
+    const prompt = String(room.gateway.calls[0]?.prompt || '')
+
+    expect(prompt).toContain('bob [This device]: Build is green.')
+    expect(prompt).toContain('bob [This device]: Old build is green.')
+    expect(prompt).toContain('alice [Laptop (the machine running the Desktop app)]: Old notes are on my disk.')
+  })
+
   it('settles when everyone passes, logging only the user message', async () => {
     const room = await loadRoom()
 

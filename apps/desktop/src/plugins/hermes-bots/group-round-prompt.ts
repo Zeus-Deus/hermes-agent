@@ -7,7 +7,7 @@ import {
   groupSpeakerLabel,
   groupThreadOf
 } from './group-chat'
-import { groupMemberKey } from './group-membership'
+import { groupMemberAuthor, groupMemberKey } from './group-membership'
 import { agentFacingConnectionLabel, agentFacingSourceBadge, isDesktopLocalConnection } from './labels'
 import type { GroupMember, GroupMessage, GroupMessageAuthor } from './types'
 
@@ -32,9 +32,46 @@ export type GroupChatLineViewer =
   | (Pick<GroupMember, 'name'> &
       Partial<Pick<GroupMember, 'connectionId' | 'connectionKind' | 'connectionLabel' | 'installId' | 'remoteSource'>>)
 
+/** Whether a transcript speaker sits on the Desktop's own connection, decided by connection
+ *  identity from the room roster: the gateway install_id first (the same on every Desktop and
+ *  across relabels), else the connection whose current badge the entry carries. `undefined`
+ *  when there is no roster or the badge is shared by connections on both sides. */
+function speakerOnDesktopMachine(from: GroupMessageAuthor, members?: readonly GroupMember[]): boolean | undefined {
+  if (!members?.length) {
+    return undefined
+  }
+
+  const byGateway = from.gateway ? members.filter(m => m.installId === from.gateway) : []
+
+  // A badge match whose gateway identity contradicts the entry's is another machine that
+  // happens to share the label (e.g. a line mirrored from a Desktop with its own "This device").
+  const candidates = byGateway.length
+    ? byGateway
+    : members.filter(
+        m => groupMemberAuthor(m).source === from.source && !(from.gateway && m.installId && m.installId !== from.gateway)
+      )
+
+  if (candidates.length) {
+    const named = candidates.filter(m => m.name === from.name)
+    const pool = named.length ? named : candidates
+    const local = pool.filter(m => isDesktopLocalConnection(m)).length
+
+    return local === pool.length ? true : local === 0 ? false : undefined
+  }
+
+  // No roster connection carries this badge. Once the roster shows what the Desktop's own
+  // connection is called, a badge that is not that name is not that machine.
+  return members.some(m => isDesktopLocalConnection(m) && groupMemberAuthor(m).source) ? false : undefined
+}
+
 /** Room-log line as a member sees it: `Name (user): …` / `Name: …` /
  *  `Name (you): …`. */
-export function formatGroupChatLine(entry: GroupMessage, viewer: GroupChatLineViewer, group?: null | string) {
+export function formatGroupChatLine(
+  entry: GroupMessage,
+  viewer: GroupChatLineViewer,
+  group?: null | string,
+  members?: readonly GroupMember[]
+) {
   // Attachments are staged into each member's session as real payloads; the
   // transcript line names them so the delta text and the bytes line up.
   const attached =
@@ -56,7 +93,10 @@ export function formatGroupChatLine(entry: GroupMessage, viewer: GroupChatLineVi
   // Cross-connection speakers carry their device so same-named agents on
   // two machines stay tellable apart in every member's transcript.
   const viewerOnDesktop = typeof viewer !== 'string' && isDesktopLocalConnection(viewer)
-  const source = entry.from.source ? ` [${agentFacingSourceBadge(entry.from.source, viewerOnDesktop)}]` : ''
+
+  const source = entry.from.source
+    ? ` [${agentFacingSourceBadge(entry.from.source, speakerOnDesktopMachine(entry.from, members), viewerOnDesktop)}]`
+    : ''
 
   return `${groupSpeakerLabel(entry.from.name, group)}${suffix}${source}: ${relabelMemberControlFrames(entry.text)}${attached}`
 }
@@ -69,7 +109,12 @@ export function formatGroupChatLine(entry: GroupMessage, viewer: GroupChatLineVi
  *  cut with the exact count — without it a member has no way to know its
  *  view of the room is partial (typically missing the very user instruction
  *  that started the exchange). The newest entry is always kept. */
-export function formatGroupDeltaLines(delta: GroupMessage[], viewer: GroupChatLineViewer, group?: null | string) {
+export function formatGroupDeltaLines(
+  delta: GroupMessage[],
+  viewer: GroupChatLineViewer,
+  group?: null | string,
+  members?: readonly GroupMember[]
+) {
   const lines: string[] = []
   let chars = 0
 
@@ -79,7 +124,8 @@ export function formatGroupDeltaLines(delta: GroupMessage[], viewer: GroupChatLi
     const line = formatGroupChatLine(
       { ...entry, text: compactGroupChatSyncText(entry.text, GROUP_CHAT_HISTORY_LINE_CHARS).text },
       viewer,
-      group
+      group,
+      members
     )
 
     if (lines.length && chars + line.length > GROUP_CHAT_HISTORY_CHARS) {
@@ -117,7 +163,8 @@ export function formatFreshThreadRoomContext(
   log: GroupMessage[],
   viewer: GroupChatLineViewer,
   activeThread: string,
-  group?: null | string
+  group?: null | string,
+  members?: readonly GroupMember[]
 ) {
   const candidates = log.filter(entry => groupThreadOf(entry) !== activeThread)
   const lines: string[] = []
@@ -129,7 +176,8 @@ export function formatFreshThreadRoomContext(
     const line = `[thread ${groupThreadOf(entry)}] ${formatGroupChatLine(
       { ...entry, text: compactGroupChatSyncText(entry.text, GROUP_CHAT_HISTORY_LINE_CHARS).text },
       viewer,
-      group
+      group,
+      members
     )}`
 
     if (lines.length && chars + line.length > GROUP_CHAT_HISTORY_CHARS) {

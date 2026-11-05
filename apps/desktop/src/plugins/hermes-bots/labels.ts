@@ -149,12 +149,26 @@ export function agentFacingConnectionLabel(label: string, desktopLocal: boolean)
 }
 
 /** A group transcript badge (`from.source` = `connectionLabel || connectionId`, kept verbatim as
- *  the speaker's identity token) rendered for one viewer: the registry's "This device" label is
- *  named from the viewer's side unless the viewer is known to be on the Desktop's machine too.
- *  Any other badge is a name, not a point of view, and stays — a badge alone cannot prove which
- *  connection it came from (a remote connection may be labelled "local"). */
-export function agentFacingSourceBadge(source: string, viewerOnDesktop: boolean): string {
-  return !viewerOnDesktop && source.trim().toLowerCase() === 'this device' ? DESKTOP_MACHINE : source
+ *  the speaker's identity token) rendered for one viewer. `speakerOnDesktop` is the speaker's
+ *  connection as resolved from the room roster — a label alone cannot say whose machine it
+ *  names (the local connection may be renamed and a remote one called "This device"). The
+ *  Desktop's own machine is named from the viewer's side unless the viewer is on it too. Only an
+ *  unresolved speaker with no roster to check against falls back to the registry's default
+ *  "This device" label. */
+export function agentFacingSourceBadge(
+  source: string,
+  speakerOnDesktop: boolean | undefined,
+  viewerOnDesktop: boolean
+): string {
+  if (viewerOnDesktop || speakerOnDesktop === false) {
+    return source
+  }
+
+  if (speakerOnDesktop) {
+    return agentFacingConnectionLabel(source, true) || DESKTOP_MACHINE
+  }
+
+  return source.trim().toLowerCase() === 'this device' ? DESKTOP_MACHINE : source
 }
 
 /** Flatten markdown syntax out of a one-line roster preview so rows read
