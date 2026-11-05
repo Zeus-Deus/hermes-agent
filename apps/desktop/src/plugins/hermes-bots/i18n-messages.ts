@@ -296,7 +296,7 @@ export type BotsMessages = {
     messageRoom: (group: string) => string
     newThreadPlaceholder: (group: string) => string
     everyoneMeta: string
-    commandApproval: string
+    approvalAnswered: (handle: string, choice: string) => string
     answerFailed: (handle: string, error: string) => string
     wantsToRunCommand: (handle: string) => string
     asks: (handle: string) => string

@@ -245,4 +245,29 @@ describe('approval card (#91706)', () => {
     await vi.waitFor(() => expect(answer).toHaveBeenCalledTimes(1))
     expect(answer).toHaveBeenCalledWith(entry, MEMBERS[0], 'once')
   })
+
+  // The answer is echoed into the room log as a user entry, and every member reads the log as
+  // "You (user): …" on its next turn. Echoing `<choice> — <command>` handed each member (peers on
+  // other machines too) the raw command as if the user had typed it. The echo names the decision
+  // and whose command it was, never the command.
+  it.each([
+    ['session', "Approved @alpha's command (session)"],
+    ['deny', "Denied @alpha's command"]
+  ])('echoes the %s decision into the room without the command text', async (choice, expected) => {
+    const answer = vi.fn(async () => undefined)
+    const append = vi.fn()
+    vi.doMock('./group-turns', () => ({ answerGroupClarify: answer }))
+    vi.doMock('./group-chat', () => ({ appendGroupChatEntry: append }))
+    const { GroupClarifyCard } = await import('./group-chat-parts')
+
+    render(<GroupClarifyCard entry={entry} members={MEMBERS} />)
+    fireEvent.click(screen.getByRole('button', { name: choice }))
+
+    await vi.waitFor(() => expect(append).toHaveBeenCalledTimes(1))
+    const [group, author, text] = append.mock.calls[0]
+    expect(group).toBe('Core')
+    expect(author).toEqual({ kind: 'user', name: 'You' })
+    expect(text).toBe(expected)
+    expect(text).not.toContain(entry.command)
+  })
 })

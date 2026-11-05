@@ -443,9 +443,12 @@ export function GroupClarifyCard({ entry, members }: GroupClarifyCardProps) {
         await answerGroupClarify(entry, member, answers)
       }
 
-      // Echo the exchange into the room log so the thread reads complete.
+      // Echo the exchange into the room log so the thread reads complete. Every member reads
+      // this user entry as "You (user): …" on its next turn, so an approval names the decision
+      // and whose command it was, never the command: echoing it handed each member (peers on
+      // other machines too) the raw command as if the user had typed it.
       const summary = isApproval
-        ? `${resolve(questions[0])} — ${entry.command || entry.question || b.group.commandApproval}`
+        ? b.group.approvalAnswered(botHandle(entry.member, member), resolve(questions[0]))
         : questions
             .filter(q => resolve(q))
             .map(q => (questions.length > 1 ? `${q.question}: ${resolve(q)}` : resolve(q)))
