@@ -195,11 +195,24 @@ export interface GroupMessage {
    *  with, so any Desktop can tell what that member's thread session has
    *  already seen (watermarks are local and never sync). */
   seenThrough?: string
+  /** With `seenThrough`: how many entries of this thread the turn's log held
+   *  (all of them at or before the anchor), and the `at` of the oldest. A
+   *  reader whose log holds MORE thread entries in that span before the
+   *  anchor has entries the turn never had, so the anchor proves nothing. */
+  seenCount?: number
+  seenSince?: number
   text: string
   /** Messages predating threading carry the sentinel thread `'legacy'`. */
   thread?: string
   /** Set on the ui_meta projection when `text` was cut to the sync budget. */
   truncated?: boolean
+}
+
+/** What a member turn was submitted with (see GroupMessage.seenThrough). */
+export interface GroupSeenStamp {
+  seenCount: number
+  seenSince: number
+  seenThrough: string
 }
 
 export interface GroupHold {
@@ -234,7 +247,10 @@ export interface GroupChat {
   sessions?: Record<string, string | true>
   /** A member turn this Desktop is not (or no longer) polling: the message-count baseline to
    *  harvest its late reply from. `turn` names the poll that owns it while that poll runs. */
-  stranded?: Record<string, number | { before: number; seenThrough?: string; thread?: string; turn?: string }>
+  stranded?: Record<
+    string,
+    number | ({ before: number; thread?: string; turn?: string } & Partial<GroupSeenStamp>)
+  >
   /** #93813: how far each member's external-write reconcile sweep has read
    *  into that member's per-group session transcript (absolute row index of
    *  the last mirrored row + 1). Persisted so external posts aren't rescanned

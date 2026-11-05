@@ -19,7 +19,7 @@ import {
   isGroupChatSelf
 } from './group-round-prompt'
 import { type GroupMemberTurnOptions, isGroupPassText, runGroupChatMemberTurn } from './group-turns'
-import type { Attachment, GroupMember, GroupMessage } from './types'
+import type { Attachment, GroupMember, GroupMessage, GroupSeenStamp } from './types'
 
 export interface GroupRoundMemberContext {
   group: string
@@ -58,17 +58,39 @@ export function heldMemberMessageIds(existing: string[] | undefined, delta: Grou
   return [unique[0], ...unique.slice(-(GROUP_CHAT_HISTORY_LIMIT - 1))]
 }
 
+/** What a turn submitted now has seen: the newest room entry, plus how many
+ *  entries of `thread` this log holds and the `at` of the oldest — so a
+ *  Desktop whose merged log has more of them before that anchor knows the
+ *  anchor does not cover its own prefix (groupLogSeenCursor). */
+export function groupSeenStamp(log: GroupMessage[], thread: string): GroupSeenStamp | null {
+  const seenThrough = log.at(-1)?.id
+
+  if (!seenThrough) {
+    return null
+  }
+
+  const own = log.filter((entry: GroupMessage) => groupThreadOf(entry) === thread)
+
+  return { seenCount: own.length, seenSince: Number((own[0] || log.at(-1))?.at || 0), seenThrough }
+}
+
 /** The cursor the room log itself proves for `member` in `thread`. Watermarks
  *  are this Desktop's own log indices and never ride the projection, but a
  *  member's thread session is resolved by its title on the member's gateway —
  *  the same session for every Desktop. A Desktop that did not drive the
  *  earlier turns (another machine, another build, a lost record) therefore
  *  had no cursor and replayed the whole thread, the member's own replies
- *  included, as "new since your last turn". Every reply records the newest
- *  room entry its turn was submitted with (`seenThrough`), so the member's
- *  stamped replies in this thread bound what its session already holds:
- *  everything through the furthest anchor, then its own entries that follow.
- *  An anchor missing from the log, or not before its reply, proves nothing. */
+ *  included, as "new since your last turn". Every reply records what its turn
+ *  was submitted with (groupSeenStamp), so the member's stamped replies in
+ *  this thread bound what its session already holds: everything through the
+ *  furthest anchor, then its own entries that follow.
+ *
+ *  An anchor proves nothing when it is missing from the log or not before its
+ *  reply, and nothing when this log holds more of the thread's entries in the
+ *  stamped span than the turn's log did: the timestamp merge can sort an
+ *  entry the turn never had (another Desktop's failed send) before the
+ *  anchor. Which entry that is cannot be told without per-entry acks, so the
+ *  whole proof is dropped — replaying a little is safe, skipping is not. */
 export function groupLogSeenCursor(log: GroupMessage[], member: GroupMember, thread: string): number {
   const position = new Map<string, number>()
   let proven = -1
@@ -82,8 +104,14 @@ export function groupLogSeenCursor(log: GroupMessage[], member: GroupMember, thr
     // can sit after a newer turn's reply with an older anchor.
     const anchor = entry?.seenThrough ? position.get(entry.seenThrough) : undefined
 
-    if (anchor !== undefined && groupThreadOf(entry) === thread && authoredByMember(entry, member)) {
-      proven = Math.max(proven, anchor)
+    if (
+      anchor !== undefined &&
+      anchor > proven &&
+      groupThreadOf(entry) === thread &&
+      authoredByMember(entry, member) &&
+      stampCoversPrefix(log, entry, anchor, thread)
+    ) {
+      proven = anchor
     }
   })
 
@@ -98,6 +126,28 @@ export function groupLogSeenCursor(log: GroupMessage[], member: GroupMember, thr
   }
 
   return mark
+}
+
+/** True when the stamped turn's log held at least as many of `thread`'s
+ *  entries in its span (`at` from `seenSince`, through the anchor) as this
+ *  log does. Fewer here is fine: this log lacks some (older history, a lagging
+ *  merge), and what it lacks it cannot skip. */
+function stampCoversPrefix(log: GroupMessage[], stamp: GroupMessage, anchor: number, thread: string): boolean {
+  const { seenCount, seenSince } = stamp
+
+  if (!Number.isFinite(seenCount) || !Number.isFinite(seenSince)) {
+    return false
+  }
+
+  let held = 0
+
+  for (let index = 0; index <= anchor; index++) {
+    if (groupThreadOf(log[index]) === thread && Number(log[index]?.at || 0) >= Number(seenSince)) {
+      held += 1
+    }
+  }
+
+  return held <= Number(seenCount)
 }
 
 /** The member's turn payload from log index `seen`: this thread's entries
@@ -294,6 +344,7 @@ export async function runGroupRoundMember(
 
   const { room, memberKey, markKey, prompt, deltaImages, freshFallback, heldIds, seesNewUserEntry } = prepared
   const anchorId = room.log.at(-1)?.id ?? null
+  const seen = groupSeenStamp(room.log, thread)
   // Owed only until the member answers: after its reply to the user's address,
   // a pass on a teammate's reply is ordinary consensus, not noncompliance.
   const owesAnswer = memberOwesAnswer(context, member, room.log, seesNewUserEntry)
@@ -301,7 +352,7 @@ export async function runGroupRoundMember(
   let accepted = false
 
   try {
-    reply = await runVisibleMemberTurn(context, member, prompt, deltaImages, { freshFallback, seenThrough: anchorId })
+    reply = await runVisibleMemberTurn(context, member, prompt, deltaImages, { freshFallback, seen })
 
     // #129443: the participation rules ("reply only with something new,
     // else (pass)") let a directly addressed member pass just because a
@@ -319,7 +370,7 @@ export async function runGroupRoundMember(
         member,
         `${prompt}${GROUP_ADDRESSED_NUDGE_SUFFIX}`,
         deltaImages,
-        { seenThrough: anchorId }
+        { seen }
       )
     }
 
@@ -423,7 +474,7 @@ export async function runGroupRoundMember(
   const spoke = reply !== null && !isGroupPassText(reply)
 
   if (reply !== null && spoke) {
-    appendGroupChatEntry(context.group, groupMemberAuthor(member), reply, thread, undefined, anchorId)
+    appendGroupChatEntry(context.group, groupMemberAuthor(member), reply, thread, undefined, seen)
   } else if (reply !== null && context.isCurrent() && owesAnswer) {
     // #129443: the nudge was passed on too. Record the noncompliance where
     // the user looks (activity row + roster badge) instead of letting the

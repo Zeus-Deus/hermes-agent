@@ -88,6 +88,9 @@ async function send(desktop: Desktop, text: string, thread?: null | string) {
   return sent
 }
 
+/** A stamp from a turn whose log held `count` of the thread's entries, from `at` 1. */
+const stamp = (seenThrough: string, seenCount: number) => ({ seenCount, seenSince: 1, seenThrough })
+
 const bobPrompts = (desktop: Desktop) =>
   desktop.gateway.calls.filter(call => call.profile === 'bob').map(call => call.prompt)
 
@@ -147,14 +150,91 @@ describe('a member turn driven by a Desktop that did not drive the earlier turns
     expect(prompt).toContain('You (user): @bob go for it')
   })
 
+  it('still gives the whole thread when the first submit into a minted session failed', async () => {
+    const first = await loadDesktop({
+      turn: ({ profile }) => (profile === 'bob' ? 'Brief: draft the release notes in two passes.' : '(pass)')
+    })
+
+    first.chat.$groupChats.set({ g: { log: [], members: MEMBERS, roomId: 'room', sessions: {}, watermarks: {} } })
+    const thread = await send(first, '@bob bring @alice up to date')
+    const projection = first.chat.groupChatSyncSnapshot(first.chat.$groupChats.get())
+
+    // bob's session is gone; the replacement is minted, then the submit fails.
+    const second = await loadDesktop({
+      failFirstSubmitWith: Object.assign(new Error('gateway refused the prompt'), { code: 5000 }),
+      turn: () => '(pass)'
+    })
+
+    second.chat.$groupChats.set(second.chat.mergeRemoteGroupChatSnapshotIntoRooms(projection, {}))
+
+    await send(second, '@bob go for it', thread)
+    expect(bobPrompts(second)).toEqual([])
+
+    // The retry resumes that still-empty session.
+    await send(second, '@bob go for it, again', thread)
+
+    const [prompt] = bobPrompts(second)
+
+    expect(prompt).toContain('bring @alice up to date')
+    expect(prompt).toContain('Brief: draft the release notes')
+    expect(prompt).toContain('You (user): @bob go for it, again')
+  })
+
+  it('does not trust an anchor whose prefix holds an entry the stamping turn never had', async () => {
+    const { members } = await loadDesktop()
+    const kickoff: GroupMessage = { at: 1, from: { kind: 'user', name: 'You' }, id: 'u-kick', text: '@bob kick off', thread: 't' }
+
+    // u0 stayed on this Desktop (its submit failed); another Desktop, before
+    // it ever saw u0, delivered u1 and bob answered. The merge sorts u0 first.
+    const log: GroupMessage[] = [
+      kickoff,
+      { at: 2, from: { kind: 'user', name: 'You' }, id: 'u0', text: '@bob first', thread: 't' },
+      { at: 3, from: { kind: 'user', name: 'You' }, id: 'u1', text: '@bob second', thread: 't' },
+      {
+        at: 4,
+        from: { kind: 'member', name: 'bob', source: 'Server' },
+        id: 'r1',
+        seenCount: 2,
+        seenSince: 1,
+        seenThrough: 'u1',
+        text: 'on the second',
+        thread: 't'
+      }
+    ]
+
+    expect(members.groupLogSeenCursor(log, BOB, 't')).toBe(0)
+
+    // Without u0 the same stamp proves everything through bob's reply.
+    const delivered = log.filter(entry => entry.id !== 'u0')
+    expect(members.groupLogSeenCursor(delivered, BOB, 't')).toBe(3)
+
+    // Older history the stamping Desktop never held does not void its proof.
+    const older: GroupMessage = { at: 0, from: { kind: 'user', name: 'You' }, id: 'u-old', text: 'old', thread: 't' }
+    expect(members.groupLogSeenCursor([older, ...delivered], BOB, 't')).toBe(4)
+  })
+
+  it('stamps each reply with what its log held of the thread', async () => {
+    const desktop = await loadDesktop({ turn: ({ profile }) => (profile === 'bob' ? 'done' : '(pass)') })
+
+    desktop.chat.$groupChats.set({ g: { log: [], members: MEMBERS, roomId: 'room', sessions: {}, watermarks: {} } })
+    await send(desktop, '@bob ship it')
+
+    const log = desktop.chat.$groupChats.get().g.log
+    const reply = log.find((entry: GroupMessage) => entry.from.name === 'bob')
+    const compact = desktop.chat.groupChatSyncSnapshot(desktop.chat.$groupChats.get()).rooms['id:room'].log.at(-1)
+
+    expect(reply).toMatchObject({ seenCount: 1, seenSince: log[0].at, seenThrough: log[0].id })
+    expect(compact).toMatchObject({ seenCount: 1, seenSince: log[0].at, seenThrough: log[0].id })
+  })
+
   it('takes the furthest anchor when a late reply lands after a newer one', async () => {
     const { members } = await loadDesktop()
 
     const log: GroupMessage[] = [
       { at: 1, from: { kind: 'user', name: 'You' }, id: 'u1', text: 'one', thread: 't' },
       { at: 2, from: { kind: 'user', name: 'You' }, id: 'u2', text: 'two', thread: 't' },
-      { at: 3, from: { kind: 'member', name: 'bob', source: 'Server' }, id: 'r2', seenThrough: 'u2', text: 'b', thread: 't' },
-      { at: 4, from: { kind: 'member', name: 'bob', source: 'Server' }, id: 'r1', seenThrough: 'u1', text: 'a', thread: 't' }
+      { at: 3, from: { kind: 'member', name: 'bob', source: 'Server' }, id: 'r2', ...stamp('u2', 2), text: 'b', thread: 't' },
+      { at: 4, from: { kind: 'member', name: 'bob', source: 'Server' }, id: 'r1', ...stamp('u1', 1), text: 'a', thread: 't' }
     ]
 
     expect(members.groupLogSeenCursor(log, BOB, 't')).toBe(4)
@@ -170,7 +250,7 @@ describe('a member turn driven by a Desktop that did not drive the earlier turns
         at: 3,
         from: { kind: 'member', name: 'bob', source: 'Server' },
         id: 'f1',
-        seenThrough: 'u1',
+        ...stamp('u1', 1),
         text: 'started',
         thread: 't'
       }
@@ -207,7 +287,7 @@ describe('a member turn driven by a Desktop that did not drive the earlier turns
         members: MEMBERS,
         roomId: 'room',
         sessions: { 'thread:t::server::bob': 'sid-bob' },
-        stranded: { 'server::bob': { before: 0, seenThrough: 'u1', thread: 't' } },
+        stranded: { 'server::bob': { before: 0, ...stamp('u1', 1), thread: 't' } },
         watermarks: {}
       }
     })
@@ -227,8 +307,10 @@ describe('a member turn driven by a Desktop that did not drive the earlier turns
     const late = desktop.chat.$groupChats.get().g.log.at(-1)
 
     expect(late?.text).toBe('Dug in: the late answer.')
-    expect(late?.seenThrough).toBe('u1')
-    expect(desktop.chat.groupChatSyncSnapshot(desktop.chat.$groupChats.get()).rooms['id:room'].log.at(-1)?.seenThrough).toBe('u1')
+    expect(late).toMatchObject(stamp('u1', 1))
+    expect(desktop.chat.groupChatSyncSnapshot(desktop.chat.$groupChats.get()).rooms['id:room'].log.at(-1)).toMatchObject(
+      stamp('u1', 1)
+    )
   })
 
   it('reads the cursor only from the member\'s own stamped replies', async () => {
@@ -236,10 +318,12 @@ describe('a member turn driven by a Desktop that did not drive the earlier turns
 
     const log: GroupMessage[] = [
       { at: 1, from: { kind: 'user', name: 'You' }, id: 'u1', text: 'hi', thread: 't' },
-      { at: 2, from: { kind: 'member', name: 'alice', source: 'This device' }, id: 's1', seenThrough: 'u1', text: 'a', thread: 't' },
+      { at: 2, from: { kind: 'member', name: 'alice', source: 'This device' }, id: 's1', ...stamp('u1', 1), text: 'a', thread: 't' },
       { at: 3, from: { kind: 'member', name: 'bob', source: 'Server' }, id: 'f0', text: 'unstamped', thread: 't' },
-      { at: 4, from: { kind: 'member', name: 'bob', source: 'Server' }, id: 'f1', seenThrough: 'gone', text: 'b', thread: 't' },
-      { at: 5, from: { kind: 'member', name: 'bob', source: 'Server' }, id: 'f2', seenThrough: 'u1', text: 'c', thread: 'other' }
+      { at: 4, from: { kind: 'member', name: 'bob', source: 'Server' }, id: 'f1', ...stamp('gone', 9), text: 'b', thread: 't' },
+      { at: 5, from: { kind: 'member', name: 'bob', source: 'Server' }, id: 'f2', ...stamp('u1', 1), text: 'c', thread: 'other' },
+      // An anchor without its count proves nothing either.
+      { at: 6, from: { kind: 'member', name: 'bob', source: 'Server' }, id: 'f3', seenThrough: 'u1', text: 'd', thread: 't' }
     ]
 
     // Another member's stamp, an unstamped reply, a trimmed anchor and a

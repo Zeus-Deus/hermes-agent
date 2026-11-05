@@ -32,7 +32,14 @@ import {
   GROUP_PROMPT_HEADER_PREFIX
 } from './group-round-prompt'
 import { botConnectionRoute, requestForBot } from './routing'
-import type { Attachment, GroupMember, GroupPrompt, GroupPromptQuestion, ProfileRoute } from './types'
+import type {
+  Attachment,
+  GroupMember,
+  GroupPrompt,
+  GroupPromptQuestion,
+  GroupSeenStamp,
+  ProfileRoute
+} from './types'
 
 /** "(pass)" (loosely: pass / (pass) / pass.) or empty = the member stayed silent. */
 export function isGroupPassText(text: unknown) {
@@ -886,8 +893,8 @@ export interface GroupMemberTurnOptions {
    *  member's session already holds more (group-round-members). A minted
    *  session holds nothing, so it must not get the shortened delta. */
   freshFallback?: null | { images?: Attachment[]; prompt: string }
-  /** Id of the newest room entry the turn is submitted with. */
-  seenThrough?: null | string
+  /** What the turn is submitted with (group-round-members groupSeenStamp). */
+  seen?: GroupSeenStamp | null
 }
 
 export async function runGroupChatMemberTurn(
@@ -1007,10 +1014,15 @@ interface GroupTurnPollContext {
 const liveGroupTurns = new Set<string>()
 
 /** What the stranded turn had seen when it was submitted (pre-stamp markers: nothing). */
-function strandedMarkerSeenThrough(marker: unknown): null | string {
-  const seen = marker && typeof marker === 'object' ? (marker as { seenThrough?: unknown }).seenThrough : null
+function strandedMarkerSeen(marker: unknown): GroupSeenStamp | null {
+  const { seenCount, seenSince, seenThrough } = (marker && typeof marker === 'object' ? marker : {}) as Record<
+    string,
+    unknown
+  >
 
-  return typeof seen === 'string' && seen ? seen : null
+  return typeof seenThrough === 'string' && seenThrough && Number.isFinite(seenCount) && Number.isFinite(seenSince)
+    ? { seenCount: Number(seenCount), seenSince: Number(seenSince), seenThrough }
+    : null
 }
 
 export function strandedMarkerIsLive(marker: unknown): boolean {
@@ -1027,7 +1039,7 @@ export function strandedMarkerIsLive(marker: unknown): boolean {
 function markGroupTurnInFlight(
   group: string,
   member: GroupMember,
-  marker: { before: number; seenThrough?: string; thread: string; turn: string }
+  marker: { before: number; thread: string; turn: string } & Partial<GroupSeenStamp>
 ) {
   updateGroupChat(group, (r: GroupChatRoom) => {
     r.stranded = {
@@ -1227,7 +1239,7 @@ async function runGroupChatMemberTurnLeased(
   prompt: string,
   thread: string,
   images?: Attachment[],
-  { freshFallback = null, seenThrough = null }: GroupMemberTurnOptions = {}
+  { freshFallback = null, seen = null }: GroupMemberTurnOptions = {}
 ): Promise<null | string> {
   const binding = followGroupChat(group, name => {
     group = name
@@ -1238,11 +1250,6 @@ async function runGroupChatMemberTurnLeased(
 
     if (!runtime || !binding.isLive()) {
       return null
-    }
-
-    if (fresh && freshFallback) {
-      prompt = freshFallback.prompt
-      images = freshFallback.images
     }
 
     // #91868/#94569: remember the epoch this turn was dispatched under so the
@@ -1258,6 +1265,14 @@ async function runGroupChatMemberTurnLeased(
 
     if (!binding.isLive()) {
       return null
+    }
+
+    // A session this turn minted holds nothing; neither does one an earlier
+    // turn minted but never got a prompt into (its submit failed). Either way
+    // the shortened delta would lose the thread.
+    if (freshFallback && (fresh || before === 0)) {
+      prompt = freshFallback.prompt
+      images = freshFallback.images
     }
 
     // #93813: rows other writers put in this session since the last look
@@ -1298,7 +1313,7 @@ async function runGroupChatMemberTurnLeased(
       before,
       // A reply harvested after the deadline names what its turn had seen,
       // like an on-time one (group-round-members groupLogSeenCursor).
-      ...(seenThrough ? { seenThrough } : {}),
+      ...(seen || {}),
       thread,
       turn
     })
@@ -1463,7 +1478,7 @@ export async function harvestStrandedGroupReply(group: string, member: GroupMemb
         reply,
         strandedThread,
         undefined,
-        strandedMarkerSeenThrough(marker)
+        strandedMarkerSeen(marker)
       )
       updateGroupChat(group, (r: GroupChatRoom) => {
         const markKey = `${strandedThread}::${memberKey}`

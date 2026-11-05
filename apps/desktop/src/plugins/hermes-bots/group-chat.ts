@@ -25,6 +25,7 @@ import type {
   GroupMessage,
   GroupMessageAuthor,
   GroupPrompt,
+  GroupSeenStamp,
   RosterRow
 } from './types'
 
@@ -351,7 +352,9 @@ export function groupChatSyncSnapshot(
         // for this member instead of replaying the thread (group-round-members).
         ...(entry?.seenThrough
           ? {
-              seenThrough: String(entry.seenThrough).slice(0, 160)
+              seenThrough: String(entry.seenThrough).slice(0, 160),
+              ...(Number.isFinite(entry.seenCount) ? { seenCount: Number(entry.seenCount) } : {}),
+              ...(Number.isFinite(entry.seenSince) ? { seenSince: Number(entry.seenSince) } : {})
             }
           : {}),
         ...(compacted.truncated
@@ -1773,7 +1776,7 @@ export function appendGroupChatEntry(
   text: string,
   thread?: null | string,
   images?: Attachment[],
-  seenThrough?: null | string
+  seen?: GroupSeenStamp | null
 ): GroupMessage {
   const priorLog = ($groupChats.get()[group] || {}).log || []
   const lastEntry = priorLog[priorLog.length - 1]
@@ -1791,7 +1794,7 @@ export function appendGroupChatEntry(
     // cutting here too keeps the duplicate-echo guard comparing like with like.
     text: compactGroupChatSyncText(normalizeGroupChatText(text), GROUP_CHAT_HISTORY_LINE_CHARS).text,
     thread: thread || 'legacy',
-    ...(seenThrough ? { seenThrough } : {})
+    ...(seen ? { seenCount: seen.seenCount, seenSince: seen.seenSince, seenThrough: seen.seenThrough } : {})
   }
 
   if (Array.isArray(images) && images.length) {
