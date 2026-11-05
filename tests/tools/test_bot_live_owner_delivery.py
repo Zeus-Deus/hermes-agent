@@ -413,9 +413,43 @@ def test_sender_failure_after_the_intent_is_pinned_stays_ambiguous(tmp_path, mon
     assert Path(dm_files[0]).exists() and Path(dm_files[0] + ".live.json").exists()
 
 
-@pytest.mark.parametrize("change", ["message", "no_admission", "pin_status"])
+@pytest.mark.parametrize("change", ["message", "author", "no_author", "category", "no_admission", "pin_status"])
 def test_owner_receipt_proves_admission_only_for_this_delivery(tmp_path, monkeypatch, change):
-    """The stdlib receipt read trusts only an admission-backed receipt of this exact delivery."""
+    """The stdlib receipt read trusts only an admission-backed receipt of this exact delivery: the
+    identity the owner itself checks (``_require_same_delivery``), so a receipt left by a different
+    delivery under a reused id never stands in for this one."""
+    from tools import bot_mode_dm
+
+    authority = _FakeAuthority()
+    monkeypatch.setattr(mailbox, "authority_delivery", authority)
+    monkeypatch.setattr(mailbox, "find_canonical_live_owner", lambda home: _owner(tmp_path))
+    dm_file = bot_mode_dm._write_dm_file("hello")
+    author = {"id": "bot:alice", "name": "alice", "is_bot": True, "hops": 2}
+    assert bot_mode_dm._admit_live_dm(tmp_path, dm_file, author)["status"] == "queued"
+    assert bot_mode_dm._owner_receipt(dm_file)["status"] == "queued"
+
+    path = tmp_path / "runtime" / mailbox.DELIVERY_DIR_NAME / f"{bot_mode_dm._dm_delivery_id(dm_file)}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record = {
+        "message": lambda r: {**r, "message": "something else"},
+        "author": lambda r: {**r, "author": {**author, "hops": 3}},
+        "no_author": lambda r: {k: v for k, v in r.items() if k != "author"},
+        "category": lambda r: {**r, "notification_category": "diagnostic"},
+        "no_admission": lambda r: {k: v for k, v in r.items() if k != "admission_id"},
+        "pin_status": lambda r: {**r, "status": "ambiguous"},
+    }[change](record)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    assert bot_mode_dm._owner_receipt(dm_file) is None
+    assert bot_mode_dm._runner_failed_after_admission(dm_file, "boom") is None
+
+
+@pytest.mark.parametrize("left", ["receipt", "no_payload"])
+def test_runner_failure_without_an_intent_is_no_send_only_without_any_trace(tmp_path, monkeypatch, capsys, left):
+    """A same-id attempt that settled drops the intent and the payload but leaves the owner's
+    receipt. A runner failing then (or mid-cleanup, payload still there) must not call the delivered
+    message 'NOT sent, safe to resend': without the receipt it cannot read, it stays unknown."""
+    import sys
+
     from tools import bot_mode_dm
 
     authority = _FakeAuthority()
@@ -423,16 +457,28 @@ def test_owner_receipt_proves_admission_only_for_this_delivery(tmp_path, monkeyp
     monkeypatch.setattr(mailbox, "find_canonical_live_owner", lambda home: _owner(tmp_path))
     dm_file = bot_mode_dm._write_dm_file("hello")
     assert bot_mode_dm._admit_live_dm(tmp_path, dm_file)["status"] == "queued"
-    assert bot_mode_dm._owner_receipt(dm_file)["status"] == "queued"
+    os.unlink(bot_mode_dm._live_intent_file(dm_file))  # the settled attempt's cleanup...
+    if left == "no_payload":
+        os.unlink(dm_file)  # ...finished; with "receipt" it is caught between the two unlinks
+    monkeypatch.setitem(sys.modules, "tools.bot_live_delivery", None)  # this runner's import fails
 
-    path = tmp_path / "runtime" / mailbox.DELIVERY_DIR_NAME / f"{bot_mode_dm._dm_delivery_id(dm_file)}.json"
-    record = json.loads(path.read_text(encoding="utf-8"))
-    if change == "message":
-        record["message"] = "something else"
-    elif change == "no_admission":
-        record.pop("admission_id")
-    else:
-        record["status"] = "ambiguous"
-    path.write_text(json.dumps(record), encoding="utf-8")
-    assert bot_mode_dm._owner_receipt(dm_file) is None
-    assert bot_mode_dm._runner_failed_after_admission(dm_file, "boom") is None
+    assert bot_mode_dm._run_delivery(["hermes", "-p", "bob"], dm_file, stdin_file=False, profile_home=tmp_path) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "ambiguous" and "Do not resend" in payload["error"], payload
+    assert "NOT sent" not in payload["error"]
+
+
+def test_runner_failure_before_any_trace_is_a_definite_no_send(tmp_path, monkeypatch, capsys):
+    import sys
+
+    from tools import bot_mode_dm
+
+    dm_file = bot_mode_dm._write_dm_file("hello")
+    monkeypatch.setitem(sys.modules, "tools.bot_live_delivery", None)
+
+    assert bot_mode_dm._run_delivery(["hermes", "-p", "bob"], dm_file, stdin_file=False, profile_home=tmp_path) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reason"] == "runtime_unavailable" and "NOT sent" in payload["error"], payload
+    assert Path(dm_file).exists()  # retained, like every other runner refusal

@@ -692,24 +692,47 @@ def _live_outcome_unknown(dm_file: str, cause: object) -> str:
                        "evidence_file": dm_file})
 
 
+def _receipt_path(profile_home: str | os.PathLike, delivery_id: str) -> Path:
+    """Where the owner publishes a delivery's receipt (``bot_live_delivery._root``), stdlib only."""
+    return Path(profile_home).resolve() / "runtime" / "bot_live_delivery" / f"{delivery_id}.json"
+
+
+def _nothing_admitted(profile_home: str | os.PathLike | None, dm_file: str) -> bool:
+    """Whether this DM provably has no admission anywhere: its payload is still here, no intent is
+    pinned (admission happens only under one, ``_admit_live_dm``), and the target's mailbox holds
+    no receipt for its id. The receipt check covers a same-id attempt that already settled: that
+    drops the intent and payload, but the owner's receipt stays."""
+    if profile_home is None or os.path.lexists(_live_intent_file(dm_file)) or not os.path.exists(dm_file):
+        return False
+    try:
+        os.lstat(_receipt_path(profile_home, _dm_delivery_id(dm_file)))
+    except FileNotFoundError:
+        return True
+    except OSError:
+        pass  # an unreadable mailbox proves nothing either way
+    return False
+
+
 def _owner_receipt(dm_file: str) -> Optional[dict]:
     """The target owner's own receipt for this DM's pinned delivery, or None when it does not
-    prove admission. Read straight from the receipt file the owner publishes (the
-    ``bot_live_delivery._root`` layout ``_poll_receipt`` reads, lock-free like it) with the stdlib
-    only, so a runner whose Hermes imports fail can still tell an admitted DM from an unknown one.
-    Only an ``admission_id`` proves admission: a pre-admission pin (``ambiguous``, no id) or a
-    refusal stays unknown here, as do a mismatched id or message."""
+    prove admission. Read straight from the receipt file the owner publishes (lock-free, as
+    ``bot_live_delivery._poll_receipt`` reads it) with the stdlib only, so a runner whose Hermes
+    imports fail can still tell an admitted DM from an unknown one. Only an ``admission_id`` proves
+    admission: a pre-admission pin (``ambiguous``, no id) or a refusal stays unknown here, as does a
+    receipt whose identity (id, message, author, category: the owner's ``_require_same_delivery``)
+    is not this intent's."""
     try:
         intent = json.loads(Path(_live_intent_file(dm_file)).read_text(encoding="utf-8-sig"))
         key = intent["delivery_id"]
         if not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{32,64}", key) is None:
             return None
-        path = Path(intent["owner"]["profile_home"]).resolve() / "runtime" / "bot_live_delivery" / f"{key}.json"
+        path = _receipt_path(intent["owner"]["profile_home"], key)
         record = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError, KeyError, TypeError):
         return None
     if (not isinstance(record, dict) or record.get("delivery_id") != key or not record.get("admission_id")
-            or record.get("message") != intent.get("message")):
+            or record.get("message") != intent.get("message") or record.get("author") != intent.get("author")
+            or record.get("notification_category", "result") != "result"):
         return None
     status = "queued" if record.get("status") == "canonical" else record.get("status")
     if status not in ("queued", "claimed", "settled", "failed", "cancelled"):
@@ -784,7 +807,7 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool,
                 print(_unavailable_payload(dm_file, exc))
                 return 1
             except Exception as exc:
-                if not os.path.exists(_live_intent_file(dm_file)):
+                if _nothing_admitted(home, dm_file):
                     # No intent was ever pinned, so nothing could be admitted: a definite no-send.
                     print(_unavailable_payload(dm_file, DeliveryNotStartedError(
                         f"the delivery runner failed before live admission ({exc})")))
@@ -843,7 +866,7 @@ def _start_delivery(argv: list[str], content: str, label: str, *, stdin_file: bo
         except LiveTargetUnavailableError as exc:
             return _settled_no_send(dm_file, exc)
         except Exception as exc:
-            if not os.path.exists(_live_intent_file(dm_file)):
+            if _nothing_admitted(profile_home, dm_file):
                 # Failed before the intent was pinned (e.g. an import): nothing could be admitted.
                 return _settled_no_send(dm_file, DeliveryNotStartedError(f"live admission failed before "
                                                                           f"anything was sent ({exc})"))
