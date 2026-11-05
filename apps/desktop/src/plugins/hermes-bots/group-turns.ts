@@ -879,13 +879,24 @@ export async function answerGroupClarify(
  *  so slow models aren't cut off mid-run. A turn that still times out
  *  records a stranded marker so the finished reply can be harvested into
  *  the room at the member's next turn instead of being lost. */
+/** Per-turn facts the room engine knows and the session layer cannot. */
+export interface GroupMemberTurnOptions {
+  /** The turn's payload for a session minted by this turn: the delta from
+   *  this Desktop's own watermark, set only when the room log proved the
+   *  member's session already holds more (group-round-members). A minted
+   *  session holds nothing, so it must not get the shortened delta. */
+  freshFallback?: null | { images?: Attachment[]; prompt: string }
+  /** Id of the newest room entry the turn is submitted with. */
+  seenThrough?: null | string
+}
+
 export async function runGroupChatMemberTurn(
   group: string,
   member: GroupMember,
   prompt: string,
   thread: string,
   images?: Attachment[],
-  seenThrough?: null | string
+  options: GroupMemberTurnOptions = {}
 ): Promise<null | string> {
   // #93602: hold the member's route socket for the whole turn. Without the
   // lease, every RPC below rides its own request-scoped socket lease; the
@@ -900,7 +911,7 @@ export async function runGroupChatMemberTurn(
   try {
     releaseTurnLease = await retainGroupTurnRoute(member)
 
-    return binding.isLive() ? await runGroupChatMemberTurnLeased(group, member, prompt, thread, images, seenThrough) : null
+    return binding.isLive() ? await runGroupChatMemberTurnLeased(group, member, prompt, thread, images, options) : null
   } finally {
     releaseTurnLease?.()
     binding.dispose()
@@ -1216,7 +1227,7 @@ async function runGroupChatMemberTurnLeased(
   prompt: string,
   thread: string,
   images?: Attachment[],
-  seenThrough?: null | string
+  { freshFallback = null, seenThrough = null }: GroupMemberTurnOptions = {}
 ): Promise<null | string> {
   const binding = followGroupChat(group, name => {
     group = name
@@ -1227,6 +1238,11 @@ async function runGroupChatMemberTurnLeased(
 
     if (!runtime || !binding.isLive()) {
       return null
+    }
+
+    if (fresh && freshFallback) {
+      prompt = freshFallback.prompt
+      images = freshFallback.images
     }
 
     // #91868/#94569: remember the epoch this turn was dispatched under so the

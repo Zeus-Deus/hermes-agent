@@ -37,10 +37,11 @@ interface Desktop {
   turns: typeof groupTurns
 }
 
-/** A fresh Desktop: its own module state, storage and gateway socket. */
-async function loadDesktop(options: GatewayOptions = {}): Promise<Desktop> {
+/** A fresh Desktop: its own module state and storage. Pass another
+ *  Desktop's gateway to reach the same member sessions it reached. */
+async function loadDesktop(options: GatewayOptions = {}, reuse?: ScriptedGateway): Promise<Desktop> {
   vi.resetModules()
-  const gateway = createGroupGateway(options)
+  const gateway = reuse || createGroupGateway(options)
 
   for (const key of Object.keys(host)) {
     delete host[key]
@@ -108,7 +109,32 @@ describe('a member turn driven by a Desktop that did not drive the earlier turns
 
     const projection = first.chat.groupChatSyncSnapshot(first.chat.$groupChats.get())
 
-    // Desktop B only ever saw the room through the gateway projection.
+    // Desktop B only ever saw the room through the gateway projection; it
+    // reaches bob's gateway, where bob's thread session lives.
+    const firstCalls = bobPrompts(first).length
+    const second = await loadDesktop({}, first.gateway)
+    second.chat.$groupChats.set(second.chat.mergeRemoteGroupChatSnapshotIntoRooms(projection, {}))
+
+    await send(second, '@bob go for it', thread)
+
+    const [prompt] = bobPrompts(second).slice(firstCalls)
+
+    expect(prompt).toContain('You (user): @bob go for it')
+    expect(prompt).not.toContain('bring @alice up to date')
+    expect(prompt).not.toContain('Brief: draft the release notes')
+  })
+
+  it('gives a member session minted by this turn the whole thread, not the shortened delta', async () => {
+    const first = await loadDesktop({
+      turn: ({ profile }) => (profile === 'bob' ? 'Brief: draft the release notes in two passes.' : '(pass)')
+    })
+
+    first.chat.$groupChats.set({ g: { log: [], members: MEMBERS, roomId: 'room', sessions: {}, watermarks: {} } })
+    const thread = await send(first, '@bob bring @alice up to date')
+    const projection = first.chat.groupChatSyncSnapshot(first.chat.$groupChats.get())
+
+    // bob's session is gone on its gateway (deleted, or a gateway that never
+    // had it): the title lookup misses and the turn mints a new one.
     const second = await loadDesktop({ turn: () => '(pass)' })
     second.chat.$groupChats.set(second.chat.mergeRemoteGroupChatSnapshotIntoRooms(projection, {}))
 
@@ -116,9 +142,22 @@ describe('a member turn driven by a Desktop that did not drive the earlier turns
 
     const [prompt] = bobPrompts(second)
 
+    expect(prompt).toContain('bring @alice up to date')
+    expect(prompt).toContain('Brief: draft the release notes')
     expect(prompt).toContain('You (user): @bob go for it')
-    expect(prompt).not.toContain('bring @alice up to date')
-    expect(prompt).not.toContain('Brief: draft the release notes')
+  })
+
+  it('takes the furthest anchor when a late reply lands after a newer one', async () => {
+    const { members } = await loadDesktop()
+
+    const log: GroupMessage[] = [
+      { at: 1, from: { kind: 'user', name: 'You' }, id: 'u1', text: 'one', thread: 't' },
+      { at: 2, from: { kind: 'user', name: 'You' }, id: 'u2', text: 'two', thread: 't' },
+      { at: 3, from: { kind: 'member', name: 'bob', source: 'Server' }, id: 'r2', seenThrough: 'u2', text: 'b', thread: 't' },
+      { at: 4, from: { kind: 'member', name: 'bob', source: 'Server' }, id: 'r1', seenThrough: 'u1', text: 'a', thread: 't' }
+    ]
+
+    expect(members.groupLogSeenCursor(log, BOB, 't')).toBe(4)
   })
 
   it('still delivers a user message that landed while the member was answering', async () => {
@@ -137,7 +176,17 @@ describe('a member turn driven by a Desktop that did not drive the earlier turns
       }
     ]
 
-    desktop.chat.$groupChats.set({ g: { log, members: MEMBERS, roomId: 'room', sessions: {}, watermarks: {} } })
+    desktop.chat.$groupChats.set({
+      g: { log, members: MEMBERS, roomId: 'room', sessions: { 'thread:t::server::bob': 'sid-bob' }, watermarks: {} }
+    })
+    // bob's thread session exists on its gateway (it answered `started`).
+    desktop.gateway.sessions.set('sid-bob', {
+      messages: [{ content: '[Group chat: "g"] …', role: 'user' }, { content: 'started', role: 'assistant' }],
+      profile: 'bob',
+      runtime: 'rt-bob',
+      stored: 'sid-bob',
+      title: 'Group: room · t'
+    })
 
     await send(desktop, '@bob status?', 't')
 

@@ -18,7 +18,7 @@ import {
   GROUP_ADDRESSED_NUDGE_SUFFIX,
   isGroupChatSelf
 } from './group-round-prompt'
-import { isGroupPassText, runGroupChatMemberTurn } from './group-turns'
+import { type GroupMemberTurnOptions, isGroupPassText, runGroupChatMemberTurn } from './group-turns'
 import type { Attachment, GroupMember, GroupMessage } from './types'
 
 export interface GroupRoundMemberContext {
@@ -66,37 +66,78 @@ export function heldMemberMessageIds(existing: string[] | undefined, delta: Grou
  *  had no cursor and replayed the whole thread, the member's own replies
  *  included, as "new since your last turn". Every reply records the newest
  *  room entry its turn was submitted with (`seenThrough`), so the member's
- *  newest stamped reply in this thread bounds what its session already holds:
- *  everything through that anchor, then its own entries that follow. A
- *  missing anchor (trimmed, or never synced) proves nothing: 0. */
+ *  stamped replies in this thread bound what its session already holds:
+ *  everything through the furthest anchor, then its own entries that follow.
+ *  An anchor missing from the log, or not before its reply, proves nothing. */
 export function groupLogSeenCursor(log: GroupMessage[], member: GroupMember, thread: string): number {
-  for (let i = log.length - 1; i >= 0; i--) {
-    const entry = log[i]
+  const position = new Map<string, number>()
+  let proven = -1
 
-    if (!entry?.seenThrough || groupThreadOf(entry) !== thread || !authoredByMember(entry, member)) {
-      continue
+  log.forEach((entry: GroupMessage, index: number) => {
+    if (entry?.id) {
+      position.set(entry.id, index)
     }
 
-    const anchor = log.findIndex((candidate: GroupMessage) => candidate?.id === entry.seenThrough)
+    // Every valid stamp is proof; the strongest wins. A reply harvested late
+    // can sit after a newer turn's reply with an older anchor.
+    const anchor = entry?.seenThrough ? position.get(entry.seenThrough) : undefined
 
-    if (anchor < 0 || anchor >= i) {
-      return 0
+    if (anchor !== undefined && groupThreadOf(entry) === thread && authoredByMember(entry, member)) {
+      proven = Math.max(proven, anchor)
     }
+  })
 
-    let mark = anchor + 1
-
-    while (mark < log.length && (groupThreadOf(log[mark]) !== thread || authoredByMember(log[mark], member))) {
-      mark += 1
-    }
-
-    return mark
+  if (proven < 0) {
+    return 0
   }
 
-  return 0
+  let mark = proven + 1
+
+  while (mark < log.length && (groupThreadOf(log[mark]) !== thread || authoredByMember(log[mark], member))) {
+    mark += 1
+  }
+
+  return mark
+}
+
+/** The member's turn payload from log index `seen`: this thread's entries
+ *  plus any held entries being released, oldest first. */
+function groupTurnPayload(
+  context: GroupRoundMemberContext,
+  member: GroupMember,
+  room: GroupChatRoom,
+  seen: number,
+  heldIds: string[]
+) {
+  const { members, thread } = context
+  const delta = room.log.slice(seen).filter((e: GroupMessage) => groupThreadOf(e) === thread)
+  const heldSet = new Set(heldIds)
+  const delivered = room.log.filter((entry: GroupMessage) => Boolean(entry.id && heldSet.has(entry.id)))
+  const deliveredIds = new Set(delivered.map((entry: GroupMessage) => entry.id).filter(Boolean))
+
+  const visibleDelta = [
+    ...delivered,
+    ...delta.filter((entry: GroupMessage) => !entry.id || !deliveredIds.has(entry.id))
+  ].sort((left, right) => Number(left.at || 0) - Number(right.at || 0))
+
+  const prompt = buildGroupChatTurnPrompt({
+    groupName: context.group,
+    members,
+    viewer: member,
+    deltaLines: formatGroupDeltaLines(visibleDelta, member, context.group)
+  })
+
+  // Images riding this delta (user attachments — member entries don't
+  // carry images today, but flatMap keeps this future-proof) get staged
+  // into the member's session so the model sees the pixels, not just
+  // the transcript's [attached image: …] marker.
+  const images = visibleDelta.flatMap((e: GroupMessage) => (Array.isArray(e.images) ? e.images : []))
+
+  return { delta, images, prompt, visibleDelta }
 }
 
 function prepareGroupRoundMember(context: GroupRoundMemberContext, member: GroupMember) {
-  const { members, thread } = context
+  const { thread } = context
 
   const room = $groupChats.get()[context.group] || {
     log: [],
@@ -105,7 +146,8 @@ function prepareGroupRoundMember(context: GroupRoundMemberContext, member: Group
 
   const memberKey = groupMemberKey(member)
   const markKey = `${thread}::${memberKey}`
-  const seen = Math.max(room.watermarks[markKey] || 0, groupLogSeenCursor(room.log, member, thread))
+  const local = room.watermarks[markKey] || 0
+  const seen = Math.max(local, groupLogSeenCursor(room.log, member, thread))
   // Delta: NEW room entries, narrowed to this thread — the member's
   // turn sees only the conversation it's part of.
   const delta = room.log.slice(seen).filter((e: GroupMessage) => groupThreadOf(e) === thread)
@@ -158,33 +200,25 @@ function prepareGroupRoundMember(context: GroupRoundMemberContext, member: Group
   }
 
   const heldIds = room.heldMessages?.[memberKey] || []
-  const heldSet = new Set(heldIds)
-  const delivered = room.log.filter((entry: GroupMessage) => Boolean(entry.id && heldSet.has(entry.id)))
-  const deliveredIds = new Set(delivered.map((entry: GroupMessage) => entry.id).filter(Boolean))
-
-  const visibleDelta = [
-    ...delivered,
-    ...delta.filter((entry: GroupMessage) => !entry.id || !deliveredIds.has(entry.id))
-  ].sort((left, right) => Number(left.at || 0) - Number(right.at || 0))
-
-  const prompt = buildGroupChatTurnPrompt({
-    groupName: context.group,
-    members,
-    viewer: member,
-    deltaLines: formatGroupDeltaLines(visibleDelta, member, context.group)
-  })
-
-  // Images riding this delta (user attachments — member entries don't
-  // carry images today, but flatMap keeps this future-proof) get staged
-  // into the member's session so the model sees the pixels, not just
-  // the transcript's [attached image: …] marker.
-  const deltaImages = visibleDelta.flatMap((e: GroupMessage) => (Array.isArray(e.images) ? e.images : []))
+  const payload = groupTurnPayload(context, member, room, seen, heldIds)
+  // The log proved more than this Desktop's watermark: if the member's
+  // session turns out to be minted by this turn, it holds none of that.
+  const fallback = seen > local ? groupTurnPayload(context, member, room, local, heldIds) : null
 
   // A user entry this turn is about to see for the first time: whatever the
   // member already posted was written without it, so it answers nothing here.
-  const seesNewUserEntry = visibleDelta.some((entry: GroupMessage) => entry.from?.kind === 'user')
+  const seesNewUserEntry = payload.visibleDelta.some((entry: GroupMessage) => entry.from?.kind === 'user')
 
-  return { room, memberKey, markKey, prompt, deltaImages, heldIds, seesNewUserEntry }
+  return {
+    room,
+    memberKey,
+    markKey,
+    prompt: payload.prompt,
+    deltaImages: payload.images,
+    freshFallback: fallback ? { images: fallback.images, prompt: fallback.prompt } : null,
+    heldIds,
+    seesNewUserEntry
+  }
 }
 
 /** True while the user's explicit address to `member` is unanswered in this
@@ -228,13 +262,13 @@ async function runVisibleMemberTurn(
   member: GroupMember,
   prompt: string,
   images?: Attachment[],
-  seenThrough?: null | string
+  options?: GroupMemberTurnOptions
 ) {
   const turn = { ...member }
   updateGroupChat(context.group, (room: GroupChatRoom) => ({ ...room, turn }), { sync: false })
 
   try {
-    return await runGroupChatMemberTurn(context.group, member, prompt, context.thread, images, seenThrough)
+    return await runGroupChatMemberTurn(context.group, member, prompt, context.thread, images, options)
   } finally {
     if (context.binding.isLive() && $groupChats.get()[context.group]?.turn === turn) {
       updateGroupChat(context.group, (room: GroupChatRoom) => ({ ...room, turn: null }), { sync: false })
@@ -258,7 +292,7 @@ export async function runGroupRoundMember(
     return false
   }
 
-  const { room, memberKey, markKey, prompt, deltaImages, heldIds, seesNewUserEntry } = prepared
+  const { room, memberKey, markKey, prompt, deltaImages, freshFallback, heldIds, seesNewUserEntry } = prepared
   const anchorId = room.log.at(-1)?.id ?? null
   // Owed only until the member answers: after its reply to the user's address,
   // a pass on a teammate's reply is ordinary consensus, not noncompliance.
@@ -267,7 +301,7 @@ export async function runGroupRoundMember(
   let accepted = false
 
   try {
-    reply = await runVisibleMemberTurn(context, member, prompt, deltaImages, anchorId)
+    reply = await runVisibleMemberTurn(context, member, prompt, deltaImages, { freshFallback, seenThrough: anchorId })
 
     // #129443: the participation rules ("reply only with something new,
     // else (pass)") let a directly addressed member pass just because a
@@ -285,7 +319,7 @@ export async function runGroupRoundMember(
         member,
         `${prompt}${GROUP_ADDRESSED_NUDGE_SUFFIX}`,
         deltaImages,
-        anchorId
+        { seenThrough: anchorId }
       )
     }
 
