@@ -37,7 +37,7 @@ def strip_legacy_protocol(text: str) -> str:
 BOT_CHAT_TITLE = "Bot Chat"
 
 _lock = threading.Lock()
-_cached: dict[str, str] = {}
+_cached: dict[str, tuple[str, str]] = {}  # home -> (capability epoch, section)
 
 
 # ── shared path / roster helpers ─────────────────────────────────────────────
@@ -335,14 +335,18 @@ def _build_section(home: Path) -> str:
 
 
 def get_bot_mode_protocol_section(home: str | os.PathLike | None = None, *, force_refresh: bool = False) -> str:
-    """Cached probe entry point — one filesystem pass per (process, home). ``home`` should be
-    the AGENT'S OWN resolved home (session-db derived), not ambient HERMES_HOME — build threads
-    can lose the ContextVar override and the env var would then name the wrong profile."""
+    """Cached probe entry point — one build per (process, home, capability epoch). ``home`` should
+    be the AGENT'S OWN resolved home (session-db derived), not ambient HERMES_HOME — build threads
+    can lose the ContextVar override and the env var would then name the wrong profile. Keyed by
+    the epoch: a stale stored prompt is rebuilt in this same long-lived process and stamped with
+    the NEW epoch, so a section cached under the old one would pin the outdated roster for good."""
     resolved = str(_resolve_home(home))
+    epoch = _swallow(lambda: capability_fingerprint(resolved), "unavailable")
     with _lock:
-        if force_refresh or resolved not in _cached:
-            _cached[resolved] = _swallow(lambda: _build_section(Path(resolved)), "")
-        return _cached[resolved]
+        hit = _cached.get(resolved)
+        if force_refresh or hit is None or hit[0] != epoch:
+            hit = _cached[resolved] = (epoch, _swallow(lambda: _build_section(Path(resolved)), ""))
+        return hit[1]
 
 
 # ── capability epoch ─────────────────────────────────────────────────────────
@@ -463,8 +467,10 @@ def capability_fingerprint(home: str | os.PathLike | None = None) -> str:
     # Peer gateways and the Desktop relay roster are part of the messaging
     # surface too: registering a peer or (dis)connecting a machine must show up.
     surface["peers"] = _peers(root)
+    # The machine name is rendered too ("@alice — on <connection_label>"): a relabelled
+    # connection must reach stored prompts.
     surface["remote_roster"] = sorted(
-        f"{r['connection_id']}:{r['profile']}:{r['title']}" for r in _remote_roster(resolved)
+        f"{r['connection_id']}:{r['profile']}:{r['title']}:{r['connection_label']}" for r in _remote_roster(resolved)
     )
     return _swallow(
         lambda: hashlib.sha256(json.dumps(surface, sort_keys=True).encode("utf-8")).hexdigest()[:12],

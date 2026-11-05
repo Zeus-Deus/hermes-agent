@@ -222,9 +222,9 @@ describe('a group room seats members from several machines', () => {
     expect(withDelta(members[1])).toMatch(/alice \[the machine running the Desktop app\]: The notes are ready\./)
     expect(withDelta(members[1])).not.toMatch(/This device/)
     expect(withDelta(members[2])).toMatch(/alice \[This device\]: The notes are ready\./)
-    // A connection with no label badges by its id.
+    // Any other badge is a name, not a point of view: a remote connection labelled "local" stays.
     expect(formatGroupChatLine({ ...reply, from: { kind: 'member', name: 'alice', source: 'local' } }, members[1])).toBe(
-      'alice [the machine running the Desktop app]: The notes are ready.'
+      'alice [local]: The notes are ready.'
     )
   })
 

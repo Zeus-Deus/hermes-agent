@@ -149,13 +149,12 @@ export function agentFacingConnectionLabel(label: string, desktopLocal: boolean)
 }
 
 /** A group transcript badge (`from.source` = `connectionLabel || connectionId`, kept verbatim as
- *  the speaker's identity token) rendered for one viewer: the Desktop's own connection — its id
- *  or the registry's default "This device" — is named from the viewer's side unless the viewer
- *  is known to be on the Desktop's machine too. */
+ *  the speaker's identity token) rendered for one viewer: the registry's "This device" label is
+ *  named from the viewer's side unless the viewer is known to be on the Desktop's machine too.
+ *  Any other badge is a name, not a point of view, and stays — a badge alone cannot prove which
+ *  connection it came from (a remote connection may be labelled "local"). */
 export function agentFacingSourceBadge(source: string, viewerOnDesktop: boolean): string {
-  const shown = source.trim()
-
-  return !viewerOnDesktop && (shown === 'local' || shown.toLowerCase() === 'this device') ? DESKTOP_MACHINE : source
+  return !viewerOnDesktop && source.trim().toLowerCase() === 'this device' ? DESKTOP_MACHINE : source
 }
 
 /** Flatten markdown syntax out of a one-line roster preview so rows read

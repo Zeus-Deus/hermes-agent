@@ -169,11 +169,24 @@ def test_deterministic_across_calls(tmp_path):
     home.mkdir()
     _make_bot_profile(home, "researcher", managed=True)
     first = bot_mode_probe.get_bot_mode_protocol_section(home)
-    # Even if the filesystem changes, the cached result must be byte-stable
-    # for the life of the process (prompt-cache invariant).
-    _make_bot_profile(home, "newbot", managed=True)
+    # Filesystem churn outside the capability surface leaves the cached result
+    # byte-stable for the life of the process (prompt-cache invariant).
+    (home / "notes.txt").write_text("unrelated", encoding="utf-8")
     second = bot_mode_probe.get_bot_mode_protocol_section(home)
     assert first == second
+
+
+def test_section_follows_the_capability_epoch_in_one_process(tmp_path):
+    """A stale stored prompt is rebuilt in the same long-lived gateway process and stamped with
+    the new epoch: the section must be rebuilt too, or the outdated roster is pinned as fresh."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    _make_bot_profile(home, "researcher", managed=True)
+    stored = bot_mode_probe.get_bot_mode_protocol_section(home) + "\n" + bot_mode_probe.epoch_line(home)
+    _make_bot_profile(home, "newbot", managed=True)
+
+    assert bot_mode_probe.stored_prompt_capability_stale(stored, home)
+    assert "`@newbot`" in bot_mode_probe.get_bot_mode_protocol_section(home)
 
 
 def test_never_raises_on_garbage(tmp_path, monkeypatch):

@@ -458,6 +458,25 @@ def test_capability_fingerprint_changes_with_relay_roster(tmp_path):
     assert before != after  # eternal Bot Chats refresh once on roster change
 
 
+def test_relabelled_machine_reaches_a_stored_bot_chat_prompt(tmp_path):
+    """The Desktop renaming a connection ("This device" -> what a remote reader should see)
+    changes only connection_label; the stored prompt must go stale and the rebuild in the same
+    process must carry the new name."""
+    from tools import bot_mode_probe
+
+    home = _managed_home(tmp_path)
+    row = {"profile": "alice", "handle": "alice", "connection_id": "local", "title": "Companion"}
+    bot_relay.write_remote_roster(home, [{**row, "connection_label": "This device"}])
+    stored = bot_mode_probe.get_bot_mode_protocol_section(home) + "\n" + bot_mode_probe.epoch_line(home)
+    assert "on This device" in stored
+
+    bot_relay.write_remote_roster(home, [{**row, "connection_label": "the machine running the Desktop app"}])
+
+    assert bot_mode_probe.stored_prompt_capability_stale(stored, home)
+    rebuilt = bot_mode_probe.get_bot_mode_protocol_section(home)
+    assert "on the machine running the Desktop app" in rebuilt and "This device" not in rebuilt
+
+
 # ── stale artifact sweep (housekeeping contract) ─────────────────────────────
 
 
