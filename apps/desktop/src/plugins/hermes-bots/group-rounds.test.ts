@@ -6,6 +6,7 @@ import type * as groupRounds from './group-rounds'
 import { createGroupGateway, drain, runTimersInline, scriptedStorage } from './group-test-utils'
 import type { GatewayOptions, ScriptedGateway } from './group-test-utils'
 import type * as groupTurns from './group-turns'
+import type { BotsMessages } from './i18n-messages'
 import type { Attachment, GroupChat, GroupMember, GroupMessage } from './types'
 
 // The round engine: who answers a room message, in what order, with what
@@ -91,6 +92,30 @@ describe('routing', () => {
     expect(rounds.resolveGroupResponders(user('@builder take this one'), MEMBERS).map(m => m.name)).toEqual(['builder'])
     expect(rounds.resolveGroupResponders(user('hello team'), MEMBERS)).toHaveLength(3)
     expect(rounds.resolveGroupResponders(user('@everyone standup'), MEMBERS)).toHaveLength(3)
+  })
+
+  // An answered approval is echoed into the log as a USER entry. Mentions in the latest user
+  // entry narrow the next round, so the echo must address nobody in any shipped locale:
+  // otherwise approving builder's command would silence every other member.
+  it('an approval echo addresses nobody, in every locale', async () => {
+    const { rounds } = await loadRoom()
+    const { BOTS_LOCALES } = await import('./i18n')
+
+    // The legacy room view's copy ships in these four; other locales fall back to `en`.
+    for (const locale of ['en', 'ja', 'zh', 'zh-hant']) {
+      for (const choice of ['once', 'session', 'always', 'deny']) {
+        const text = (BOTS_LOCALES[locale] as BotsMessages).group.approvalAnswered('builder', choice)
+
+        const echo = [
+          { at: 1, from: { kind: 'user', name: 'You' }, text: '@builder and @ops, ship it' },
+          { at: 2, from: { kind: 'user', name: 'You' }, text }
+        ] as GroupMessage[]
+
+        expect(text, `${locale}/${choice}`).toContain('builder')
+        expect(rounds.resolveGroupResponders(echo, MEMBERS), `${locale}/${choice}`).toHaveLength(3)
+        expect(rounds.explicitlyAddressedMemberKeys(echo, MEMBERS).size, `${locale}/${choice}`).toBe(0)
+      }
+    }
   })
 
   it('resolves display titles to the member and never matches @user against a bot', async () => {

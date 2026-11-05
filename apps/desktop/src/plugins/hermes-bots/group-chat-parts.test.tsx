@@ -251,8 +251,8 @@ describe('approval card (#91706)', () => {
   // other machines too) the raw command as if the user had typed it. The echo names the decision
   // and whose command it was, never the command.
   it.each([
-    ['session', "Approved @alpha's command (session)"],
-    ['deny', "Denied @alpha's command"]
+    ['session', "Approved alpha's command (session)"],
+    ['deny', "Denied alpha's command"]
   ])('echoes the %s decision into the room without the command text', async (choice, expected) => {
     const answer = vi.fn(async () => undefined)
     const append = vi.fn()

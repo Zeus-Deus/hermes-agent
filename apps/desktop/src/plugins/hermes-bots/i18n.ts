@@ -323,7 +323,7 @@ const en: BotsMessages = {
     newThreadPlaceholder: group => `New thread in ${group}… (@name to direct, @everyone for all)`,
     everyoneMeta: 'Every bot in the room',
     approvalAnswered: (handle, choice) =>
-      choice === 'deny' ? `Denied @${handle}'s command` : `Approved @${handle}'s command (${choice})`,
+      choice === 'deny' ? `Denied ${handle}'s command` : `Approved ${handle}'s command (${choice})`,
     answerFailed: (handle, error) => `Could not send the answer to @${handle}: ${error}`,
     wantsToRunCommand: handle => `@${handle} wants to run a command:`,
     asks: handle => `@${handle} asks:`,
@@ -768,7 +768,7 @@ const ja: BotsMessages = {
     newThreadPlaceholder: group => `${group}で新しいスレッド…（@名前で個別、@everyoneで全員）`,
     everyoneMeta: 'ルーム内のすべてのボット',
     approvalAnswered: (handle, choice) =>
-      choice === 'deny' ? `@${handle}のコマンドを拒否しました` : `@${handle}のコマンドを承認しました（${choice}）`,
+      choice === 'deny' ? `${handle}のコマンドを拒否しました` : `${handle}のコマンドを承認しました（${choice}）`,
     answerFailed: (handle, error) => `@${handle}に回答を送信できませんでした: ${error}`,
     wantsToRunCommand: handle => `@${handle}がコマンドを実行しようとしています:`,
     asks: handle => `@${handle}からの質問:`,
@@ -1203,7 +1203,7 @@ const zh: BotsMessages = {
     newThreadPlaceholder: group => `在 ${group} 中开启新讨论串…（@名称指定，@everyone 全体）`,
     everyoneMeta: '房间里的所有机器人',
     approvalAnswered: (handle, choice) =>
-      choice === 'deny' ? `已拒绝 @${handle} 的命令` : `已批准 @${handle} 的命令（${choice}）`,
+      choice === 'deny' ? `已拒绝 ${handle} 的命令` : `已批准 ${handle} 的命令（${choice}）`,
     answerFailed: (handle, error) => `无法将回答发送给 @${handle}：${error}`,
     wantsToRunCommand: handle => `@${handle} 想执行一个命令：`,
     asks: handle => `@${handle} 的提问：`,
@@ -1634,7 +1634,7 @@ const zhHant: BotsMessages = {
     newThreadPlaceholder: group => `在 ${group} 中開啟新討論串…（@名稱指定，@everyone 全體）`,
     everyoneMeta: '房間裡的所有機器人',
     approvalAnswered: (handle, choice) =>
-      choice === 'deny' ? `已拒絕 @${handle} 的命令` : `已核准 @${handle} 的命令（${choice}）`,
+      choice === 'deny' ? `已拒絕 ${handle} 的命令` : `已核准 ${handle} 的命令（${choice}）`,
     answerFailed: (handle, error) => `無法將回答傳送給 @${handle}：${error}`,
     wantsToRunCommand: handle => `@${handle} 想執行一個命令：`,
     asks: handle => `@${handle} 的提問：`,

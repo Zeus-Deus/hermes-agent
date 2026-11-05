@@ -446,7 +446,8 @@ export function GroupClarifyCard({ entry, members }: GroupClarifyCardProps) {
       // Echo the exchange into the room log so the thread reads complete. Every member reads
       // this user entry as "You (user): …" on its next turn, so an approval names the decision
       // and whose command it was, never the command: echoing it handed each member (peers on
-      // other machines too) the raw command as if the user had typed it.
+      // other machines too) the raw command as if the user had typed it. The handle carries no
+      // `@`: a user entry's mentions narrow who answers the next round (resolveGroupResponders).
       const summary = isApproval
         ? b.group.approvalAnswered(botHandle(entry.member, member), resolve(questions[0]))
         : questions
