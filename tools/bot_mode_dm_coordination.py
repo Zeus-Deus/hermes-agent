@@ -40,10 +40,10 @@ def split_targets(target: str, sender: Any) -> list[str]:
     the destination each name reaches (``hermes`` and ``default`` are one bot; a registered peer
     and a local bot whose friendly name matches it are two). A friendly name that itself contains
     a comma ('QA, Release') still resolves whole."""
-    from tools.bot_mode_dm import _resolve_local_name
+    from tools.bot_mode_dm import _resolve_local_name, unqualify_own_machine
 
     raw = str(target or "").strip().lstrip("@")
-    if "," not in raw or _resolve_local_name(raw, list(sender.roster_homes), sender.root) is not None:
+    if "," not in raw or _resolve_local_name(unqualify_own_machine(raw), list(sender.roster_homes), sender.root) is not None:
         return [raw] if raw else []
     named: dict[tuple[str, str], str] = {}
     for part in raw.split(","):
@@ -56,8 +56,13 @@ def split_targets(target: str, sender: Any) -> list[str]:
 def _destination(name: str, sender: Any) -> tuple[str, str]:
     """``(transport, recipient)`` for ``name``, resolved in ``_dispatch``'s order: a peer target
     first, then a connection-qualified relay name, then a local bot (folder id or friendly name)."""
-    from tools.bot_mode_dm import _PEER_TARGET_RE, _resolve_local_name
+    from tools.bot_mode_dm import _PEER_TARGET_RE, _resolve_local_name, unqualify_own_machine
 
+    own_machine = unqualify_own_machine(name)
+    if own_machine != name:
+        # ``_dispatch`` delivers this form to a local bot only — never to a peer of the same name.
+        local = _resolve_local_name(own_machine, list(sender.roster_homes), sender.root)
+        return ("local", local) if local is not None else ("unresolved", name.lower())
     peer = _PEER_TARGET_RE.match(name)
     if peer or name.lower() in sender.peers:
         peer_name, peer_profile = peer.groups() if peer else (name.lower(), None)

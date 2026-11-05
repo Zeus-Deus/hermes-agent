@@ -1378,3 +1378,333 @@ describe('the drain loop does not let one delivery hold every other gateway’s 
     stopBotRelay()
   })
 })
+
+describe("the Desktop's own machine goes out under its install id, never the shared 'local' (#142128)", () => {
+  // Every Desktop calls its own machine 'local'. A server holding two Desktops' pushes
+  // resolved `default@local` against whichever roster landed last, and whichever Desktop
+  // drained the envelope delivered it to ITS OWN default.
+  const INSTALL = '0123456789abcdef0123456789abcdef'
+  const OWN = 'local-0123456789ab'
+  const envelope = { id: 'env-l', message: 'status?', target_connection: OWN, target_profile: 'ops' }
+
+  beforeEach(() => {
+    hostMock.profileRoutes = vi.fn(async () => [route('local', { mode: 'local' }), route('srv')])
+  })
+
+  function serve(options: { envelopes?: Record<string, unknown[]>; install?: () => string | undefined } = {}) {
+    return respondWith(call => {
+      if (call.method === 'profiles.list') {
+        return call.connectionId === 'local'
+          ? { install_id: options.install ? options.install() : INSTALL, profiles: [{ name: 'ops' }] }
+          : { install_id: 'f'.repeat(32), profiles: [{ name: 'scout' }] }
+      }
+
+      if (call.method === 'bot_relay.outbox.drain') {
+        return { envelopes: options.envelopes?.[call.connectionId] ?? [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { status: 'settled', delivery_id: call.params.id, admission_id: 'admission', reply: 'done' }
+      }
+
+      return {}
+    })
+  }
+
+  it('stamps this machine’s rows with local-<install> in the roster another gateway gets', async () => {
+    const calls = serve()
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+
+    const pushed = (id: string) =>
+      calls.find(call => call.method === 'bot_relay.roster.sync' && call.connectionId === id)
+
+    expect(pushed('srv')?.params.agents).toEqual([expect.objectContaining({ connection_id: OWN, profile: 'ops' })])
+    // A remote connection keeps its registry id: the drain maps it to that socket.
+    expect(pushed('local')?.params.agents).toEqual([
+      expect.objectContaining({ connection_id: 'srv', profile: 'scout' })
+    ])
+
+    stopBotRelay()
+  })
+
+  it("keeps the legacy 'local' when the local gateway reports no install id", async () => {
+    const calls = serve({ install: () => undefined })
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(
+      calls.find(call => call.method === 'bot_relay.roster.sync' && call.connectionId === 'srv')?.params.agents
+    ).toEqual([expect.objectContaining({ connection_id: 'local', profile: 'ops' })])
+
+    stopBotRelay()
+  })
+
+  it('delivers its own local-<install> target on the local socket, and names a local sender the same way', async () => {
+    const calls = serve({
+      envelopes: {
+        local: [
+          { from_handle: 'ops', from_profile: 'ops', id: 'env-out', target_connection: 'srv', target_profile: 'scout' }
+        ],
+        srv: [envelope]
+      }
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    await pushAndSettle()
+
+    const deliveries = calls.filter(call => call.method === 'bot_relay.deliver')
+
+    expect(deliveries.find(call => call.params.id === 'env-l')).toMatchObject({
+      connectionId: 'local',
+      params: { profile: 'ops' }
+    })
+    // The recipient stamps "Message from … (@ops@<this>)": it must be a form its roster resolves.
+    expect(deliveries.find(call => call.params.id === 'env-out')).toMatchObject({
+      connectionId: 'srv',
+      params: { from_connection: OWN }
+    })
+    expect(calls.find(call => call.method === 'bot_relay.reply' && call.params.id === 'env-l')).toMatchObject({
+      connectionId: 'srv',
+      params: { reply: 'done' }
+    })
+
+    stopBotRelay()
+  })
+
+  it.each([
+    ["another Desktop's local-<install>", 'local-ffffffffffff'],
+    ["an older Desktop's bare 'local'", 'local']
+  ])('leaves %s alone: no delivery to this machine, and no reply that would beat the owner’s', async (_label, id) => {
+    const calls = serve({ envelopes: { srv: [{ ...envelope, id: 'env-x', target_connection: id }] } })
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    await pushAndSettle()
+
+    expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
+    expect(calls.filter(call => call.method === 'bot_relay.reply')).toEqual([])
+
+    stopBotRelay()
+  })
+
+  it('learns its own id in the drain when the roster loop has not heard it yet', async () => {
+    let lists = 0
+
+    const calls = serve({
+      envelopes: { srv: [envelope] },
+      install: () => {
+        lists += 1
+
+        // The roster loop's fetch blips; the drain's own lookup answers.
+        if (lists === 1) {
+          throw new Error('socket blip')
+        }
+
+        return INSTALL
+      }
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    await pushAndSettle()
+
+    expect(calls.find(call => call.method === 'bot_relay.deliver')).toMatchObject({
+      connectionId: 'local',
+      params: { id: 'env-l' }
+    })
+
+    stopBotRelay()
+  })
+
+  it('holds what depends on its own id while the local gateway has not answered, then delivers it', async () => {
+    let localUp = false
+
+    const calls = serve({
+      envelopes: {
+        local: [
+          { from_handle: 'ops', from_profile: 'ops', id: 'env-out', target_connection: 'srv', target_profile: 'scout' }
+        ],
+        srv: [envelope, { ...envelope, id: 'env-bare', target_connection: 'local' }]
+      },
+      install: () => {
+        if (!localUp) {
+          throw new Error('local gateway not up yet')
+        }
+
+        return INSTALL
+      }
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    await pushAndSettle()
+
+    // Unknown identity: neither form is guessed, a local sender gets no ambiguous name, nothing replies.
+    expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
+    expect(calls.filter(call => call.method === 'bot_relay.reply')).toEqual([])
+
+    // The local gateway answers; no new push arrives — the backstop drain retries what waited.
+    localUp = true
+    await vi.advanceTimersByTimeAsync(RELAY_DRAIN_INTERVAL_MS)
+
+    const deliveries = calls.filter(call => call.method === 'bot_relay.deliver')
+
+    expect(deliveries.find(call => call.params.id === 'env-l')?.connectionId).toBe('local')
+    expect(deliveries.find(call => call.params.id === 'env-out')).toMatchObject({
+      connectionId: 'srv',
+      params: { from_connection: OWN }
+    })
+    // Now known: the bare 'local' is an older Desktop's machine, never this one.
+    expect(deliveries.find(call => call.params.id === 'env-bare')).toBeUndefined()
+
+    stopBotRelay()
+  })
+
+  it("still delivers a bare 'local' to a local gateway that reports no install id (legacy)", async () => {
+    const calls = serve({
+      envelopes: { srv: [{ ...envelope, id: 'env-bare', target_connection: 'local' }] },
+      install: () => undefined
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    await pushAndSettle()
+
+    expect(calls.find(call => call.method === 'bot_relay.deliver')?.connectionId).toBe('local')
+
+    stopBotRelay()
+  })
+
+  it('leaves every local-machine target alone, and stops retrying, on a Desktop that does not relay its own machine', async () => {
+    // E.g. a remote-primary Desktop: no local route, so no own id will ever be learned.
+    hostMock.profileRoutes = vi.fn(async () => [route('srv'), route('nas')])
+
+    const calls = serve({
+      envelopes: { srv: [envelope, { ...envelope, id: 'env-bare', target_connection: 'local' }] }
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    await pushAndSettle()
+    calls.length = 0
+    await vi.advanceTimersByTimeAsync(RELAY_DRAIN_INTERVAL_MS * 2)
+
+    expect(calls.filter(call => call.method !== 'profiles.list' && call.method !== 'bot_relay.roster.sync')).toEqual([])
+
+    stopBotRelay()
+  })
+
+  it('waits for its own id without holding anyone else’s mail', async () => {
+    hostMock.profileRoutes = vi.fn(async () => [route('local', { mode: 'local' }), route('srv'), route('nas')])
+
+    let answer!: (value: unknown) => void
+    let drained = false
+    let lists = 0
+
+    const calls = respondWith(call => {
+      if (call.method === 'profiles.list') {
+        if (call.connectionId !== 'local') {
+          return { profiles: [{ name: 'scout' }] }
+        }
+
+        lists += 1
+
+        // The roster loop's read fails; the drain's own lookup stalls until released.
+        if (lists === 1) {
+          throw new Error('local gateway not up yet')
+        }
+
+        return new Promise(resolve => {
+          answer = resolve
+        })
+      }
+
+      if (call.method === 'bot_relay.outbox.drain') {
+        const first = call.connectionId === 'srv' && !drained
+
+        drained ||= first
+
+        return {
+          envelopes: first
+            ? [envelope, { ...envelope, id: 'env-nas', target_connection: 'nas', target_profile: 'scout' }]
+            : []
+        }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { status: 'settled', delivery_id: call.params.id, admission_id: 'admission', reply: 'done' }
+      }
+
+      return {}
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    await pushAndSettle()
+
+    const delivered = () => calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.params.id)
+
+    expect(delivered()).toEqual(['env-nas'])
+
+    // The id arrives: the held envelope goes out now, not at the 30s backstop.
+    answer({ install_id: INSTALL, profiles: [{ name: 'ops' }] })
+    await vi.advanceTimersByTimeAsync(RELAY_PUSH_DEBOUNCE_MS + 10)
+
+    expect(delivered()).toEqual(['env-nas', 'env-l'])
+    expect(calls.find(call => call.params.id === 'env-l' && call.method === 'bot_relay.deliver')?.connectionId).toBe(
+      'local'
+    )
+
+    stopBotRelay()
+  })
+
+  it('refuses a target that names both this machine and a registry connection', async () => {
+    hostMock.profileRoutes = vi.fn(async () => [route('local', { mode: 'local' }), route('srv'), route(OWN)])
+
+    const calls = serve({ envelopes: { srv: [envelope] } })
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    await pushAndSettle()
+
+    expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
+    expect(calls.find(call => call.method === 'bot_relay.reply')?.params.error).toMatch(/names two machines/)
+
+    stopBotRelay()
+  })
+
+  it('a registry connection that happens to be named local-… is still that connection', async () => {
+    hostMock.profileRoutes = vi.fn(async () => [route('local', { mode: 'local' }), route('local-0000aaaa1111')])
+
+    const calls = serve({ envelopes: { local: [{ ...envelope, target_connection: 'local-0000aaaa1111' }] } })
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    await pushAndSettle()
+
+    expect(calls.find(call => call.method === 'bot_relay.deliver')?.connectionId).toBe('local-0000aaaa1111')
+
+    stopBotRelay()
+  })
+})

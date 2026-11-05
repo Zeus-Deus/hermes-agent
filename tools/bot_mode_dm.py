@@ -193,6 +193,18 @@ def _resolve_local_name(target: str, roster: list[str], root: Path | None = None
     return next(iter(hits)) if len(hits) == 1 else None
 
 
+def unqualify_own_machine(raw_target: str) -> str:
+    """``<name>@<this machine's relay id>`` → ``<name>``: the form this machine's Desktop names it by to OTHER
+    gateways ('writer@local-<install>', ``tools.bot_relay.own_relay_connection_id``). The relay roster never
+    lists this gateway's own bots, so the form only resolves as the bare local name. Anything else unchanged."""
+    from tools.bot_relay import own_relay_connection_id
+
+    name, at, conn = str(raw_target or "").strip().lstrip("@").partition("@")
+    if at and name.strip() and conn.strip() and conn.strip().lower() == own_relay_connection_id():
+        return name.strip()
+    return raw_target
+
+
 def _err(message: str, *, roster: list[str] | None = None, peers: list[str] | None = None) -> str:
     from tools.bot_failure_reasons import classify_agent_error
 
@@ -328,6 +340,9 @@ def _dispatch(raw_target: str, content: str, sender: Sender, *, wake: Any) -> st
                                f"@{peer_profile or peer_name} on peer '{peer_name}'", stdin_file=True,
                                author=peer_author, **delivery)
 
+    # Qualified with this machine: only a local bot answers to it — never a remote namesake via the relay.
+    own_machine = unqualify_own_machine(raw_target)
+    explicitly_local, raw_target = own_machine != raw_target, own_machine
     # A connection-qualified target ('hermes@mini') names a relay row outright; it is the form the relay itself
     # hands out for a colliding row, and stamps on replies. Resolved locally first, a local bot whose friendly
     # name slugs to 'hermes-mini' captured it. An '@' name no connection answers to still resolves locally.
@@ -345,7 +360,8 @@ def _dispatch(raw_target: str, content: str, sender: Sender, *, wake: Any) -> st
         # Unknown locally, or same-name target on ANOTHER connection (this gateway's 'default'
         # messaging the cloud 'default'): every Desktop-connected gateway is reachable via the
         # relay roster, so try that before reporting a resolution failure / self-message.
-        relayed = _try_relay_delivery(Path(sender.home), raw_target, content, me, **delivery)
+        relayed = None if explicitly_local else _try_relay_delivery(Path(sender.home), raw_target, content, me,
+                                                                     **delivery)
         if relayed is not None:
             return relayed
         if resolved == me:

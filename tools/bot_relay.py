@@ -83,6 +83,21 @@ class EnvelopeRefusedError(RuntimeError):
 _HANDLE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 
+def own_relay_connection_id() -> str:
+    """The connection id a Desktop on THIS machine gives this gateway in the rosters it pushes to OTHER
+    gateways: ``local-`` + the first 12 hex of this install's id (``relayConnectionId`` in
+    apps/desktop/src/plugins/hermes-bots/relay.ts), never the bare ``local`` every Desktop uses for its
+    own machine (#142128). "" when the install id is unavailable."""
+    try:
+        from hermes_cli.install_identity import get_install_id
+
+        install = str(get_install_id() or "").strip().lower()
+    except Exception:
+        logger.debug("install id unavailable for the relay connection id", exc_info=True)
+        return ""
+    return f"local-{install[:12]}" if re.fullmatch(r"[0-9a-f]{32}", install) else ""
+
+
 def relay_root(root: Path | str) -> Path:
     return Path(root) / RELAY_DIR_NAME
 

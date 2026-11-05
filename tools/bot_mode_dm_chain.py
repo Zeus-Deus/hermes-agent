@@ -19,9 +19,13 @@ def recipient_key(raw_target: str, sender: Any) -> str:
     order: a registered peer, then a connection-qualified relay row, then a local bot (folder id,
     ``hermes``, friendly name), then any relay row."""
     from agent.turn_author import bot_author_id
-    from tools.bot_mode_dm import _PEER_TARGET_RE, _resolve_local_name
+    from tools.bot_mode_dm import _PEER_TARGET_RE, _resolve_local_name, unqualify_own_machine
 
     name = raw_target.strip().lstrip("@")
+    own_machine = unqualify_own_machine(name)
+    if own_machine != name:
+        local = _resolve_local_name(own_machine, list(sender.roster_homes), sender.root)
+        return bot_author_id(local) if local is not None and local != sender.me else f"unresolved:{name.lower()}"
     peer = _PEER_TARGET_RE.match(name)
     if peer or name.lower() in sender.peers:
         peer_name, peer_profile = peer.groups() if peer else (name.lower(), None)

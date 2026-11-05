@@ -71,7 +71,7 @@ import { groupWorkspaceOwnerKey } from './group-membership'
 import { annotateOrphanedGroupChatMembers } from './hygiene'
 import { BOTS_LOCALES } from './i18n'
 import { displayName } from './labels'
-import { startBotRelay, stopBotRelay } from './relay'
+import { relayTargetConnection, startBotRelay, stopBotRelay } from './relay'
 import { $activityToasts } from './roster-actions'
 import {
   botChatOwnsWorkspace,
@@ -823,6 +823,7 @@ export default {
           }
 
           const roster = Array.isArray(cached?.profiles) ? cached.profiles : null
+          const sources = Array.isArray(cached?.sources) ? cached.sources : []
           let mentionedBots = roster ? resolveRosterMentions(text, roster, live) : []
 
           if (!roster) {
@@ -867,17 +868,29 @@ export default {
             // neither resolver accepts — annotate the canonical form instead.
             // The default's canonical form is 'hermes' only while no real
             // 'hermes' profile holds it; then it is 'default' itself.
-            const target =
+            // The connection is named the way the relay pushed it to the other
+            // gateways: this machine is `local-<install>`, never the bare 'local'
+            // every Desktop has (#142128) — and no target at all while unknown.
+            const targetConnection =
               bot.remoteSource && bot.connectionId
-                ? `${bot.name}@${bot.connectionId}`
-                : botHandle(bot.name, { hermesHandleTaken: bot.hermesHandleTaken })
+                ? relayTargetConnection(
+                    bot.connectionId,
+                    sources.find(source => source?.connectionId === bot.connectionId)?.installId
+                  )
+                : undefined
+
+            const target = targetConnection
+              ? `${bot.name}@${targetConnection}`
+              : botHandle(bot.name, { hermesHandleTaken: bot.hermesHandleTaken })
 
             // Local rows get the same annotation whenever their UI alias
             // ('default-this-device') differs from the resolvable handle —
             // otherwise the agent has only the alias to go on and the local
             // path rejects it the same way (#97678).
             const where = bot.remoteSource
-              ? ` — on ${bot.connectionLabel || bot.connectionId} (message_agent target: "${target}")`
+              ? targetConnection === null
+                ? ` — on ${bot.connectionLabel || bot.connectionId} (no message_agent target yet: this Desktop has not finished connecting that machine to the relay)`
+                : ` — on ${bot.connectionLabel || bot.connectionId} (message_agent target: "${target}")`
               : handle !== target
                 ? ` (message_agent target: "${target}")`
                 : ''

@@ -61,7 +61,7 @@ const ROSTER = {
 }
 
 const { cache, hostMock, live } = vi.hoisted(() => {
-  const live = { focused: 'default', profile: 'default', stored: null as string | null }
+  const live = { connection: 'local', focused: 'default', profile: 'default', stored: null as string | null }
 
   return {
     cache: new Map<string, { key: unknown[]; value: unknown }>(),
@@ -76,7 +76,7 @@ const { cache, hostMock, live } = vi.hoisted(() => {
         })
       ),
       state: {
-        connectionId: { get: () => 'local', listen: () => () => undefined },
+        connectionId: { get: () => live.connection, listen: () => () => undefined },
         focusedSessionProfile: { get: () => live.focused, listen: () => () => undefined },
         focusedStoredSessionId: { get: () => live.stored, listen: () => () => undefined },
         gateway: { get: () => null, listen: () => () => undefined },
@@ -137,13 +137,15 @@ interface Fixture {
   /** Profile owning the chat on screen; a bot never @s itself. */
   focused?: string
   profiles?: Array<Record<string, unknown>> | null
+  sources?: Array<Record<string, unknown>>
 }
 
 /** Register the plugin and hand back its composer contributions. */
 async function contributions({
   cacheKeyConnection = 'local',
   focused = 'default',
-  profiles = ROSTER.profiles
+  profiles = ROSTER.profiles,
+  sources
 }: Fixture = {}) {
   vi.resetModules()
   cache.clear()
@@ -155,7 +157,7 @@ async function contributions({
   if (profiles) {
     cache.set(JSON.stringify(['hermes-bots', 'roster', cacheKeyConnection]), {
       key: ['hermes-bots', 'roster', cacheKeyConnection],
-      value: { profiles }
+      value: { profiles, ...(sources ? { sources } : {}) }
     })
   }
 
@@ -191,6 +193,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  live.connection = 'local'
   live.focused = 'default'
   live.profile = 'default'
   live.stored = null
@@ -435,6 +438,67 @@ describe('the mention middleware', () => {
     expect(result.text).toMatch(/message_agent target: "default@vera"/)
     expect(result.text).not.toMatch(/message_agent target: "default-vera/)
     expect(result.text).toMatch(/on Vera/)
+  })
+
+  const ON_ANOTHER_GATEWAY = [
+    { connectionId: 'srv', name: 'scout' },
+    { connectionId: 'local', connectionLabel: 'This device', handle: 'writer', name: 'writer', remoteSource: true }
+  ]
+
+  it.each([
+    ['0123456789abcdef0123456789abcdef', '(message_agent target: "writer@local-0123456789ab")'],
+    // Unknown is not legacy: a guessed bare 'local' could reach another Desktop's machine.
+    [undefined, '(no message_agent target yet']
+  ])('names this machine by its install id to a bot on another gateway (#142128): %s', async (installId, expected) => {
+    // Every Desktop calls its own machine 'local'; on a server two Desktops share,
+    // `writer@local` reached whichever Desktop's writer its roster held last.
+    live.connection = 'srv'
+
+    const { handler } = await contributions({
+      cacheKeyConnection: 'srv',
+      focused: 'scout',
+      profiles: ON_ANOTHER_GATEWAY,
+      sources: [
+        { connectionId: 'local', kind: 'local', ...(installId ? { installId } : {}) },
+        { connectionId: 'srv', installId: 'f'.repeat(32), kind: 'remote' }
+      ]
+    })
+
+    const result = await handler({ text: 'ask @writer for the status' })
+
+    expect(result.text).toContain(expected)
+    expect(result.text).not.toContain('writer@local"')
+  })
+
+  it("prefers the id the relay pushed when Electron's status probe saw none", async () => {
+    live.connection = 'srv'
+    ;(hostMock as Record<string, unknown>).profileRoutes = vi.fn(async () => [
+      { connectionId: 'local', mode: 'local', profile: 'default', targetProfile: 'default' },
+      { connectionId: 'srv', mode: 'remote', profile: 'default', targetProfile: 'default' }
+    ])
+    ;(hostMock.requestProfile as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_route: unknown, method: string) =>
+        method === 'profiles.list' ? { install_id: '0123456789abcdef0123456789abcdef', profiles: [] } : {}
+    )
+
+    try {
+      const { handler } = await contributions({
+        cacheKeyConnection: 'srv',
+        focused: 'scout',
+        profiles: ON_ANOTHER_GATEWAY,
+        sources: [{ connectionId: 'local', kind: 'local' }]
+      })
+
+      await vi.waitFor(async () => {
+        expect((await handler({ text: 'ask @writer for the status' })).text).toContain(
+          '(message_agent target: "writer@local-0123456789ab")'
+        )
+      })
+    } finally {
+      ;(await import('./relay')).stopBotRelay()
+      delete (hostMock as Record<string, unknown>).profileRoutes
+      ;(hostMock.requestProfile as ReturnType<typeof vi.fn>).mockImplementation(async () => ({}))
+    }
   })
 
   it('annotates the resolvable handle for a local row whose UI alias differs', async () => {

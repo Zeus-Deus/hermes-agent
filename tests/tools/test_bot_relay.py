@@ -801,3 +801,126 @@ def test_delivery_env_single_profile_host_passes_the_process_env_through(tmp_pat
     monkeypatch.setenv("OPENROUTER_API_KEY", "from-shell")
 
     assert bot_relay.delivery_env(None, None)["OPENROUTER_API_KEY"] == "from-shell"
+
+
+# ── this machine's relay id (#142128) ───────────────────────────────────────
+
+_INSTALL = "0123456789abcdef0123456789abcdef"
+
+
+@pytest.mark.parametrize(("install", "expected"), [
+    (_INSTALL, "local-0123456789ab"),
+    (_INSTALL.upper(), "local-0123456789ab"),
+    (None, ""),
+    ("not-an-install-id", ""),
+])
+def test_own_relay_connection_id_mirrors_the_desktop_form(monkeypatch, install, expected):
+    """relayConnectionId in apps/desktop/src/plugins/hermes-bots/relay.ts builds the same string; the
+    relay tests there pin the TS side with this install id."""
+    monkeypatch.setattr("hermes_cli.install_identity.get_install_id", lambda **_: install)
+    assert bot_relay.own_relay_connection_id() == expected
+
+
+def test_message_agent_resolves_this_machines_own_relay_form_locally(tmp_path, monkeypatch):
+    """The Desktop names this gateway ``local-<install>`` to every OTHER gateway, and its relay roster
+    never lists this gateway's own bots — so ``researcher@local-<install>`` reached here must be the
+    local researcher, not "No teammate named ..." (the same-machine rejection the user hit)."""
+    home = _managed_home(tmp_path)
+    monkeypatch.setattr("hermes_cli.install_identity.get_install_id", lambda **_: _INSTALL)
+    started = {}
+
+    def _fake_start(argv, content, label, **kwargs):
+        started.update(argv=argv, label=label)
+        return json.dumps({"status": "queued", "to": label})
+
+    monkeypatch.setattr("tools.bot_mode_dm._start_delivery", _fake_start)
+    agent = _FakeAgent(home)
+    out = json.loads(message_agent_tool(target="researcher@local-0123456789AB", message="ping", agent=agent))
+    assert out.get("status") == "queued", out
+    assert started["argv"][-2:] == ["-p", "researcher"] and started["label"] == "@researcher"
+
+
+def test_message_agent_never_takes_a_bare_local_or_foreign_local_for_itself(tmp_path, monkeypatch):
+    """``local`` is whichever Desktop wrote the roster, and another install's ``local-<install>`` is another
+    machine: neither may land on this gateway's own same-named bot."""
+    home = _managed_home(tmp_path)
+    monkeypatch.setattr("hermes_cli.install_identity.get_install_id", lambda **_: _INSTALL)
+    monkeypatch.setattr("tools.bot_mode_dm._start_delivery",
+                        lambda *a, **k: pytest.fail("delivered to this machine's own bot"))
+    agent = _FakeAgent(home)
+    for target in ("researcher@local", "researcher@local-ffffffffffff"):
+        out = json.loads(message_agent_tool(target=target, message="ping", agent=agent))
+        assert "No teammate named" in out.get("error", ""), out
+
+
+def test_chain_gate_and_fan_out_read_this_machines_own_form_as_the_local_bot(tmp_path, monkeypatch):
+    """The chain gate keys a send by the author id its turn would carry, and fan-out dedupes by destination:
+    both must see ``researcher@local-<install>`` as the local researcher ``_dispatch`` delivers to."""
+    from tools.bot_mode_dm import Sender
+    from tools.bot_mode_dm_chain import recipient_key
+    from tools.bot_mode_dm_coordination import split_targets
+
+    home = _managed_home(tmp_path)
+    monkeypatch.setattr("hermes_cli.install_identity.get_install_id", lambda **_: _INSTALL)
+    sender = Sender(home=str(home), root=home, me="default", roster_homes={"default": home,
+                    "researcher": home / "profiles" / "researcher"}, peers=[], teammates=["researcher"],
+                    task_id=None, agent=None)
+    assert recipient_key("researcher@local-0123456789ab", sender) == recipient_key("researcher", sender) == "bot:researcher"
+    assert split_targets("researcher, researcher@local-0123456789ab", sender) == ["researcher"]
+
+
+def test_this_machines_own_form_never_falls_through_to_a_remote_namesake(tmp_path, monkeypatch):
+    """``<name>@<this machine>`` names a bot HERE: the self-target and a missing profile are refused,
+    even when the relay roster holds a remote bot of the same name."""
+    from tools.bot_mode_dm import Sender
+    from tools.bot_mode_dm_chain import recipient_key
+
+    home = _managed_home(tmp_path)
+    monkeypatch.setattr("hermes_cli.install_identity.get_install_id", lambda **_: _INSTALL)
+    bot_relay.write_remote_roster(home, [
+        {"profile": "default", "handle": "hermes", "connection_id": "srv"},
+        {"profile": "ghost", "handle": "ghost", "connection_id": "srv"},
+    ])
+    monkeypatch.setattr("tools.bot_mode_dm._spawn_delivery", lambda *a, **k: pytest.fail("relayed to a remote namesake"))
+    monkeypatch.setattr("tools.bot_mode_dm._start_delivery", lambda *a, **k: pytest.fail("delivered"))
+    agent = _FakeAgent(home)
+    assert "can't message yourself" in json.loads(
+        message_agent_tool(target="default@local-0123456789ab", message="ping", agent=agent))["error"]
+    assert "No teammate named" in json.loads(
+        message_agent_tool(target="ghost@local-0123456789ab", message="ping", agent=agent))["error"]
+    assert bot_relay.read_remote_roster(home) and not list((bot_relay.relay_root(home) / bot_relay.OUTBOX_DIR).glob("*.json"))
+    sender = Sender(home=str(home), root=home, me="default", roster_homes={"default": home}, peers=[],
+                    teammates=[], task_id=None, agent=None)
+    assert recipient_key("ghost@local-0123456789ab", sender).startswith("unresolved:")
+
+
+def test_fan_out_keeps_a_peer_and_a_local_bot_of_the_same_name_apart(tmp_path, monkeypatch):
+    """``_dispatch`` sends ``mini`` to the registered peer and ``mini@<this machine>`` to the local bot, so
+    fan-out must keep both, in either order."""
+    from tools.bot_mode_dm import Sender
+    from tools.bot_mode_dm_coordination import split_targets
+
+    home = _managed_home(tmp_path)
+    (home / "profiles" / "mini").mkdir(parents=True)
+    monkeypatch.setattr("hermes_cli.install_identity.get_install_id", lambda **_: _INSTALL)
+    sender = Sender(home=str(home), root=home, me="default", peers=["mini"], teammates=["mini"], task_id=None,
+                    agent=None, roster_homes={"default": home, "mini": home / "profiles" / "mini"})
+    assert split_targets("mini, mini@local-0123456789ab", sender) == ["mini", "mini@local-0123456789ab"]
+    assert split_targets("mini@local-0123456789ab, mini", sender) == ["mini@local-0123456789ab", "mini"]
+
+
+def test_a_friendly_name_with_a_comma_stays_whole_when_qualified_with_this_machine(tmp_path, monkeypatch):
+    from tools.bot_mode_dm import Sender
+    from tools.bot_mode_dm_coordination import split_targets
+
+    home = _managed_home(tmp_path)
+    for name, title in (("qa-bot", "QA, Release"), ("qa", ""), ("release", "")):
+        (home / "profiles" / name).mkdir(parents=True)
+        if title:
+            (home / "profiles" / name / "profile.yaml").write_text(f'display_name: "{title}"\n', encoding="utf-8")
+    monkeypatch.setattr("hermes_cli.install_identity.get_install_id", lambda **_: _INSTALL)
+    homes = {"default": home, **{n: home / "profiles" / n for n in ("qa-bot", "qa", "release")}}
+    sender = Sender(home=str(home), root=home, me="default", roster_homes=homes, peers=[], teammates=[],
+                    task_id=None, agent=None)
+    assert split_targets("QA, Release", sender) == ["QA, Release"]
+    assert split_targets("QA, Release@local-0123456789ab", sender) == ["QA, Release@local-0123456789ab"]

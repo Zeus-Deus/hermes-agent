@@ -145,6 +145,67 @@ interface RelayAgentRow {
   title: string
 }
 
+// ── the Desktop's own machine, as other gateways must name it (#142128) ──
+// 'local' is the registry's reserved id for the machine THIS Desktop runs on —
+// and every Desktop has one. Rows stamped with it in another gateway's relay
+// roster read as "whichever Desktop drains the envelope": a server holding two
+// Desktops' pushes delivered `default@local` to the wrong machine's default.
+// Outbound, the id becomes `local-<first 12 hex of that gateway's install id>`
+// (tools/bot_relay.py own_relay_connection_id mirrors it, so the gateway also
+// recognises its own form); inbound, the drain maps it back. A local backend
+// that reports no install id keeps the legacy 'local'. Until the local gateway
+// has answered, this Desktop cannot tell its own machine from another one, so
+// an envelope that needs that answer waits for it instead of guessing.
+const LOCAL_CONNECTION_ID = 'local'
+const INSTALL_ID_RE = /^[0-9a-f]{32}$/
+const LOCAL_RELAY_ID_RE = /^local-[0-9a-f]{12}$/
+
+/** The relay id of `connectionId` given the install id its gateway reports. */
+function relayConnectionId(connectionId: string, installId?: unknown): string {
+  const install = String(installId || '')
+    .trim()
+    .toLowerCase()
+
+  return connectionId === LOCAL_CONNECTION_ID && INSTALL_ID_RE.test(install)
+    ? `${LOCAL_CONNECTION_ID}-${install.slice(0, 12)}`
+    : connectionId
+}
+
+/** This Desktop's local relay id from the local gateway's profiles.list: `local-<install>`, the
+ *  bare 'local' when that gateway reports no install id (legacy), null while it has not answered. */
+let localRelayId: null | string = null
+
+function noteRelayInstall(connectionId: string, installId: unknown) {
+  if (connectionId === LOCAL_CONNECTION_ID) {
+    localRelayId = relayConnectionId(connectionId, installId)
+  }
+}
+
+/** `connectionId` as the relay names it to other gateways, for text that hands a bot a target
+ *  (the @mention note): what the relay itself learned first, else the install id the union
+ *  roster saw. null while this machine's id is unknown — a guessed bare 'local' could reach
+ *  another Desktop's machine. */
+export function relayTargetConnection(connectionId: string, installId?: unknown): null | string {
+  if (connectionId !== LOCAL_CONNECTION_ID || localRelayId !== null) {
+    return relayWireId(connectionId)
+  }
+
+  const id = relayConnectionId(connectionId, installId)
+
+  return id === LOCAL_CONNECTION_ID ? null : id
+}
+
+/** What another gateway calls `connectionId`. */
+function relayWireId(connectionId: string): string {
+  return connectionId === LOCAL_CONNECTION_ID && localRelayId ? localRelayId : connectionId
+}
+
+/** A target id naming some Desktop's local machine: a `local-<install>` form, or the
+ *  legacy bare 'local' an older Desktop pushed. */
+function namesALocalMachine(id: string): boolean {
+  return id === LOCAL_CONNECTION_ID || LOCAL_RELAY_ID_RE.test(id.toLowerCase())
+}
+
 /** Remove the mandatory local registry source only when Electron identifies
  * one unambiguous REMOTE primary. Older or inconsistent route inventories
  * fail open to the prior peer set. Distinct remote peers always remain. */
@@ -338,6 +399,8 @@ async function relayAgentsOn(
     const hermesTaken = profiles.some(profile => profile?.name === 'hermes')
     const label = labels.get(connection.id) || connection.id
 
+    noteRelayInstall(connection.id, res?.install_id)
+
     const rows = profiles
       .map(profile => ({
         profile: String(profile?.name || ''),
@@ -345,14 +408,18 @@ async function relayAgentsOn(
           profile?.name,
           hermesTaken && profile?.name === 'default' ? { ...profile, hermesHandleTaken: true } : profile
         ),
-        connection_id: connection.id,
+        connection_id: relayWireId(connection.id),
         connection_label: label,
         title: String(profile?.ui_meta?.['hermes-bots']?.title || profile?.display_name || ''),
         description: String(profile?.description || '')
       }))
       .filter(row => row.profile)
 
-    host.traceIdentityChange?.('bot-relay', `rows ${connection.id}`, rosterTrace(rows, String(res?.install_id || '')))
+    host.traceIdentityChange?.(
+      'bot-relay',
+      `rows ${connection.id}`,
+      rosterTrace(rows, String(res?.install_id || ''), connection.id)
+    )
 
     return rows
   } catch {
@@ -365,8 +432,7 @@ async function relayAgentsOn(
  *  registered twice) and is flagged in the trace. */
 const answeringInstall = new Map<string, string>()
 
-function rosterTrace(rows: RelayAgentRow[], installId: string): string {
-  const connectionId = rows[0]?.connection_id ?? ''
+function rosterTrace(rows: RelayAgentRow[], installId: string, connectionId: string): string {
   const other = installId ? answeringInstall.get(installId) : undefined
   const flag = other && other !== connectionId ? `MISROUTED (same install as ${other}) ` : ''
 
@@ -611,6 +677,8 @@ async function drainRelayOutboxes() {
     // covers the claim only, so a push that lands while a turn runs claims
     // its envelope NOW instead of after that turn — otherwise the TTL clock
     // kept running against a message the Desktop had not even looked at.
+    learnLocalRelayId(queued, byId)
+
     for (const { envelope, sender } of queued) {
       enqueueRelayDelivery(sender, envelope, byId)
     }
@@ -660,7 +728,7 @@ function relayDeliverParams(sender: RelayConnection, envelope: RelayEnvelope, en
     message: String(envelope?.message || ''),
     from_profile: String(envelope?.from_profile || ''),
     from_handle: String(envelope?.from_handle || ''),
-    from_connection: String(sender.id)
+    from_connection: relayWireId(String(sender.id))
   }
 }
 
@@ -710,6 +778,104 @@ async function settleRelayDelivery(
   })
 }
 
+/** The connection an envelope's `target_connection` names on THIS Desktop; 'foreign' when it
+ *  names another Desktop's local machine, 'unresolved' when that depends on an id this Desktop
+ *  has not learned yet. A registry id wins over the local-machine forms (a connection may be
+ *  named 'local-…'), except the bare 'local' once this Desktop hands out its own
+ *  `local-<install>`: from then on only an older Desktop's roster says 'local'. */
+function relayTargetOf(
+  id: string,
+  byId: Map<string, RelayConnection>
+): RelayConnection | 'collision' | 'foreign' | 'unresolved' | undefined {
+  if (localRelayId !== null && id.toLowerCase() === localRelayId) {
+    // A registry connection labelled into the very same id: two machines answer to it here.
+    return byId.has(id) && id !== LOCAL_CONNECTION_ID ? 'collision' : byId.get(LOCAL_CONNECTION_ID)
+  }
+
+  if (id !== LOCAL_CONNECTION_ID && byId.has(id)) {
+    return byId.get(id)
+  }
+
+  if (namesALocalMachine(id)) {
+    // Not knowing our own id yet, either form may be this machine — unless this Desktop does
+    // not relay its machine at all (no local route), which also means it cannot learn the id.
+    return localRelayId === null && byId.has(LOCAL_CONNECTION_ID) ? 'unresolved' : 'foreign'
+  }
+
+  return byId.get(id)
+}
+
+/** A drain can run before the roster loop has heard the local gateway's install id (renderer
+ *  start, or a blip on its profiles.list); an envelope naming a local machine needs it. Asked in
+ *  the background, once at a time: only the envelopes that need the answer wait for it
+ *  (deliverRelayEnvelope holds them), never the drain or anyone else's mail. */
+let localRelayIdLookup: null | Promise<void> = null
+
+function learnLocalRelayId(queued: RelayQueuedEnvelope[], byId: Map<string, RelayConnection>) {
+  const local = byId.get(LOCAL_CONNECTION_ID)
+
+  if (
+    localRelayId !== null ||
+    localRelayIdLookup !== null ||
+    !local ||
+    !queued.some(
+      ({ envelope, sender }) =>
+        sender.id === LOCAL_CONNECTION_ID || namesALocalMachine(String(envelope?.target_connection || ''))
+    )
+  ) {
+    return
+  }
+
+  const generation = relay.rosterGeneration
+
+  localRelayIdLookup = host
+    .requestProfile<{ install_id?: string }>(local.route, 'profiles.list', { include_sessions: false })
+    .then(res => {
+      if (relay.rosterGeneration === generation) {
+        noteRelayInstall(LOCAL_CONNECTION_ID, res?.install_id)
+        // The held envelopes noted their sender's outbox work: drain them now, not at the backstop.
+        scheduleRelayPushDrain()
+      }
+    })
+    .catch(() => {
+      // Unreachable local gateway: the held envelopes retry on the backstop drain.
+    })
+    .finally(() => {
+      localRelayIdLookup = null
+    })
+}
+
+/** The envelope's target on this Desktop (`relayTargetOf`), or null when this Desktop must not
+ *  act on it (yet). 'foreign' — another Desktop's machine: that Desktop drains this gateway too
+ *  and delivers it. No reply either — the first reply wins, so an error here would beat its real
+ *  answer; the gateway re-offers the unanswered envelope on every drain until one lands or it
+ *  times out. Unknown own id — the target may or may not be this machine, and a local sender has
+ *  no name the recipient can reply to: stay pinned and mark the sender as having work, so a later
+ *  drain retries once the id is known. */
+function actionableTarget(
+  sender: RelayConnection,
+  envelope: RelayEnvelope,
+  envelopeId: string,
+  byId: Map<string, RelayConnection>,
+  pending: Map<string, RelayEnvelope>
+): RelayConnection | 'collision' | null | undefined {
+  const target = relayTargetOf(String(envelope?.target_connection || ''), byId)
+
+  if (target === 'foreign') {
+    pending.delete(envelopeId)
+
+    return null
+  }
+
+  if (target === 'unresolved' || (sender.id === LOCAL_CONNECTION_ID && localRelayId === null)) {
+    noteRelayOutboxWork({ connectionId: sender.id })
+
+    return null
+  }
+
+  return target
+}
+
 /** Deliver one claimed envelope on the target connection's own socket and post
  *  the reply (or the error) back to the sender gateway for its waiter. */
 async function deliverRelayEnvelope(
@@ -718,12 +884,17 @@ async function deliverRelayEnvelope(
   byId: Map<string, RelayConnection>
 ) {
   const envelopeId = String(envelope?.id || '')
-  const target = byId.get(String(envelope?.target_connection || ''))
   const pending = pendingRelaysFor(sender)
 
   // A later drain re-queues every pinned envelope; the lane serialises them, so
   // one already ACKed by an earlier delivery in this lane must not ride twice.
   if (!envelopeId || !pending.has(envelopeId)) {
+    return
+  }
+
+  const target = actionableTarget(sender, envelope, envelopeId, byId, pending)
+
+  if (target === null) {
     return
   }
 
@@ -739,9 +910,12 @@ async function deliverRelayEnvelope(
     }
   }
 
-  if (!target) {
+  if (!target || target === 'collision') {
     await postReply({
-      error: `connection '${envelope?.target_connection}' is not connected to this Desktop right now`
+      error:
+        target === 'collision'
+          ? `connection '${envelope?.target_connection}' names two machines on this Desktop — rename that connection`
+          : `connection '${envelope?.target_connection}' is not connected to this Desktop right now`
     })
 
     return
@@ -840,6 +1014,7 @@ export function stopBotRelay() {
   // it would fire one stale drain after restart.
   relay.drainRerun = false
   routesWithOutboxWork.clear()
+  localRelayIdLookup = null
   // Queued deliveries check `disposed` before they run; forget the lane tails
   // so a restart starts every target fresh instead of behind stale chains.
   relayLanes.clear()
