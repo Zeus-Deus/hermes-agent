@@ -215,6 +215,39 @@ describe('a member seated on a connection this Desktop does not have', () => {
     expect(room.routed).not.toContain('server::bob')
   })
 
+  it('holds a same-named member on a just-added connection addressed by its device handle', async () => {
+    const twin: GroupMember = {
+      name: 'alice',
+      handle: 'alice-server',
+      connectionId: 'server',
+      connectionKind: 'remote',
+      connectionLabel: 'Server',
+      remoteSource: true,
+      sourceScoped: true
+    }
+
+    for (const [text, held] of [
+      ['stop @alice-server', ['server::alice']],
+      // The shared form still names the reachable seat while the view lags.
+      ['stop @alice', ['local::alice']],
+      ['@all stop', ['local::alice', 'server::alice']]
+    ] as const) {
+      const room = await loadRoom(['local'], { turn: () => 'on it' })
+      room.chat.$groupChats.set({ g: { log: [], members: [ALICE, twin], roomId: 'room', sessions: {}, watermarks: {} } })
+      // The send path's view predates `server`; the registry already has it.
+      await room.rounds.registeredConnectionIds()
+      host.connections = async () => [{ id: 'local' }, { id: 'server' }]
+
+      await send(room, text)
+
+      expect(Object.keys(room.chat.$groupChats.get().g.holds || {}).sort()).toEqual(held)
+
+      for (const key of held) {
+        expect(room.routed).not.toContain(key)
+      }
+    }
+  })
+
   it('does not start a thread that a Stop cancelled while the registry was being read', async () => {
     const room = await loadRoom(null, { turn: () => 'on it' })
     let release: (rows: unknown[]) => void = () => undefined

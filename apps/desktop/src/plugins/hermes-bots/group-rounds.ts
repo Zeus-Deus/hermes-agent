@@ -908,20 +908,6 @@ export function sendToGroupChat(
   }
 
   const target = thread || mintGroupThreadId()
-  // A seat on a connection this Desktop does not have must not shadow the
-  // reachable seat of the same bot: mentions and holds resolve last-wins,
-  // and the phantom is seated after live rows. Only such a twin is dropped —
-  // the registry view may lag a just-added connection, and a seat with no
-  // reachable twin keeps its mention and hold (the drive re-checks).
-  const registered = lastRegisteredConnections
-
-  const suspect = (member: GroupMember) =>
-    Boolean(member?.sourceMissing) || Boolean(registered && onUnregisteredConnection(member, registered))
-
-  const reachable = members.filter(
-    (member: GroupMember) =>
-      !suspect(member) || !members.some(other => other !== member && other.name === member.name && !suspect(other))
-  )
 
   $groupNeedsYou.set({
     ...$groupNeedsYou.get(),
@@ -957,14 +943,14 @@ export function sendToGroupChat(
         ? {}
         : applyGroupHoldDirective(
             room.holds,
-            parseGroupChatMentions(trimmed, reachable),
+            parseSendMentions(trimmed, members),
             trimmed,
             {
               at: sent?.at,
               byMessageId: sent?.id,
               thread: target
             },
-            reachable.map((member: GroupMember) => groupMemberKey(member))
+            members.map((member: GroupMember) => groupMemberKey(member))
           )
 
     return room
@@ -1005,6 +991,40 @@ export async function registeredConnectionIds(): Promise<null | ReadonlySet<stri
   } catch {
     return null
   }
+}
+
+/** The user's mentions, with every @form a reachable seat answers to resolved
+ *  among reachable seats only. A seat on a connection this Desktop does not
+ *  have must not shadow the reachable seat of the same bot (mentions resolve
+ *  last-wins and the phantom is seated after live rows), yet the registry
+ *  view may lag a just-added connection: a form no reachable seat claims —
+ *  `@alice-server` — still names the seat that owns it (the drive re-checks
+ *  the registry before any turn is submitted). */
+function parseSendMentions(text: string, members: GroupMember[]) {
+  const registered = lastRegisteredConnections
+
+  const trusted = members.filter(
+    member => !member?.sourceMissing && !(registered && onUnregisteredConnection(member, registered))
+  )
+
+  if (trusted.length === members.length) {
+    return parseGroupChatMentions(text, members)
+  }
+
+  const parsed = parseGroupChatMentions(text, trusted)
+  const mentioned = new Set(parsed.mentioned)
+
+  for (const match of text.matchAll(/@([a-z0-9][a-z0-9._-]*)/gi)) {
+    const token = `@${match[1]}`
+
+    if (!parseGroupChatMentions(token, trusted).mentioned.size) {
+      for (const key of parseGroupChatMentions(token, members).mentioned) {
+        mentioned.add(key)
+      }
+    }
+  }
+
+  return { everyone: parsed.everyone, mentioned }
 }
 
 /** A source-scoped seat whose owning connection is not registered here. */
