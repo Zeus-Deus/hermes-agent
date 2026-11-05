@@ -387,6 +387,14 @@ def _credential_bundle(model, provider, base_url, api_key, api_mode, request_ove
         "request_overrides": request_overrides, **extra,
     }
 
+def _explicit_api_mode(v: dict) -> Optional[str]:
+    """``delegation.api_mode`` when it names a transport; a provider plugin's registered dialect counts. It wins
+    over the URL heuristic and over a configured provider's own mode."""
+    from agent.transports import registered_api_modes
+    if v["api_mode"] in _EXPLICIT_API_MODES or (v["api_mode"] and v["api_mode"] in registered_api_modes()):
+        return v["api_mode"]
+    return None
+
 def _direct_endpoint_credentials(v: dict, explicit_request_overrides) -> dict:
     """``delegation.base_url`` branch: provider/api_mode from URL heuristics."""
     # Shared URL-based api_mode detector so Anthropic-compatible direct endpoints (/anthropic suffix: Azure AI
@@ -404,11 +412,7 @@ def _direct_endpoint_credentials(v: dict, explicit_request_overrides) -> dict:
         provider, api_mode = "anthropic", "anthropic_messages"
     elif "api.kimi.com/coding" in base_lower:
         api_mode = "anthropic_messages"
-    # Explicit delegation.api_mode always wins over the URL heuristic; a provider plugin's
-    # registered dialect counts as explicit.
-    from agent.transports import registered_api_modes
-    if v["api_mode"] in _EXPLICIT_API_MODES or (v["api_mode"] and v["api_mode"] in registered_api_modes()):
-        api_mode = v["api_mode"]
+    api_mode = _explicit_api_mode(v) or api_mode
 
     # Preserve the configured provider's request personality on an explicit endpoint.
     request_overrides = None
@@ -429,12 +433,20 @@ def _direct_endpoint_credentials(v: dict, explicit_request_overrides) -> dict:
         _merge_request_overrides(request_overrides, explicit_request_overrides),
     )
 
-def _runtime_provider_credentials(v: dict, explicit_request_overrides) -> dict:
-    """``delegation.provider`` branch: full bundle via the runtime provider system."""
+def _runtime_provider_credentials(v: dict, explicit_request_overrides, *, explicit_endpoint: bool = False) -> dict:
+    """``delegation.provider`` branch: full bundle via the runtime provider system. ``explicit_endpoint``: a
+    configured custom provider with ``delegation.base_url`` — the route's base_url / api_key / api_mode win and the
+    entry supplies the rest. A delegated route's endpoint can come from a delegation backend, so the entry's own
+    key only follows it on the entry's origin; elsewhere the route must carry its own (``require_entry_origin``)."""
     configured_provider = v["provider"]
+    explicit = {}
+    if explicit_endpoint:
+        from hermes_cli.runtime_provider_custom import require_entry_origin
+        require_entry_origin(configured_provider, v["base_url"], v["api_key"])
+        explicit = {"explicit_base_url": v["base_url"], "explicit_api_key": v["api_key"]}
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
-        runtime = resolve_runtime_provider(requested=configured_provider, target_model=v["model"])
+        runtime = resolve_runtime_provider(requested=configured_provider, target_model=v["model"], **explicit)
     except Exception as exc:
         raise ValueError(
             f"Cannot resolve delegation provider '{configured_provider}': {exc}. "
@@ -470,23 +482,33 @@ def _runtime_provider_credentials(v: dict, explicit_request_overrides) -> dict:
     return _credential_bundle(
         v["model"] or runtime.get("model") or None,
         configured_provider if runtime.get("provider") == _RUNTIME_PROVIDER_CUSTOM else runtime.get("provider"),
-        runtime.get("base_url"), api_key, runtime.get("api_mode"),
+        runtime.get("base_url"), api_key, (explicit_endpoint and _explicit_api_mode(v)) or runtime.get("api_mode"),
         _merge_request_overrides(runtime.get("request_overrides"), explicit_request_overrides) or {},
         command=pinned_command, args=list(runtime.get("args") or []),
     )
 
 def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     """Child credential bundle from the ``delegation`` config section. Three branches: ``base_url`` set → direct
-    endpoint (``api_key`` None means inherit the parent's key, so providers keyed outside OPENAI_API_KEY work);
-    ``provider`` set → full bundle via the runtime provider system (same path as CLI/gateway startup); neither →
-    None values, child inherits everything. ``request_overrides`` is honored on every branch. Raises ValueError
-    with a user-facing message."""
+    endpoint (``api_key`` None means inherit the parent's key, so providers keyed outside OPENAI_API_KEY work),
+    unless ``provider`` names a configured custom provider, which keeps its key, transport and identity on that
+    endpoint; ``provider`` set → full bundle via the runtime provider system (same path as CLI/gateway startup);
+    neither → None values, child inherits everything. ``request_overrides`` is honored on every branch. Raises
+    ValueError with a user-facing message."""
     values = {k: str(cfg.get(k) or "").strip() or None for k in ("model", "provider", "base_url", "api_key")}
     values["api_mode"] = str(cfg.get("api_mode") or "").strip().lower() or None
     explicit_request_overrides = cfg.get("request_overrides") if isinstance(cfg.get("request_overrides"), dict) else None
     is_native_sdk_provider = (values["provider"] or "").strip().lower() in _NATIVE_SDK_PROVIDERS
 
     if values["base_url"] and not is_native_sdk_provider:
+        # ``custom:<name>`` names a configured entry: without a key of its own, a missing/disabled one
+        # fails resolution instead of becoming an anonymous endpoint that inherits the parent's key.
+        from hermes_cli.runtime_provider import has_named_custom_provider
+        from hermes_cli.runtime_provider_custom import is_disabled_custom_entry
+        provider = values["provider"] or ""
+        if has_named_custom_provider(provider) or (provider.lower().startswith("custom:") and not values["api_key"]):
+            return _runtime_provider_credentials(values, explicit_request_overrides, explicit_endpoint=True)
+        if is_disabled_custom_entry(provider):  # a disabled entry under any of its names, likewise
+            raise ValueError(f"Delegation provider '{provider}' is disabled in config (enabled: false)")
         return _direct_endpoint_credentials(values, explicit_request_overrides)
     if not values["provider"]:
         # Pure inherit; explicit request_overrides still merge OVER the parent's.

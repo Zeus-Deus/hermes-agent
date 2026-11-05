@@ -3576,10 +3576,9 @@ def _provider_for_host(base_url: str, table: tuple[tuple[str, str], ...]) -> Opt
 def _recoverable_pool_provider(
     resolved_provider: str, client: Any, main_runtime: Optional[dict[str, Any]] = None
 ) -> Optional[str]:
-    """Infer which provider pool can recover the current auxiliary client.
-    None when the client targets a different host than the session's configured endpoint for that
-    provider: a rejection there says nothing about the key, so rotating/quarantining it would kill a
-    working credential (Miho report — proxy users)."""
+    """Infer which provider pool can recover the current auxiliary client. None when the client targets a
+    different host than the session's configured endpoint for that provider: a rejection there says nothing
+    about the key, so rotating/quarantining it would kill a working credential (Miho report — proxy users)."""
     normalized = _normalize_aux_provider(resolved_provider)
     base = str(getattr(client, "base_url", "") or "")
     runtime = _normalize_main_runtime(main_runtime)
@@ -3596,8 +3595,10 @@ def _recoverable_pool_provider(
                     "endpoint mismatch, not a dead key; skipping credential rotation",
                     normalized, base_url_hostname(base), base_url_hostname(rt_base))
         return None
-    if normalized not in {"", "auto", "custom"}:  # a pinned ``custom:<name>`` keeps its entry's identity
-        return pinned if (pinned := str(resolved_provider or "").strip().lower()).startswith("custom:") else normalized
+    if _named_custom_provider_present(pinned := str(resolved_provider or "").strip().lower()):
+        return pinned  # a configured entry (``custom:or``, ``ollama``) keeps its identity, never a host's pool
+    if normalized not in {"", "auto", "custom"}:  # a pinned config-less ``custom:<name>`` keeps its identity too
+        return pinned if pinned.startswith("custom:") else normalized
     known = _provider_for_host(base, _POOL_PROVIDER_BY_HOST)
     if known is not None:
         return known
@@ -3805,10 +3806,10 @@ def _refresh_provider_credentials(provider: str, *, failed_api_key: str = "") ->
 def _auth_refresh_provider_for_route(
     resolved_provider: Optional[str], client_base_url: str, effective_provider: str = "",
 ) -> str:
-    """Provider whose short-lived credentials should be refreshed; auto-routed calls keep
-    ``resolved_provider == "auto"``, so infer the backend from the client's base URL."""
-    normalized = _normalize_aux_provider(resolved_provider)
-    if normalized and normalized != "auto":
+    """Provider whose short-lived credentials should be refreshed (none for a configured entry: ``custom:nous``
+    owns its key); auto-routed calls keep ``resolved_provider == "auto"``, so infer the backend from the base URL."""
+    normalized = "" if (named := _named_custom_provider_present(resolved_provider or "")) else _normalize_aux_provider(resolved_provider)
+    if named or (normalized and normalized != "auto"):
         return normalized
     host_provider = _provider_for_host(client_base_url, _AUTH_REFRESH_PROVIDER_BY_HOST)
     # The auto client already knows it runs on the host's API-key sibling (``xai`` on api.x.ai):
@@ -5380,10 +5381,10 @@ def resolve_provider_client(
     )
     branch = _EXPLICIT_PROVIDER_BRANCHES.get(provider)
     alias_identity = original_provider.removeprefix("custom:")
-    # A configured provider whose name collides with a local-server alias is still a named
-    # provider. Resolve it before the alias's generic ``custom`` branch, which otherwise loses
-    # the configured base_url and can fall through to an unrelated credentialed provider.
-    if branch is None or alias_identity in _LOCAL_SERVER_ALIASES:
+    # A configured provider named like an alias (``or``, ``ollama``) or written ``custom:<name>`` is the
+    # user's entry, not the branch its name normalizes to; that branch would lose the entry's endpoint,
+    # key and transport. A canonical built-in name still defers to the built-in (_shadowed_by_builtin).
+    if branch is None or alias_identity in _LOCAL_SERVER_ALIASES or original_provider != provider:
         try:
             result = _resolve_named_custom_branch(req)
         except ImportError:
@@ -5589,7 +5590,7 @@ def resolve_vision_provider_client(
     # The raw name keeps a llama.cpp alias distinguishable from bare ``custom`` for the last resolve.
     raw_requested, requested = requested, _normalize_vision_provider(requested)
     if resolved_base_url:
-        provider_for_base_override = requested if requested and requested not in {"", "auto"} else "custom"
+        provider_for_base_override = raw_requested if _named_custom_provider_present(raw_requested or "") else (requested if requested and requested not in {"", "auto"} else "custom")
         client, final_model = resolve_provider_client(
             provider_for_base_override, model=resolved_model, async_mode=async_mode,
             explicit_base_url=resolved_base_url, explicit_api_key=resolved_api_key,
@@ -5934,12 +5935,11 @@ def _get_cached_client(
             # foreign loop stays force-neutered.
             _close_cached_client(cached_client, close_async=cached_loop is not None and cached_loop.is_closed())
             del _client_cache[cache_key]
-    # Build outside the lock. For pool-backed providers derive the key from the pool entry:
-    # resolve_api_key_provider_credentials prefers env vars, which would bypass pool rotation
-    # and retry an exhausted key. A pinned ``custom:<name>`` peeks only its entry's rows.
+    # Build outside the lock. Pool-backed providers take the key from the pool (env vars would bypass rotation
+    # and retry an exhausted key); a configured entry peeks only its own rows, for its own URL.
     effective_api_key = api_key
     if not effective_api_key:
-        _pool = pool_for_aux_provider(provider, _normalize_aux_provider(provider), lambda k: _load_pool_with_credentials(k, " (peek)"))
+        _pool = pool_for_aux_provider(provider, _normalize_aux_provider(provider), lambda k: _load_pool_with_credentials(k, " (peek)"), base_url)
         if _pool is not None and (_pe := _peek_pool_entry(provider, _pool)) is not None:
             effective_api_key = _pool_runtime_api_key(_pe) or api_key
     client, default_model = resolve_provider_client(
@@ -5989,10 +5989,10 @@ def _unwrap_moa_provider(prov: str, mdl: Optional[str]) -> tuple[str, Optional[s
 
 
 def _preserve_provider_with_base_url(prov: Optional[str]) -> bool:
-    """True when a first-class provider keeps its identity alongside an explicit base_url."""
+    """True when a first-class provider, or a ``custom:<name>`` config defines, keeps its identity alongside a base_url."""
     normalized = str(prov or "").strip().lower()
     if normalized in {"", "auto", "custom"} or normalized.startswith("custom:"):
-        return False
+        return normalized.startswith("custom:") and _named_custom_provider_present(normalized)
     if normalized in _LOCAL_SERVER_ALIASES:
         return True  # the custom branch applies the /v1 tail only when it still sees the alias
     # #76602 — two independent lookups, each guarded by its own try/except so a partial
@@ -6118,7 +6118,7 @@ def _resolve_task_provider_model(
     if provider:
         return provider, resolved_model, base_url, api_key, resolved_api_mode
     if cfg_base_url and cfg_api_key:
-        kept = cfg_provider if str(cfg_provider or "").strip().lower() in _LOCAL_SERVER_ALIASES else "custom"
+        kept = cfg_provider if (str(cfg_provider or "").strip().lower() in _LOCAL_SERVER_ALIASES or _named_custom_provider_present(cfg_provider or "")) else "custom"
         return kept, resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode
     if cfg_base_url and cfg_provider and cfg_provider != "auto":
         # base_url without api_key: keep the provider so it can resolve credentials from env
@@ -7830,8 +7830,8 @@ def _aux_recovery_ladder(
     resp, first_err, kwargs = yield from _ladder_parameter_rungs(first_err, route, kwargs, max_tokens)
     if first_err is None:
         return resp
-    client_is_nous = (resolved_provider == "nous"
-                      or base_url_host_matches(base_info, "inference-api.nousresearch.com"))
+    client_is_nous = (resolved_provider == "nous" or base_url_host_matches(base_info, "inference-api.nousresearch.com")
+                      ) and not _named_custom_provider_present(resolved_provider or "")  # an entry's key is its own
     resp, first_err = yield from _ladder_nous_rungs(first_err, route, kwargs, client_is_nous)
     if first_err is None:
         return resp

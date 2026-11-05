@@ -518,6 +518,44 @@ def _entry_credential(rp, entry: dict[str, Any], name: str) -> Any:
     return next((c for c in candidates if rp.has_usable_secret(c)), "")
 
 
+def is_disabled_custom_entry(requested_provider: str) -> bool:
+    """Whether *requested_provider* names a ``providers:`` entry (by key, display name or ``custom:``
+    form, as the resolver matches) that is ``enabled: false``. A canonical built-in name is the
+    built-in's, whatever a disabled entry calls itself (``_shadowed_by_builtin``)."""
+    from hermes_cli.config import is_provider_enabled
+    requested_norm = _normalize_custom_provider_name(requested_provider or "")
+    providers = _rp().load_config().get("providers")
+    return bool(requested_norm) and not _shadowed_by_builtin(requested_norm) and isinstance(providers, dict) and any(
+        isinstance(entry, dict) and not is_provider_enabled(entry)
+        and requested_norm in custom_provider_aliases(str(entry.get("name", "") or key), str(key))
+        for key, entry in providers.items())
+
+
+def require_entry_origin(requested_provider: str, base_url: Any, explicit_key: Any) -> None:
+    """Refuse a route that moves a configured entry to another origin (scheme, host, port) without a
+    key of its own, instead of letting the entry's declared credential follow it there. Origin, not
+    the full URL: Hermes rewrites an entry's path (``/v1`` tails, OpenCode/Anthropic surfaces), while
+    another host is a stale URL or someone else's service. No-op for unknown names and entries that
+    declare no credential (a keyless LAN server may move). A placeholder key is no key: the resolver
+    would replace it with the entry's own."""
+    from utils import base_url_origin
+    rp = _rp()
+    entry = rp._get_named_custom_provider(requested_provider, resolve_credentials=False)
+    if entry is None or rp.has_usable_secret(_clean(explicit_key)) or not entry_declares_credential(entry):
+        return
+    origin, entry_origin = base_url_origin(_clean(base_url)), base_url_origin(_clean(entry.get("base_url")))
+    if origin[1] and origin == entry_origin:
+        return
+    raise ValueError(
+        f"Provider '{entry.get('name') or requested_provider}' is configured for {_origin_text(entry_origin)}; its "
+        f"credentials are not sent to {_origin_text(origin)}. Set api_key on this route, or use the provider's own base_url")
+
+
+def _origin_text(origin: tuple[str, str, int]) -> str:
+    scheme, host, port = origin
+    return f"{scheme}://{host}:{port}" if host else "an invalid URL"
+
+
 def _try_resolve_from_custom_pool(
     base_url: str, provider_label: str, api_mode_override: Optional[str] = None, provider_name: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
@@ -702,7 +740,8 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
                                   explicit_base_url: Optional[str] = None,
                                   target_model: Optional[str] = None, config=None) -> Optional[dict[str, Any]]:
     """Runtime for a llamacpp alias, a bare-custom direct alias, or a configured custom entry.
-    Aliases resolving to "custom" (ollama, vllm, llamacpp, …) are treated like bare ``custom``. A
+    Aliases resolving to "custom" (ollama, vllm, llamacpp, …) are treated like bare ``custom``
+    unless config defines an entry under that name. A
     llamacpp alias with no explicit base_url resolves to the managed server first; an explicit
     base_url always wins."""
     rp = _rp()
@@ -717,13 +756,20 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
         custom_provider = rp._get_named_custom_provider(requested_provider)
         if not custom_provider:
             return _resolve_llamacpp_runtime(requested_provider, explicit_api_key)
+    def lookup():
+        return (rp._get_named_custom_provider(requested_provider) if config is None
+                else _get_named_custom_provider(requested_provider, config=config))
     if requested_norm and requested_norm != "custom" and rp._resolves_to_custom(requested_norm):
         requested_norm = "custom"
     if requested_norm == "custom" and explicit_base_url:
-        return _resolve_direct_alias_runtime(requested_provider, explicit_api_key, explicit_base_url)
+        # A configured entry under an alias name (``providers.ollama``) keeps its own key and transport
+        # on an explicit endpoint, as it does without one; bare ``custom`` stays a direct alias.
+        if requested_provider.strip().lower() != "custom":
+            custom_provider = lookup()
+        if not custom_provider:
+            return _resolve_direct_alias_runtime(requested_provider, explicit_api_key, explicit_base_url)
     if custom_provider is None:
-        custom_provider = (rp._get_named_custom_provider(requested_provider) if config is None
-                           else _get_named_custom_provider(requested_provider, config=config))
+        custom_provider = lookup()
     if not custom_provider:
         return None
     base_url = ((explicit_base_url or "").strip() or custom_provider.get("base_url", "")).rstrip("/")

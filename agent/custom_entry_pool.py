@@ -79,10 +79,26 @@ def named_custom_entry(provider_name: Optional[str], config: Optional[dict] = No
     return next(((n, e) for n, e in cp._iter_custom_providers(config) if aliases & cp._custom_entry_name_aliases(n, e)), None) if aliases else None
 
 
-def pool_for_aux_provider(provider: Optional[str], pool_key: str, load: Callable[[str], Any]) -> Any:
+def _configured_entry(provider: Optional[str]) -> Optional[tuple[str, dict[str, Any]]]:
+    """``named_custom_entry`` for a name the runtime routes to a configured entry: ``custom:<name>`` or a
+    raw name that is not itself a canonical built-in (``_shadowed_by_builtin``)."""
+    from hermes_cli.runtime_provider_custom import _normalize_custom_provider_name, _shadowed_by_builtin
+    name = _normalize_custom_provider_name(str(provider or ""))
+    return None if not name or _shadowed_by_builtin(name) else named_custom_entry(provider)
+
+
+def pool_for_aux_provider(provider: Optional[str], pool_key: str, load: Callable[[str], Any],
+                          base_url: Optional[str] = None) -> Any:
     """``load(pool_key)`` for an auxiliary pool read (the key peek, credential recovery). A pinned
     ``custom:<name>`` normalizes to its entry's slug, which may also be a same-named built-in's pool,
-    so it gets the entry-scoped view; a bare built-in name keeps its whole pool."""
+    so it gets the entry-scoped view; a bare built-in name keeps its whole pool. A configured entry
+    never reads a pool that is not its own (``custom:or`` normalizes to ``openrouter``), nor its own
+    for an explicit *base_url* that is not its endpoint, as on every other pool lookup (None)."""
+    if (match := _configured_entry(provider)) is not None:
+        from agent.credential_pool import _pool_keys_for_custom_entry
+        if pool_key.strip().lower() not in _pool_keys_for_custom_entry(*match) or (
+                base_url and custom_entry_for_endpoint(base_url, provider) is None):
+            return None
     pool = load(pool_key)
     if pool is None or not str(provider or "").strip().lower().startswith("custom:"):
         return pool
