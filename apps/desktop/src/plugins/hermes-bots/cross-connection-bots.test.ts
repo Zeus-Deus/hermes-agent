@@ -194,6 +194,17 @@ describe('a group room seats members from several machines', () => {
 
     // A viewer on the Desktop's machine keeps the label it shares with the user.
     expect(header(members[2])).toMatch(/@alice \[on This device\], @bob \[on Server\]/)
+
+    // An unscoped viewer (no connection metadata: the aggregate roster failed while a remote
+    // gateway was active) is not assumed to be on the Desktop's machine.
+    const unscoped = buildGroupChatTurnPrompt({
+      deltaLines: [],
+      groupName: 'g',
+      members: [members[0], { name: 'dave' } as GroupMember],
+      viewer: { name: 'dave' } as GroupMember
+    }).split('\n')[0]
+
+    expect(unscoped).toMatch(/@alice \[on the machine running the Desktop app\]/)
   })
 
   it('does not self-attribute a same-named default on another connection (#106851)', () => {

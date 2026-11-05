@@ -223,8 +223,10 @@ export function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLine
   const viewerKey = groupMemberKey(viewer)
   const peers = members.filter(m => groupMemberKey(m) !== viewerKey)
 
-  // A viewer with no connection is local by the room's resolution rule (routing.ts).
-  const viewerOnDesktop = isDesktopLocalConnection(viewer) || (!viewer.connectionId && !viewer.remoteSource)
+  // Only a viewer KNOWN to be on the Desktop's machine shares its "This device". An unscoped
+  // viewer may be a remote gateway's bot (aggregate roster failed) and the agent-facing name is
+  // true from either side.
+  const viewerOnDesktop = isDesktopLocalConnection(viewer)
 
   const peerNames = peers
     .map(m => {
