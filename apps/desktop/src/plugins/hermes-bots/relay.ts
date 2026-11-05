@@ -184,8 +184,13 @@ function noteRelayInstall(connectionId: string, installId: unknown) {
 /** `connectionId` as the relay names it to other gateways, for text that hands a bot a target
  *  (the @mention note): what the relay itself learned first, else the install id the union
  *  roster saw. null while this machine's id is unknown — a guessed bare 'local' could reach
- *  another Desktop's machine. */
+ *  another Desktop's machine — and for a registry connection in the `local-<hex>` namespace:
+ *  the relay does not relay it, and that id names some Desktop's own machine instead. */
 export function relayTargetConnection(connectionId: string, installId?: unknown): null | string {
+  if (connectionId !== LOCAL_CONNECTION_ID && LOCAL_RELAY_ID_RE.test(connectionId.toLowerCase())) {
+    return null
+  }
+
   if (connectionId !== LOCAL_CONNECTION_ID || localRelayId !== null) {
     return relayWireId(connectionId)
   }

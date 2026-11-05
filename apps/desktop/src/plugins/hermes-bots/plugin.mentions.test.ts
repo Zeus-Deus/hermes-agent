@@ -470,6 +470,37 @@ describe('the mention middleware', () => {
     expect(result.text).not.toContain('writer@local"')
   })
 
+  it('hands out no target for a registry connection named into the local-<install> namespace', async () => {
+    // The relay never relays such a connection, and on the gateway whose own install id it
+    // matches, `writer@local-<that id>` is that gateway's OWN writer — not this connection's.
+    live.connection = 'srv'
+
+    const { handler } = await contributions({
+      cacheKeyConnection: 'srv',
+      focused: 'scout',
+      profiles: [
+        { connectionId: 'srv', name: 'scout' },
+        {
+          connectionId: 'local-0123456789ab',
+          connectionLabel: 'Local 0123456789ab',
+          handle: 'writer',
+          name: 'writer',
+          remoteSource: true
+        }
+      ],
+      sources: [
+        { connectionId: 'local', installId: 'a'.repeat(32), kind: 'local' },
+        { connectionId: 'local-0123456789ab', installId: 'b'.repeat(32), kind: 'remote' },
+        { connectionId: 'srv', installId: '0123456789ab'.padEnd(32, 'c'), kind: 'remote' }
+      ]
+    })
+
+    const result = await handler({ text: 'ask @writer for the status' })
+
+    expect(result.text).toContain('(no message_agent target yet')
+    expect(result.text).not.toContain('writer@local-0123456789ab"')
+  })
+
   it("prefers the id the relay pushed when Electron's status probe saw none", async () => {
     live.connection = 'srv'
     ;(hostMock as Record<string, unknown>).profileRoutes = vi.fn(async () => [

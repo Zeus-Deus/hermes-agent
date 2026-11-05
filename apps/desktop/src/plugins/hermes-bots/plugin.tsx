@@ -870,7 +870,8 @@ export default {
             // 'hermes' profile holds it; then it is 'default' itself.
             // The connection is named the way the relay pushed it to the other
             // gateways: this machine is `local-<install>`, never the bare 'local'
-            // every Desktop has (#142128) — and no target at all while unknown.
+            // every Desktop has (#142128) — and no target at all while unknown, or for
+            // a connection whose name the relay reserves for Desktops' own machines.
             const targetConnection =
               bot.remoteSource && bot.connectionId
                 ? relayTargetConnection(
@@ -889,7 +890,7 @@ export default {
             // path rejects it the same way (#97678).
             const where = bot.remoteSource
               ? targetConnection === null
-                ? ` — on ${bot.connectionLabel || bot.connectionId} (no message_agent target yet: this Desktop has not finished connecting that machine to the relay)`
+                ? ` — on ${bot.connectionLabel || bot.connectionId} (no message_agent target yet: the relay does not reach that machine under this name)`
                 : ` — on ${bot.connectionLabel || bot.connectionId} (message_agent target: "${target}")`
               : handle !== target
                 ? ` (message_agent target: "${target}")`
