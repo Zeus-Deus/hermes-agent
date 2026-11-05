@@ -58,6 +58,43 @@ export function heldMemberMessageIds(existing: string[] | undefined, delta: Grou
   return [unique[0], ...unique.slice(-(GROUP_CHAT_HISTORY_LIMIT - 1))]
 }
 
+/** The cursor the room log itself proves for `member` in `thread`. Watermarks
+ *  are this Desktop's own log indices and never ride the projection, but a
+ *  member's thread session is resolved by its title on the member's gateway —
+ *  the same session for every Desktop. A Desktop that did not drive the
+ *  earlier turns (another machine, another build, a lost record) therefore
+ *  had no cursor and replayed the whole thread, the member's own replies
+ *  included, as "new since your last turn". Every reply records the newest
+ *  room entry its turn was submitted with (`seenThrough`), so the member's
+ *  newest stamped reply in this thread bounds what its session already holds:
+ *  everything through that anchor, then its own entries that follow. A
+ *  missing anchor (trimmed, or never synced) proves nothing: 0. */
+export function groupLogSeenCursor(log: GroupMessage[], member: GroupMember, thread: string): number {
+  for (let i = log.length - 1; i >= 0; i--) {
+    const entry = log[i]
+
+    if (!entry?.seenThrough || groupThreadOf(entry) !== thread || !authoredByMember(entry, member)) {
+      continue
+    }
+
+    const anchor = log.findIndex((candidate: GroupMessage) => candidate?.id === entry.seenThrough)
+
+    if (anchor < 0 || anchor >= i) {
+      return 0
+    }
+
+    let mark = anchor + 1
+
+    while (mark < log.length && (groupThreadOf(log[mark]) !== thread || authoredByMember(log[mark], member))) {
+      mark += 1
+    }
+
+    return mark
+  }
+
+  return 0
+}
+
 function prepareGroupRoundMember(context: GroupRoundMemberContext, member: GroupMember) {
   const { members, thread } = context
 
@@ -68,7 +105,7 @@ function prepareGroupRoundMember(context: GroupRoundMemberContext, member: Group
 
   const memberKey = groupMemberKey(member)
   const markKey = `${thread}::${memberKey}`
-  const seen = room.watermarks[markKey] || 0
+  const seen = Math.max(room.watermarks[markKey] || 0, groupLogSeenCursor(room.log, member, thread))
   // Delta: NEW room entries, narrowed to this thread — the member's
   // turn sees only the conversation it's part of.
   const delta = room.log.slice(seen).filter((e: GroupMessage) => groupThreadOf(e) === thread)
@@ -190,13 +227,14 @@ async function runVisibleMemberTurn(
   context: GroupRoundMemberContext,
   member: GroupMember,
   prompt: string,
-  images?: Attachment[]
+  images?: Attachment[],
+  seenThrough?: null | string
 ) {
   const turn = { ...member }
   updateGroupChat(context.group, (room: GroupChatRoom) => ({ ...room, turn }), { sync: false })
 
   try {
-    return await runGroupChatMemberTurn(context.group, member, prompt, context.thread, images)
+    return await runGroupChatMemberTurn(context.group, member, prompt, context.thread, images, seenThrough)
   } finally {
     if (context.binding.isLive() && $groupChats.get()[context.group]?.turn === turn) {
       updateGroupChat(context.group, (room: GroupChatRoom) => ({ ...room, turn: null }), { sync: false })
@@ -229,7 +267,7 @@ export async function runGroupRoundMember(
   let accepted = false
 
   try {
-    reply = await runVisibleMemberTurn(context, member, prompt, deltaImages)
+    reply = await runVisibleMemberTurn(context, member, prompt, deltaImages, anchorId)
 
     // #129443: the participation rules ("reply only with something new,
     // else (pass)") let a directly addressed member pass just because a
@@ -242,7 +280,13 @@ export async function runGroupRoundMember(
     // discarded by the epoch check right below anyway, so nudging it would
     // burn a model call whose result can never be committed.
     if (context.isCurrent() && reply !== null && isGroupPassText(reply) && owesAnswer) {
-      reply = await runVisibleMemberTurn(context, member, `${prompt}${GROUP_ADDRESSED_NUDGE_SUFFIX}`, deltaImages)
+      reply = await runVisibleMemberTurn(
+        context,
+        member,
+        `${prompt}${GROUP_ADDRESSED_NUDGE_SUFFIX}`,
+        deltaImages,
+        anchorId
+      )
     }
 
     accepted = true
@@ -345,7 +389,7 @@ export async function runGroupRoundMember(
   const spoke = reply !== null && !isGroupPassText(reply)
 
   if (reply !== null && spoke) {
-    appendGroupChatEntry(context.group, groupMemberAuthor(member), reply, thread)
+    appendGroupChatEntry(context.group, groupMemberAuthor(member), reply, thread, undefined, anchorId)
   } else if (reply !== null && context.isCurrent() && owesAnswer) {
     // #129443: the nudge was passed on too. Record the noncompliance where
     // the user looks (activity row + roster badge) instead of letting the

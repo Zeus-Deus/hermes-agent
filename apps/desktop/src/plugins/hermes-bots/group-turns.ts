@@ -884,7 +884,8 @@ export async function runGroupChatMemberTurn(
   member: GroupMember,
   prompt: string,
   thread: string,
-  images?: Attachment[]
+  images?: Attachment[],
+  seenThrough?: null | string
 ): Promise<null | string> {
   // #93602: hold the member's route socket for the whole turn. Without the
   // lease, every RPC below rides its own request-scoped socket lease; the
@@ -899,7 +900,7 @@ export async function runGroupChatMemberTurn(
   try {
     releaseTurnLease = await retainGroupTurnRoute(member)
 
-    return binding.isLive() ? await runGroupChatMemberTurnLeased(group, member, prompt, thread, images) : null
+    return binding.isLive() ? await runGroupChatMemberTurnLeased(group, member, prompt, thread, images, seenThrough) : null
   } finally {
     releaseTurnLease?.()
     binding.dispose()
@@ -994,6 +995,13 @@ interface GroupTurnPollContext {
 // it. Drives are sequential per room, so no round's responders filter ever meets a live marker.
 const liveGroupTurns = new Set<string>()
 
+/** What the stranded turn had seen when it was submitted (pre-stamp markers: nothing). */
+function strandedMarkerSeenThrough(marker: unknown): null | string {
+  const seen = marker && typeof marker === 'object' ? (marker as { seenThrough?: unknown }).seenThrough : null
+
+  return typeof seen === 'string' && seen ? seen : null
+}
+
 export function strandedMarkerIsLive(marker: unknown): boolean {
   const turn = marker && typeof marker === 'object' ? (marker as { turn?: unknown }).turn : undefined
 
@@ -1008,7 +1016,7 @@ export function strandedMarkerIsLive(marker: unknown): boolean {
 function markGroupTurnInFlight(
   group: string,
   member: GroupMember,
-  marker: { before: number; thread: string; turn: string }
+  marker: { before: number; seenThrough?: string; thread: string; turn: string }
 ) {
   updateGroupChat(group, (r: GroupChatRoom) => {
     r.stranded = {
@@ -1207,7 +1215,8 @@ async function runGroupChatMemberTurnLeased(
   member: GroupMember,
   prompt: string,
   thread: string,
-  images?: Attachment[]
+  images?: Attachment[],
+  seenThrough?: null | string
 ): Promise<null | string> {
   const binding = followGroupChat(group, name => {
     group = name
@@ -1271,6 +1280,9 @@ async function runGroupChatMemberTurnLeased(
     liveGroupTurns.add(turn)
     markGroupTurnInFlight(group, member, {
       before,
+      // A reply harvested after the deadline names what its turn had seen,
+      // like an on-time one (group-round-members groupLogSeenCursor).
+      ...(seenThrough ? { seenThrough } : {}),
       thread,
       turn
     })
@@ -1429,7 +1441,14 @@ export async function harvestStrandedGroupReply(group: string, member: GroupMemb
         member: groupMemberKey(member),
         thread: strandedThread
       })
-      appendGroupChatEntry(group, groupMemberAuthor(member), reply, strandedThread)
+      appendGroupChatEntry(
+        group,
+        groupMemberAuthor(member),
+        reply,
+        strandedThread,
+        undefined,
+        strandedMarkerSeenThrough(marker)
+      )
       updateGroupChat(group, (r: GroupChatRoom) => {
         const markKey = `${strandedThread}::${memberKey}`
 

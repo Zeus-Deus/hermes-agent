@@ -191,6 +191,10 @@ export interface GroupMessage {
   from: GroupMessageAuthor
   id?: string
   images?: Attachment[]
+  /** On a member reply: id of the newest room entry its turn was submitted
+   *  with, so any Desktop can tell what that member's thread session has
+   *  already seen (watermarks are local and never sync). */
+  seenThrough?: string
   text: string
   /** Messages predating threading carry the sentinel thread `'legacy'`. */
   thread?: string
@@ -230,7 +234,7 @@ export interface GroupChat {
   sessions?: Record<string, string | true>
   /** A member turn this Desktop is not (or no longer) polling: the message-count baseline to
    *  harvest its late reply from. `turn` names the poll that owns it while that poll runs. */
-  stranded?: Record<string, number | { before: number; thread?: string; turn?: string }>
+  stranded?: Record<string, number | { before: number; seenThrough?: string; thread?: string; turn?: string }>
   /** #93813: how far each member's external-write reconcile sweep has read
    *  into that member's per-group session transcript (absolute row index of
    *  the last mirrored row + 1). Persisted so external posts aren't rescanned

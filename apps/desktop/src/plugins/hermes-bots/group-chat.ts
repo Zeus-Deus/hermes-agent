@@ -331,6 +331,13 @@ export function groupChatSyncSnapshot(
             ? {
                 source: String(entry.from.source).slice(0, 128)
               }
+            : {}),
+          // The gateway install id is the author identity every Desktop
+          // agrees on (`source` is each Desktop's own connection label).
+          ...(entry?.from?.gateway
+            ? {
+                gateway: String(entry.from.gateway).slice(0, 128)
+              }
             : {})
         },
         text: compacted.text,
@@ -338,6 +345,13 @@ export function groupChatSyncSnapshot(
         ...(entry?.thread
           ? {
               thread: String(entry.thread).slice(0, 128)
+            }
+          : {}),
+        // What the author's turn had seen: the cursor another Desktop derives
+        // for this member instead of replaying the thread (group-round-members).
+        ...(entry?.seenThrough
+          ? {
+              seenThrough: String(entry.seenThrough).slice(0, 160)
             }
           : {}),
         ...(compacted.truncated
@@ -1758,7 +1772,8 @@ export function appendGroupChatEntry(
   from: GroupMessageAuthor,
   text: string,
   thread?: null | string,
-  images?: Attachment[]
+  images?: Attachment[],
+  seenThrough?: null | string
 ): GroupMessage {
   const priorLog = ($groupChats.get()[group] || {}).log || []
   const lastEntry = priorLog[priorLog.length - 1]
@@ -1775,7 +1790,8 @@ export function appendGroupChatEntry(
     // Stored bodies share the prompt's per-line cap (see trimGroupChatLog);
     // cutting here too keeps the duplicate-echo guard comparing like with like.
     text: compactGroupChatSyncText(normalizeGroupChatText(text), GROUP_CHAT_HISTORY_LINE_CHARS).text,
-    thread: thread || 'legacy'
+    thread: thread || 'legacy',
+    ...(seenThrough ? { seenThrough } : {})
   }
 
   if (Array.isArray(images) && images.length) {
