@@ -196,7 +196,7 @@ async function runVisibleMemberTurn(
   updateGroupChat(context.group, (room: GroupChatRoom) => ({ ...room, turn }), { sync: false })
 
   try {
-    return await runGroupChatMemberTurn(context.group, member, prompt, context.thread, images)
+    return await runGroupChatMemberTurn(context.group, member, prompt, context.thread, images, context.members)
   } finally {
     if (context.binding.isLive() && $groupChats.get()[context.group]?.turn === turn) {
       updateGroupChat(context.group, (room: GroupChatRoom) => ({ ...room, turn: null }), { sync: false })

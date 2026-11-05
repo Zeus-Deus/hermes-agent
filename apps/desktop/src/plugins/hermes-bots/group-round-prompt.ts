@@ -59,6 +59,12 @@ function speakerOnDesktopMachine(from: GroupMessageAuthor, members?: readonly Gr
     return local === pool.length ? true : local === 0 ? false : undefined
   }
 
+  // A gateway-stamped line a roster without install_ids cannot place (the saved roster drops
+  // them) may be the Desktop's own from before a rename: unresolved, not "another machine".
+  if (from.gateway && !members.some(m => m.installId)) {
+    return undefined
+  }
+
   // No roster connection carries this badge. Once the roster shows what the Desktop's own
   // connection is called, a badge that is not that name is not that machine.
   return members.some(m => isDesktopLocalConnection(m) && groupMemberAuthor(m).source) ? false : undefined

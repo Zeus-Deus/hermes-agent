@@ -388,16 +388,21 @@ describe('round lifecycle', () => {
     // The Desktop's own connection was renamed "Laptop"; a remote one is called "This device".
     const room = await loadRoom()
     const { runGroupRoundMember } = await import('./group-round-members')
-    const { groupMemberAuthor } = await import('./group-membership')
+    const { durableGroupChatMembers, groupMemberAuthor } = await import('./group-membership')
 
     const members: GroupMember[] = [
-      { connectionId: 'local', connectionKind: 'local', connectionLabel: 'Laptop', name: 'alice', sourceScoped: true },
-      { connectionId: 'server', connectionKind: 'remote', connectionLabel: 'This device', name: 'bob', remoteSource: true, sourceScoped: true },
-      { connectionId: 'mini', connectionKind: 'remote', connectionLabel: 'Mini', name: 'carol', remoteSource: true, sourceScoped: true }
+      { connectionId: 'local', connectionKind: 'local', connectionLabel: 'Laptop', installId: 'gw-laptop', name: 'alice', sourceScoped: true },
+      { connectionId: 'server', connectionKind: 'remote', connectionLabel: 'This device', installId: 'gw-server', name: 'bob', remoteSource: true, sourceScoped: true },
+      { connectionId: 'mini', connectionKind: 'remote', connectionLabel: 'Mini', installId: 'gw-mini', name: 'carol', remoteSource: true, sourceScoped: true }
     ]
 
-    room.chat.updateGroupChat('Room', state => ({ ...state, members, running: true, epoch: 1 }))
-    // An older thread the viewer's fresh session gets as room context, and the live thread.
+    // The saved roster is what a send writes: durable fields only, no install_id.
+    room.chat.updateGroupChat('Room', state => ({ ...state, members: durableGroupChatMembers(members), running: true, epoch: 1 }))
+    // An older thread the viewer's fresh session gets as room context — one line from before
+    // the rename, stamped with alice's gateway — and the live thread.
+    room.chat.appendGroupChatEntry('Room', { gateway: 'gw-laptop', kind: 'member', name: 'alice', source: 'This device' }, 'Pre-rename note.', 't0')
+    // Only the live roster's install_id places a line from under an older custom label.
+    room.chat.appendGroupChatEntry('Room', { gateway: 'gw-laptop', kind: 'member', name: 'alice', source: 'Home PC' }, 'Older note.', 't0')
     room.chat.appendGroupChatEntry('Room', groupMemberAuthor(members[1]), 'Old build is green.', 't0')
     room.chat.appendGroupChatEntry('Room', groupMemberAuthor(members[0]), 'Old notes are on my disk.', 't0')
     room.chat.appendGroupChatEntry('Room', { kind: 'user', name: 'You' }, 'status?', 't1')
@@ -420,6 +425,8 @@ describe('round lifecycle', () => {
     expect(prompt).toContain('bob [This device]: Build is green.')
     expect(prompt).toContain('bob [This device]: Old build is green.')
     expect(prompt).toContain('alice [Laptop (the machine running the Desktop app)]: Old notes are on my disk.')
+    expect(prompt).toContain('alice [the machine running the Desktop app]: Pre-rename note.')
+    expect(prompt).toContain('alice [Home PC (the machine running the Desktop app)]: Older note.')
   })
 
   it('settles when everyone passes, logging only the user message', async () => {

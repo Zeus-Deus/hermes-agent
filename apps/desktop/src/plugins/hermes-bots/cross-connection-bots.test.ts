@@ -273,6 +273,11 @@ describe('a group room seats members from several machines', () => {
       'alice [the machine running the Desktop app]: hi'
     )
 
+    // A saved roster carries no install_id: a gateway-stamped line it cannot place is unresolved,
+    // not "another machine", so a pre-rename local line still reads as the Desktop's machine.
+    const saved = [members[0], members[2]].map(({ installId: _installId, ...rest }) => rest) as GroupMember[]
+    expect(formatGroupChatLine(stale, members[2], 'g', saved)).toBe('alice [the machine running the Desktop app]: old')
+
     // Only with no roster at all is the registry's default label read as the Desktop's machine.
     expect(formatGroupChatLine(departed, members[2], 'g')).toBe('erin [the machine running the Desktop app]: bye')
 

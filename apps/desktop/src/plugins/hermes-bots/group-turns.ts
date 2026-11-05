@@ -884,7 +884,8 @@ export async function runGroupChatMemberTurn(
   member: GroupMember,
   prompt: string,
   thread: string,
-  images?: Attachment[]
+  images?: Attachment[],
+  members?: GroupMember[]
 ): Promise<null | string> {
   // #93602: hold the member's route socket for the whole turn. Without the
   // lease, every RPC below rides its own request-scoped socket lease; the
@@ -899,7 +900,7 @@ export async function runGroupChatMemberTurn(
   try {
     releaseTurnLease = await retainGroupTurnRoute(member)
 
-    return binding.isLive() ? await runGroupChatMemberTurnLeased(group, member, prompt, thread, images) : null
+    return binding.isLive() ? await runGroupChatMemberTurnLeased(group, member, prompt, thread, images, members) : null
   } finally {
     releaseTurnLease?.()
     binding.dispose()
@@ -1207,7 +1208,8 @@ async function runGroupChatMemberTurnLeased(
   member: GroupMember,
   prompt: string,
   thread: string,
-  images?: Attachment[]
+  images?: Attachment[],
+  members?: GroupMember[]
 ): Promise<null | string> {
   const binding = followGroupChat(group, name => {
     group = name
@@ -1248,8 +1250,10 @@ async function runGroupChatMemberTurnLeased(
 
     const room = $groupChats.get()[group]
 
+    // The round's live roster carries install_ids the saved one drops; the transcript badges
+    // resolve speakers' machines from it.
     const roomContext = fresh
-      ? formatFreshThreadRoomContext(room?.log || [], member, thread, group, room?.members || [])
+      ? formatFreshThreadRoomContext(room?.log || [], member, thread, group, members?.length ? members : room?.members || [])
       : []
 
     const contextualPrompt = addFreshThreadRoomContext(prompt, roomContext)
