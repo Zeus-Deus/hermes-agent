@@ -68,6 +68,7 @@ import {
 } from './group-chat'
 import { stickyGroupEngine } from './group-engine'
 import { groupWorkspaceOwnerKey } from './group-membership'
+import { registeredConnectionIds } from './group-rounds'
 import { annotateOrphanedGroupChatMembers } from './hygiene'
 import { BOTS_LOCALES } from './i18n'
 import { displayName } from './labels'
@@ -353,6 +354,10 @@ export default {
           // must hydrate the gateway projection instead of merely avoiding an
           // empty overwrite and then rendering an empty conversation.
           await tombstonesHydrated
+          // Prime the room send path's registry view before the first pull
+          // can seat another Desktop's connection ids — with or without a
+          // local room cache — so the first "stop @x" holds the real member.
+          await registeredConnectionIds()
           await pullGroupChatServerState().catch(() => false)
           scheduleGroupChatServerSync($groupChats.get())
         })
@@ -398,6 +403,8 @@ export default {
       if (typeof window !== 'undefined') {
         unbindConnectionsChanged =
           window.hermesDesktop?.connections?.onChanged?.(payload => {
+            void registeredConnectionIds()
+
             if (payload?.reason === 'removed') {
               sweepGroupChatMembersForRemovedConnection(payload.connectionId)
             }

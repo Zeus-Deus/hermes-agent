@@ -679,6 +679,33 @@ function groupChatSyncEnvelope(
   return envelope
 }
 
+/** Seat the projection's members into a room's member map (replacing it when
+ *  the projection is newer). `sourceMissing` is this Desktop's registry
+ *  verdict and never rides the projection; re-seating a member must not
+ *  forget that its connection is not registered here, or the next drive
+ *  targets it again. */
+function seatProjectedGroupMembers(
+  members: Map<string, GroupMember>,
+  projected: GroupMember[] | undefined,
+  replace: boolean
+) {
+  const missingHere = new Set([...members.entries()].filter(([, member]) => member?.sourceMissing).map(([key]) => key))
+
+  if (replace) {
+    members.clear()
+  }
+
+  for (const member of Array.isArray(projected) ? projected : []) {
+    const memberKey = groupChatSyncMemberKey(member)
+
+    members.set(memberKey, {
+      ...member,
+      remoteSource: true,
+      ...(missingHere.has(memberKey) ? { sourceMissing: true, sourceReachable: false } : {})
+    })
+  }
+}
+
 /** Merge the gateway's bounded display projection into Desktop's richer room
  *  state without discarding local session/watermark/runtime fields. Missing
  *  remote rooms/messages are not deletions; only explicit tombstones remove a
@@ -795,16 +822,7 @@ export function mergeRemoteGroupChatSnapshotIntoRooms(
     // bumps the local revision precisely so a lagging mirror cannot re-seat
     // the member it just removed.
     if (!isPreserved && remoteRevision >= localRevision) {
-      if (remoteRevision > localRevision) {
-        members.clear()
-      }
-
-      for (const member of Array.isArray(projected.members) ? projected.members : []) {
-        members.set(groupChatSyncMemberKey(member), {
-          ...member,
-          remoteSource: true
-        })
-      }
+      seatProjectedGroupMembers(members, projected.members, remoteRevision > localRevision)
     }
 
     const log = assignLegacyThreads(

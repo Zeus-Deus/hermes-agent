@@ -5,7 +5,7 @@
  */
 import { host } from '@hermes/plugin-sdk'
 
-import { botFriendlyNames, botHandle, botMentionTag, mentionNameForms } from './data'
+import { botFriendlyNames, botHandle, botMentionTag, botRosterKey, mentionNameForms } from './data'
 import { groupFailureReason, recordGroupActivity } from './group-activity'
 import {
   $groupChats,
@@ -30,6 +30,7 @@ import {
 import { type GroupRoundMemberContext, runGroupContinuationMembers, runGroupRoundMember } from './group-round-members'
 import { rejectGroupSlashCommand } from './group-slash'
 import { GROUP_TURN_HARD_CAP_MS, harvestStrandedGroupReply } from './group-turns'
+import { markOrphanedGroupMemberDescriptor } from './hygiene'
 import { botsText } from './i18n'
 import { requestForBot } from './routing'
 import type { Attachment, GroupMember, GroupMessage } from './types'
@@ -907,6 +908,14 @@ export function sendToGroupChat(
   }
 
   const target = thread || mintGroupThreadId()
+  // A seat on a connection this Desktop does not have answers no mention and
+  // takes no hold: it would shadow the reachable member's @handle.
+  const registered = lastRegisteredConnections
+
+  const reachable = members.filter(
+    (member: GroupMember) => !member?.sourceMissing && !(registered && onUnregisteredConnection(member, registered))
+  )
+
   $groupNeedsYou.set({
     ...$groupNeedsYou.get(),
     [group]: false
@@ -941,14 +950,14 @@ export function sendToGroupChat(
         ? {}
         : applyGroupHoldDirective(
             room.holds,
-            parseGroupChatMentions(trimmed, members),
+            parseGroupChatMentions(trimmed, reachable),
             trimmed,
             {
               at: sent?.at,
               byMessageId: sent?.id,
               thread: target
             },
-            members.map((member: GroupMember) => groupMemberKey(member))
+            reachable.map((member: GroupMember) => groupMemberKey(member))
           )
 
     return room
@@ -962,6 +971,92 @@ export function sendToGroupChat(
   queueGroupChatDrive(group, members, target)
 
   return target
+}
+
+/** The registry as last read, for the synchronous send path (mentions and
+ *  holds are resolved before any drive can await the registry). Null until
+ *  first read; every drive refreshes it, and the plugin primes it at load. */
+let lastRegisteredConnections: null | ReadonlySet<string> = null
+
+/** Connection ids this Desktop's registry can route to, or null when the
+ *  registry cannot be read (older Desktop build, no bridge) — callers then
+ *  keep every seat, exactly as before the check existed. */
+export async function registeredConnectionIds(): Promise<null | ReadonlySet<string>> {
+  if (typeof host.connections !== 'function') {
+    return null
+  }
+
+  try {
+    const rows = await host.connections()
+    const ids = Array.isArray(rows) ? new Set(rows.map(row => String(row?.id || '').trim()).filter(Boolean)) : null
+
+    if (ids) {
+      lastRegisteredConnections = ids
+    }
+
+    return ids
+  } catch {
+    return null
+  }
+}
+
+/** A source-scoped seat whose owning connection is not registered here. */
+function onUnregisteredConnection(member: GroupMember, registered: ReadonlySet<string>): boolean {
+  if (!member?.sourceScoped && !member?.remoteSource) {
+    return false
+  }
+
+  const id = String(member.route?.connectionId || member.connectionId || '').trim()
+
+  return Boolean(id) && !registered.has(id)
+}
+
+/** The seats a drive may submit turns to. Membership rides the gateway
+ *  projection in each writer's OWN connection namespace, so a room merged
+ *  from another Desktop can seat this machine's bot a second time under a
+ *  connection id this Desktop never had (`laptop::alice` beside
+ *  `local::alice`). That seat cannot be reached: every turn fails, a hold on
+ *  it piles up held messages forever, its handle shadows the real member's
+ *  `@name`, and the other members are told about a phantom participant.
+ *  Drop it from the drive and mark the stored descriptor `sourceMissing`
+ *  (kept, never deleted) so the room shows it as a removed gateway and later
+ *  sends stop resolving mentions or holds to it. */
+async function reachableGroupMembers(group: string, members: GroupMember[]): Promise<GroupMember[]> {
+  const registered = await registeredConnectionIds()
+
+  if (!registered) {
+    return members
+  }
+
+  const unreachable = new Set(
+    members.filter(member => onUnregisteredConnection(member, registered)).map(member => botRosterKey(member))
+  )
+
+  if (!unreachable.size) {
+    return members
+  }
+
+  const room = $groupChats.get()[group]
+
+  if (
+    room &&
+    !room.tombstone &&
+    (room.members || []).some(member => unreachable.has(botRosterKey(member)) && !member.sourceMissing)
+  ) {
+    // Local annotation only: `sourceMissing` never rides the projection.
+    updateGroupChat(
+      group,
+      current => ({
+        ...current,
+        members: (current.members || []).map(member =>
+          unreachable.has(botRosterKey(member)) ? markOrphanedGroupMemberDescriptor(member) : member
+        )
+      }),
+      { sync: false }
+    )
+  }
+
+  return members.filter(member => !unreachable.has(botRosterKey(member)))
 }
 
 interface GroupChatDrive {
@@ -1008,7 +1103,21 @@ function queueGroupChatDrive(group: string, members: GroupMember[], thread: stri
         currentThread = nextThread
         drive.pending.delete(nextThread)
         updateGroupChat(group, room => ({ ...room, running: true }))
-        await runGroupChatRounds(group, nextMembers, nextThread, drive.failedMembers)
+        const epochBefore = $groupChats.get()[group]?.epoch || 0
+        const reachable = await reachableGroupMembers(group, nextMembers)
+
+        if (!binding.isLive()) {
+          break
+        }
+
+        // A Stop that landed during the registry lookup cleared `pending`
+        // but could not reach this already-dequeued thread; runGroupChatRounds
+        // would capture the post-Stop epoch and run it anyway.
+        if (($groupChats.get()[group]?.epoch || 0) !== epochBefore) {
+          continue
+        }
+
+        await runGroupChatRounds(group, reachable, nextThread, drive.failedMembers)
       }
     } catch (error) {
       if (binding.isLive()) {
