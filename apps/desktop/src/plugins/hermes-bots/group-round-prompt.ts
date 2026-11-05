@@ -8,7 +8,7 @@ import {
   groupThreadOf
 } from './group-chat'
 import { groupMemberKey } from './group-membership'
-import { agentFacingConnectionLabel, isDesktopLocalConnection } from './labels'
+import { agentFacingConnectionLabel, agentFacingSourceBadge, isDesktopLocalConnection } from './labels'
 import type { GroupMember, GroupMessage, GroupMessageAuthor } from './types'
 
 // Openers of Hermes' own control frames (the mid-turn steer marker, the compaction
@@ -30,7 +30,7 @@ function relabelMemberControlFrames(text: string) {
 export type GroupChatLineViewer =
   | string
   | (Pick<GroupMember, 'name'> &
-      Partial<Pick<GroupMember, 'connectionId' | 'connectionLabel' | 'installId' | 'remoteSource'>>)
+      Partial<Pick<GroupMember, 'connectionId' | 'connectionKind' | 'connectionLabel' | 'installId' | 'remoteSource'>>)
 
 /** Room-log line as a member sees it: `Name (user): …` / `Name: …` /
  *  `Name (you): …`. */
@@ -55,7 +55,8 @@ export function formatGroupChatLine(entry: GroupMessage, viewer: GroupChatLineVi
   const suffix = isGroupChatSelf(entry.from, viewer) ? ' (you)' : ''
   // Cross-connection speakers carry their device so same-named agents on
   // two machines stay tellable apart in every member's transcript.
-  const source = entry.from.source ? ` [${entry.from.source}]` : ''
+  const viewerOnDesktop = typeof viewer !== 'string' && isDesktopLocalConnection(viewer)
+  const source = entry.from.source ? ` [${agentFacingSourceBadge(entry.from.source, viewerOnDesktop)}]` : ''
 
   return `${groupSpeakerLabel(entry.from.name, group)}${suffix}${source}: ${relabelMemberControlFrames(entry.text)}${attached}`
 }

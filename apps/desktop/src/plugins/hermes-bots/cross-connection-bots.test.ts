@@ -41,9 +41,9 @@ vi.mock('@hermes/plugin-sdk', async importOriginal => {
 })
 
 const { botBackendProfileScope, botConnectionRoute, requestForBot } = await import('./routing')
-const { groupMemberKey } = await import('./group-membership')
+const { groupMemberAuthor, groupMemberKey } = await import('./group-membership')
 
-const { buildGroupChatTurnPrompt, formatGroupChatLine } = await import('./group-round-prompt')
+const { buildGroupChatTurnPrompt, formatGroupChatLine, formatGroupDeltaLines } = await import('./group-round-prompt')
 const { parseGroupChatMentions, resolveGroupResponders } = await import('./group-rounds')
 
 const aliasBot = {
@@ -205,6 +205,27 @@ describe('a group room seats members from several machines', () => {
     }).split('\n')[0]
 
     expect(unscoped).toMatch(/@alice \[on the machine running the Desktop app\]/)
+
+    // The transcript badges the speaker the same way: the stored `from.source` stays the
+    // identity token, only its rendering for a viewer off the Desktop's machine changes.
+    const reply = { at: 1, from: groupMemberAuthor(members[0]), text: 'The notes are ready.' }
+
+    const withDelta = (viewer: GroupMember) =>
+      buildGroupChatTurnPrompt({
+        deltaLines: formatGroupDeltaLines([reply], viewer, 'g'),
+        groupName: 'g',
+        members,
+        viewer
+      })
+
+    expect(reply.from.source).toBe('This device')
+    expect(withDelta(members[1])).toMatch(/alice \[the machine running the Desktop app\]: The notes are ready\./)
+    expect(withDelta(members[1])).not.toMatch(/This device/)
+    expect(withDelta(members[2])).toMatch(/alice \[This device\]: The notes are ready\./)
+    // A connection with no label badges by its id.
+    expect(formatGroupChatLine({ ...reply, from: { kind: 'member', name: 'alice', source: 'local' } }, members[1])).toBe(
+      'alice [the machine running the Desktop app]: The notes are ready.'
+    )
   })
 
   it('does not self-attribute a same-named default on another connection (#106851)', () => {

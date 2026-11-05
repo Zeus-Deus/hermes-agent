@@ -127,6 +127,8 @@ export function botProfileIdentity(name: string, title: string) {
   }
 }
 
+const DESKTOP_MACHINE = 'the machine running the Desktop app'
+
 /** The Desktop's own connection (registry id `local`, kind `local`). */
 export function isDesktopLocalConnection(connection: { connectionId?: unknown; connectionKind?: unknown }): boolean {
   return connection.connectionKind === 'local' || connection.connectionId === 'local'
@@ -143,9 +145,17 @@ export function agentFacingConnectionLabel(label: string, desktopLocal: boolean)
     return shown
   }
 
-  return shown && shown.toLowerCase() !== 'this device'
-    ? `${shown} (the machine running the Desktop app)`
-    : 'the machine running the Desktop app'
+  return shown && shown.toLowerCase() !== 'this device' ? `${shown} (${DESKTOP_MACHINE})` : DESKTOP_MACHINE
+}
+
+/** A group transcript badge (`from.source` = `connectionLabel || connectionId`, kept verbatim as
+ *  the speaker's identity token) rendered for one viewer: the Desktop's own connection — its id
+ *  or the registry's default "This device" — is named from the viewer's side unless the viewer
+ *  is known to be on the Desktop's machine too. */
+export function agentFacingSourceBadge(source: string, viewerOnDesktop: boolean): string {
+  const shown = source.trim()
+
+  return !viewerOnDesktop && (shown === 'local' || shown.toLowerCase() === 'this device') ? DESKTOP_MACHINE : source
 }
 
 /** Flatten markdown syntax out of a one-line roster preview so rows read
