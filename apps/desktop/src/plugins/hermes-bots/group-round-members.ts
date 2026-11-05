@@ -151,18 +151,29 @@ function stampCoversPrefix(log: GroupMessage[], stamp: GroupMessage, anchor: num
 }
 
 /** The member's turn payload from log index `seen`: this thread's entries
- *  plus any held entries being released, oldest first. */
+ *  plus any held entries being released, oldest first. Held entries before
+ *  `proven` (the log-derived cursor) are ones the member's session already
+ *  holds; `withheld` says some were left out for that reason. */
 function groupTurnPayload(
   context: GroupRoundMemberContext,
   member: GroupMember,
   room: GroupChatRoom,
   seen: number,
-  heldIds: string[]
+  heldIds: string[],
+  proven = 0
 ) {
   const { members, thread } = context
   const delta = room.log.slice(seen).filter((e: GroupMessage) => groupThreadOf(e) === thread)
   const heldSet = new Set(heldIds)
-  const delivered = room.log.filter((entry: GroupMessage) => Boolean(entry.id && heldSet.has(entry.id)))
+  let withheld = false
+
+  const delivered = room.log.filter((entry: GroupMessage, index: number) => {
+    const held = Boolean(entry.id && heldSet.has(entry.id))
+    withheld ||= held && index < proven
+
+    return held && index >= proven
+  })
+
   const deliveredIds = new Set(delivered.map((entry: GroupMessage) => entry.id).filter(Boolean))
 
   const visibleDelta = [
@@ -183,7 +194,7 @@ function groupTurnPayload(
   // the transcript's [attached image: …] marker.
   const images = visibleDelta.flatMap((e: GroupMessage) => (Array.isArray(e.images) ? e.images : []))
 
-  return { delta, images, prompt, visibleDelta }
+  return { delta, images, prompt, visibleDelta, withheld }
 }
 
 function prepareGroupRoundMember(context: GroupRoundMemberContext, member: GroupMember) {
@@ -197,7 +208,8 @@ function prepareGroupRoundMember(context: GroupRoundMemberContext, member: Group
   const memberKey = groupMemberKey(member)
   const markKey = `${thread}::${memberKey}`
   const local = room.watermarks[markKey] || 0
-  const seen = Math.max(local, groupLogSeenCursor(room.log, member, thread))
+  const proven = groupLogSeenCursor(room.log, member, thread)
+  const seen = Math.max(local, proven)
   // Delta: NEW room entries, narrowed to this thread — the member's
   // turn sees only the conversation it's part of.
   const delta = room.log.slice(seen).filter((e: GroupMessage) => groupThreadOf(e) === thread)
@@ -222,7 +234,13 @@ function prepareGroupRoundMember(context: GroupRoundMemberContext, member: Group
 
       r.heldMessages = {
         ...(r.heldMessages || {}),
-        [memberKey]: heldMemberMessageIds(r.heldMessages?.[memberKey], delta)
+        // From this Desktop's own watermark, not the log-derived cursor: the
+        // member's session may be gone by the release, and a replacement
+        // must still get what the proof covered (groupTurnPayload).
+        [memberKey]: heldMemberMessageIds(
+          r.heldMessages?.[memberKey],
+          seen > local ? room.log.slice(local).filter((e: GroupMessage) => groupThreadOf(e) === thread) : delta
+        )
       }
 
       if (r.holds?.[memberKey] && !r.holds[memberKey].noted) {
@@ -250,10 +268,11 @@ function prepareGroupRoundMember(context: GroupRoundMemberContext, member: Group
   }
 
   const heldIds = room.heldMessages?.[memberKey] || []
-  const payload = groupTurnPayload(context, member, room, seen, heldIds)
-  // The log proved more than this Desktop's watermark: if the member's
-  // session turns out to be minted by this turn, it holds none of that.
-  const fallback = seen > local ? groupTurnPayload(context, member, room, local, heldIds) : null
+  const payload = groupTurnPayload(context, member, room, seen, heldIds, proven)
+  // The log proved more than this Desktop's watermark (or proved held
+  // entries seen): if the member's session turns out to be minted by this
+  // turn, it holds none of that.
+  const fallback = seen > local || payload.withheld ? groupTurnPayload(context, member, room, local, heldIds) : null
 
   // A user entry this turn is about to see for the first time: whatever the
   // member already posted was written without it, so it answers nothing here.

@@ -169,8 +169,13 @@ describe('a member seated on a connection this Desktop does not have', () => {
 
     const after = room.chat.$groupChats.get().g
 
-    expect(Object.keys(after.holds || {})).toEqual(['local::alice'])
+    // The phantom's hold (the registry view could have lagged) is inert:
+    // it is never driven, so nothing is ever held for it.
+    expect(Object.keys(after.holds || {})).toContain('local::alice')
+    expect(Object.keys(after.holds || {})).not.toContain('server::bob')
     expect(Object.keys(after.heldMessages || {})).not.toContain('laptop::alice')
+    expect(room.routed).not.toContain('laptop::alice')
+    expect(room.routed).not.toContain('local::alice')
   })
 
   it('keeps the missing-source mark when a newer projection re-seats the same member', async () => {
@@ -228,8 +233,8 @@ describe('a member seated on a connection this Desktop does not have', () => {
 
     for (const [text, held] of [
       ['stop @alice-server', ['server::alice']],
-      // The shared form still names the reachable seat while the view lags.
-      ['stop @alice', ['local::alice']],
+      // The shared form: the drive's fresh view could route it to either seat.
+      ['stop @alice', ['local::alice', 'server::alice']],
       ['@all stop', ['local::alice', 'server::alice']]
     ] as const) {
       const room = await loadRoom(['local'], { turn: () => 'on it' })

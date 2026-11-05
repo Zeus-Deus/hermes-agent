@@ -180,6 +180,55 @@ describe('a member turn driven by a Desktop that did not drive the earlier turns
     expect(prompt).toContain('You (user): @bob go for it, again')
   })
 
+  it('gives a session minted after a hold the thread the hold skipped over', async () => {
+    const first = await loadDesktop({
+      turn: ({ profile }) => (profile === 'bob' ? 'Brief: draft the release notes in two passes.' : '(pass)')
+    })
+
+    first.chat.$groupChats.set({ g: { log: [], members: MEMBERS, roomId: 'room', sessions: {}, watermarks: {} } })
+    const thread = await send(first, '@bob bring @alice up to date')
+    const projection = first.chat.groupChatSyncSnapshot(first.chat.$groupChats.get())
+
+    // bob's session is gone on the gateway Desktop B reaches.
+    const second = await loadDesktop({ turn: () => '(pass)' })
+    second.chat.$groupChats.set(second.chat.mergeRemoteGroupChatSnapshotIntoRooms(projection, {}))
+
+    await send(second, 'stop @bob', thread)
+    expect(bobPrompts(second)).toEqual([])
+    await send(second, '@bob resume', thread)
+
+    const [prompt] = bobPrompts(second)
+
+    expect(prompt).toContain('bring @alice up to date')
+    expect(prompt).toContain('Brief: draft the release notes')
+    expect(prompt).toContain('stop @bob')
+    expect(prompt).toContain('@bob resume')
+  })
+
+  it('does not replay what a surviving session holds when a held member is released', async () => {
+    const first = await loadDesktop({
+      turn: ({ profile }) => (profile === 'bob' ? 'Brief: draft the release notes in two passes.' : '(pass)')
+    })
+
+    first.chat.$groupChats.set({ g: { log: [], members: MEMBERS, roomId: 'room', sessions: {}, watermarks: {} } })
+    const thread = await send(first, '@bob bring @alice up to date')
+    const projection = first.chat.groupChatSyncSnapshot(first.chat.$groupChats.get())
+    const firstCalls = bobPrompts(first).length
+
+    const second = await loadDesktop({}, first.gateway)
+    second.chat.$groupChats.set(second.chat.mergeRemoteGroupChatSnapshotIntoRooms(projection, {}))
+
+    await send(second, 'stop @bob', thread)
+    await send(second, '@bob resume', thread)
+
+    const [prompt] = bobPrompts(second).slice(firstCalls)
+
+    expect(prompt).toContain('stop @bob')
+    expect(prompt).toContain('@bob resume')
+    expect(prompt).not.toContain('bring @alice up to date')
+    expect(prompt).not.toContain('Brief: draft the release notes')
+  })
+
   it('does not trust an anchor whose prefix holds an entry the stamping turn never had', async () => {
     const { members } = await loadDesktop()
     const kickoff: GroupMessage = { at: 1, from: { kind: 'user', name: 'You' }, id: 'u-kick', text: '@bob kick off', thread: 't' }

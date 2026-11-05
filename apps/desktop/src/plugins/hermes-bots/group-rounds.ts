@@ -993,19 +993,20 @@ export async function registeredConnectionIds(): Promise<null | ReadonlySet<stri
   }
 }
 
-/** The user's mentions, with every @form a reachable seat answers to resolved
- *  among reachable seats only. A seat on a connection this Desktop does not
- *  have must not shadow the reachable seat of the same bot (mentions resolve
- *  last-wins and the phantom is seated after live rows), yet the registry
- *  view may lag a just-added connection: a form no reachable seat claims —
- *  `@alice-server` — still names the seat that owns it (the drive re-checks
- *  the registry before any turn is submitted). */
+/** The user's mentions for holds. A seat on a connection this Desktop does
+ *  not have must not take the reachable seat's shared @form (mentions resolve
+ *  last-wins and the phantom is seated after live rows), so every form a
+ *  trusted seat answers to names that seat. But the registry view this sync
+ *  path reads may lag a just-added connection, and the drive re-reads it: a
+ *  seat suspect only by that view may turn out reachable and then win the
+ *  same form at drive time. Such a form names both seats, so "stop @alice"
+ *  holds every seat the drive could route it to. A form no trusted seat
+ *  claims (`@alice-server`) names the seat that owns it. A hold on a seat
+ *  that stays unreachable is inert: the drive never submits to it. */
 function parseSendMentions(text: string, members: GroupMember[]) {
   const registered = lastRegisteredConnections
-
-  const trusted = members.filter(
-    member => !member?.sourceMissing && !(registered && onUnregisteredConnection(member, registered))
-  )
+  const known = members.filter(member => !member?.sourceMissing)
+  const trusted = known.filter(member => !(registered && onUnregisteredConnection(member, registered)))
 
   if (trusted.length === members.length) {
     return parseGroupChatMentions(text, members)
@@ -1016,11 +1017,10 @@ function parseSendMentions(text: string, members: GroupMember[]) {
 
   for (const match of text.matchAll(/@([a-z0-9][a-z0-9._-]*)/gi)) {
     const token = `@${match[1]}`
+    const claimed = parseGroupChatMentions(token, trusted).mentioned.size > 0
 
-    if (!parseGroupChatMentions(token, trusted).mentioned.size) {
-      for (const key of parseGroupChatMentions(token, members).mentioned) {
-        mentioned.add(key)
-      }
+    for (const key of parseGroupChatMentions(token, claimed ? known : members).mentioned) {
+      mentioned.add(key)
     }
   }
 
