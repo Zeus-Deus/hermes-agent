@@ -270,15 +270,23 @@ def _remote_paragraph(root: Path) -> str:
     )
 
 
+def _shadowed_peers(root: Path) -> list[str]:
+    """Registered peers whose bare name a local profile (folder id or @handle) also answers to: the
+    local bot wins that name (``tools/bot_mode_dm.bare_peer``, #145241)."""
+    peers = _peers(root)
+    if not peers:
+        return []
+    names = [name for name, _d in _roster(root)]
+    return sorted(set(peers) & {form.lower() for name in names for form in (name, _handle(name, names))})
+
+
 def _peer_paragraph(root: Path) -> str:
     """Addendum for cross-machine DMs — only when peers exist."""
     peers = _peers(root)
     if not peers:
         return ""
     listed = ", ".join(f"`{p}`" for p in peers)
-    # A local profile wins a name it shares with a peer (tools/bot_mode_dm.bare_peer, #145241).
-    names = [name for name, _d in _roster(root)]
-    shared = sorted(set(peers) & {form.lower() for name in names for form in (name, _handle(name, names))})
+    shared = _shadowed_peers(root)
     shadowed = (f" A local teammate wins a name it shares with a peer ({', '.join(f'`{p}`' for p in shared)}): "
                 'reach that peer\'s main agent as "<peer>/default".') if shared else ""
     return (
@@ -468,6 +476,10 @@ def capability_fingerprint(home: str | os.PathLike | None = None) -> str:
     # Peer gateways and the Desktop relay roster are part of the messaging
     # surface too: registering a peer or (dis)connecting a machine must show up.
     surface["peers"] = _peers(root)
+    # Only where a peer is shadowed: those prompts must drop "<peer>" alone for the peer's main agent
+    # (#145241); every other install keeps its fingerprint, so its Bot Chats are not rebuilt.
+    if shadowed := _swallow(lambda: _shadowed_peers(root), []):
+        surface["shadowed_peers"] = shadowed
     surface["remote_roster"] = sorted(
         f"{r['connection_id']}:{r['profile']}:{r['title']}" for r in _remote_roster(resolved)
     )

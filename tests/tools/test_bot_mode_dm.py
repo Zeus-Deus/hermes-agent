@@ -610,6 +610,24 @@ def test_the_protocol_names_the_explicit_form_for_a_shadowed_peer(tmp_path):
     assert "shares with a peer" not in plain and "`spark`" in plain
 
 
+def test_only_a_shadowed_peer_install_rebuilds_its_bot_chat_prompt(tmp_path, monkeypatch):
+    """A Bot Chat prompt stamped before the precedence change still teaches "<peer>" alone for a peer
+    a local profile now shadows, so its epoch must go stale; installs without such a collision keep
+    their epoch (no prompt rebuild for them)."""
+    from tools import bot_mode_probe
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    shadowed = _managed_home(tmp_path / "a", teammates=("ops",), peers=("ops",))
+    plain = _managed_home(tmp_path / "b", teammates=("ops",), peers=("spark",))
+    with monkeypatch.context() as before:  # the fingerprint as it was before shadowed peers counted
+        before.setattr(bot_mode_probe, "_shadowed_peers", lambda root: [])
+        stamps = {home: bot_mode_probe.epoch_line(home) for home in (shadowed, plain)}
+
+    assert bot_mode_probe.stored_prompt_capability_stale(stamps[shadowed], shadowed)
+    assert not bot_mode_probe.stored_prompt_capability_stale(stamps[plain], plain)
+
+
 def test_fan_out_and_chain_identity_follow_the_local_precedence(tmp_path, monkeypatch):
     """``split_targets`` and the chain gate resolve names in ``_dispatch``'s order: a local
     teammate shadowing a peer is that local bot to both, and its explicit peer form stays the peer."""
