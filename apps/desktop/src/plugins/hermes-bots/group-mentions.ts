@@ -171,7 +171,10 @@ export function parseGroupChatMentions(text: unknown, members: GroupMember[]) {
   const unresolved = claimUncontestedCustomHandles(members, handles)
 
   for (const match of source.matchAll(/@([a-z0-9][a-z0-9._-]*)/gi)) {
-    const handle = match[1].toLowerCase()
+    const written = match[1].toLowerCase()
+    // A sentence's closing period (`Thanks @ma-ia.`) is prose: left on, the collapsed fallback
+    // below would read `maia` and could reach another bot.
+    const handle = handles.has(written) ? written : written.replace(/\.+$/, '')
 
     if (handle === 'everyone' || handle === 'all') {
       everyone = true

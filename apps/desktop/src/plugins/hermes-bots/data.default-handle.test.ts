@@ -391,6 +391,9 @@ describe('a custom handle equal to another default’s collapsed custom handle',
           expect(tagged(`@${laptopHandle} go`)).toEqual(['laptop::default'])
           expect(tagged(`@${serverHandle} go`)).toEqual(['server::default'])
           expect(tagged(`@${laptopHandle} @${serverHandle} go`).sort()).toEqual(['laptop::default', 'server::default'])
+          // A sentence's closing period is prose, not part of the handle.
+          expect(tagged(`Thanks @${laptopHandle}.`)).toEqual(['laptop::default'])
+          expect(tagged(`Thanks @${serverHandle}.`)).toEqual(['server::default'])
         }
       }
     }
