@@ -372,6 +372,27 @@ describe('a custom handle equal to a collapsed title', () => {
   )
 })
 
+describe('a custom handle equal to a sibling’s -local address', () => {
+  it('leaves @<name>-local with that sibling, in either seat order', () => {
+    const lead = { connectionId: 'local', mentionHandle: 'writer-local', name: 'default' } as GroupMember
+    const writer = { connectionId: 'local', name: 'writer' } as GroupMember
+
+    const server = {
+      connectionId: 'server',
+      handle: 'default-server',
+      name: 'default',
+      remoteSource: true
+    } as GroupMember
+
+    for (const members of [
+      [lead, writer, server],
+      [server, writer, lead]
+    ]) {
+      expect([...parseGroupChatMentions('@writer-local go', members).mentioned]).toEqual(['writer'])
+    }
+  })
+})
+
 describe('a custom handle shaped like a device tag', () => {
   it('is not a handle, so a default never loses its own device tag to @hermes', () => {
     const [laptop, , server] = twoMachines('maia', 'default-server')

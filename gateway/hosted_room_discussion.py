@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from functools import partial
 from typing import Any, Literal
 
@@ -117,6 +117,8 @@ class DiscussionMember:
     handle: str
     display_name: str = ""
     target: Mapping[str, Any] | None = None
+    #: Extra mention handles (``hermes`` for a default seated under its custom handle, #89720).
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -317,7 +319,23 @@ def validate_roster(value: Any, *, local_profiles: Iterable[str]) -> tuple[Discu
                 raise DiscussionValidationError(message)
             seen.add(key)
         members.append(member)
-    return tuple(members)
+    return _with_hermes_alias(tuple(members), known_profiles)
+
+
+def _with_hermes_alias(members: tuple[DiscussionMember, ...], known_profiles: set[str]) -> tuple[DiscussionMember, ...]:
+    """Give the local default seated under its custom Bot Mode @handle (#89720) the ``hermes``
+    alias: @hermes keeps reaching the default everywhere else, so it does in the room too — but
+    only while no profile on this gateway (seated or not) and no member holds that name, the rule
+    ``tools.bot_mode_probe._profile_for_handle`` applies. A default frozen as ``hermes`` needs no
+    alias, and one frozen as ``default`` (a real ``hermes`` profile held @hermes then) gets none."""
+    if "hermes" in known_profiles or any("hermes" in (m.handle.casefold(), m.profile.casefold()) for m in members):
+        return members
+    defaults = [index for index, m in enumerate(members)
+                if (m.target or {}).get("kind") == "local" and m.profile == "default"]
+    if len(defaults) != 1 or members[defaults[0]].handle.casefold() in ("hermes", "default"):
+        return members
+    index = defaults[0]
+    return (*members[:index], replace(members[index], aliases=("hermes",)), *members[index + 1:])
 
 
 def validate_room(value: Any, *, local_profiles: Iterable[str]) -> DiscussionRoom:
@@ -363,17 +381,12 @@ def resolve_mentions(
 
 
 def _mention_handles(members: Sequence[DiscussionMember]) -> dict[str, DiscussionMember]:
-    """Each member's frozen handle, plus ``hermes`` for the local default seated under its custom
-    Bot Mode @handle (#89720): @hermes keeps reaching the default everywhere else, so it does here,
-    unless a member holds that handle or profile. A default frozen as ``default`` (a real
-    ``hermes`` profile held @hermes then) gets no alias."""
+    """Each member's frozen handle, then its aliases (``_with_hermes_alias``) where no handle
+    holds them."""
     by_handle = {member.handle.casefold(): member for member in members}
-    if "hermes" in by_handle or any(member.profile.casefold() == "hermes" for member in members):
-        return by_handle
-    defaults = [member for member in members
-                if (member.target or {}).get("kind") == "local" and member.profile == "default"]
-    if len(defaults) == 1 and defaults[0].handle.casefold() != "default":
-        by_handle["hermes"] = defaults[0]
+    for member in members:
+        for alias in member.aliases:
+            by_handle.setdefault(alias.casefold(), member)
     return by_handle
 
 

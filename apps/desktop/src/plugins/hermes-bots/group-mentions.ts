@@ -41,7 +41,7 @@ function titleForms(title: string): string[] {
 /** Every lower-cased form a member answers to by its live identity: profile name, @handle,
  *  picker tag, the handle a custom-handle default had before (`default-server`), each also
  *  collapsed as the parser reads it, its title forms exactly as the parser seats them
- *  (`titleForms`), and its title / friendly-name slugs. */
+ *  (`titleForms`), its title / friendly-name slugs, and an own-source member's `<name>-local`. */
 function memberIdentityForms(member: GroupMember): Set<string> {
   const title = String(member.title || '').trim()
 
@@ -51,6 +51,7 @@ function memberIdentityForms(member: GroupMember): Set<string> {
       .flatMap(form => [form, form.replace(/[\s_-]+/g, '')])
       .concat(titleForms(title))
       .concat([title, ...botFriendlyNames(member)].flatMap(name => mentionNameForms(name)))
+      .concat(member.remoteSource ? [] : [`${member.name.toLowerCase()}-local`])
       .filter(Boolean)
   )
 }
