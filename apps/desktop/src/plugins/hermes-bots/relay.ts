@@ -639,6 +639,32 @@ const relayAgentsCache = new LruCache<string, RelayAgentRow[]>(RELAY_AGENTS_CACH
 const pushedRosters = new Map<string, string>()
 const drainedSinceSlice = new Set<string>()
 
+/** Push `rows` as this window's slice on `connection` and, when that changed the slice of a
+ *  gateway drained since the last change, drain it again (a drain that ran before may have been
+ *  refused mail this slice now makes this window's). Throws as `pushRelayRoster` does. */
+async function publishRelayRoster(connection: RelayConnection, rows: RelayAgentRow[], isCurrent: () => boolean) {
+  try {
+    await pushRelayRoster(connection.route, rows)
+  } catch (error) {
+    // What the gateway holds is unknown now (or ages out unrefreshed): the next push that lands
+    // counts as a change.
+    pushedRosters.delete(connection.id)
+
+    throw error
+  }
+
+  const pushed = JSON.stringify(rows)
+
+  if (isCurrent() && pushedRosters.get(connection.id) !== pushed) {
+    pushedRosters.set(connection.id, pushed)
+
+    if (drainedSinceSlice.delete(connection.id)) {
+      noteRelayOutboxWork({ connectionId: connection.id })
+      scheduleRelayPushDrain()
+    }
+  }
+}
+
 /** Push every gateway the union roster of agents on the OTHER connections. */
 async function syncRelayRosters() {
   if (relay.disposed || relay.rosterBusy || !relayBotModeOn()) {
@@ -687,7 +713,7 @@ async function syncRelayRosters() {
             }
 
             try {
-              await pushRelayRoster(connection.route, [])
+              await publishRelayRoster(connection, [], isCurrent)
 
               return true
             } catch {
@@ -763,21 +789,9 @@ async function syncRelayRosters() {
         }
 
         try {
-          await pushRelayRoster(connection.route, others)
+          await publishRelayRoster(connection, others, isCurrent)
         } catch {
           // Older backend without the relay RPCs — skip this connection.
-          return
-        }
-
-        const pushed = JSON.stringify(others)
-
-        if (isCurrent() && pushedRosters.get(connection.id) !== pushed) {
-          pushedRosters.set(connection.id, pushed)
-
-          if (drainedSinceSlice.delete(connection.id)) {
-            noteRelayOutboxWork({ connectionId: connection.id })
-            scheduleRelayPushDrain()
-          }
         }
       })
     )
@@ -842,12 +856,14 @@ async function drainRelayOutboxes() {
         continue
       }
 
+      // Recorded before the drain is sent: the gateway answers from the slices it holds when it
+      // reads the outbox, so a slice that lands while this drain is out must drain again.
+      if (relay.rosterGeneration === generation) {
+        drainedSinceSlice.add(sender.id)
+      }
+
       try {
         const res = await drainRelayOutbox(sender.route)
-
-        if (relay.rosterGeneration === generation) {
-          drainedSinceSlice.add(sender.id)
-        }
 
         const pending = pendingRelaysFor(sender)
         const offered = Array.isArray(res?.envelopes) ? res.envelopes : []
