@@ -140,3 +140,38 @@ def test_a_developer_install_without_a_store_keeps_its_own_interpreter(tmp_path,
 
     monkeypatch.setenv("HERMES_RUNTIME_DIR", str(tmp_path / "no-store"))
     assert bot_relay.runner_python() == sys.executable
+
+
+def test_a_developer_venv_keeps_its_interpreter_even_with_a_store_present(tmp_path, monkeypatch, updated_store):
+    """A host on its own (developer) venv owns its dependencies: a store on the machine must not
+    swap in a bare store Python that cannot boot a checkout with no committed environment, even
+    when the venv was created from that store Python. The real waiter command runs on the venv."""
+    from tools import bot_relay
+
+    venv_python = tmp_path / "venv" / "bin" / "python3"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(updated_store)  # a venv's python links to its base: here the store's
+    monkeypatch.setattr(sys, "executable", str(venv_python))
+    assert bot_relay.runner_python() == str(venv_python)
+
+    envelope = {"id": "b" * 32, "target_handle": "bob", "target_connection": "laptop"}
+    reply = Path(bot_relay.relay_root(tmp_path)) / bot_relay.REPLIES_DIR / f"{envelope['id']}.json"
+    reply.parent.mkdir(parents=True, exist_ok=True)
+    reply.write_text(json.dumps({"reply": "hi from bob"}), encoding="utf-8")
+    argv = shlex.split(bot_relay.waiter_command(tmp_path, envelope))
+    assert argv[0] == str(venv_python)
+    argv[-1] = "5"  # budget
+    done = subprocess.run(["bash", "-c", shlex.join(argv)], capture_output=True, text=True, timeout=60,
+                          check=False)
+    assert done.returncode == 0 and "hi from bob" in done.stdout, (done.returncode, done.stderr)
+
+
+def test_a_host_on_a_retired_but_present_store_entry_moves_to_the_current_one(monkeypatch, updated_store):
+    """The previous store entry may linger until GC: a host on it still moves to the entry PM names."""
+    from tools import bot_relay
+
+    retired = Path(sys.executable)
+    retired.parent.mkdir(parents=True)
+    retired.symlink_to(Path(updated_store).resolve())
+    assert retired.exists()
+    assert bot_relay.runner_python() == str(updated_store)

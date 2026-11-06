@@ -482,21 +482,31 @@ def waiter_command(root: Path | str, envelope: dict) -> str:
 
 def runner_python() -> str:
     """The interpreter every Bot DM runner boots on (the local delivery runner, the fan-out runner,
-    this reply waiter), resolved at each launch: PM's current store Python, else this process's.
+    this reply waiter), resolved at each launch.
 
-    A long-running host keeps the ``sys.executable`` it started with, and ``hermes update`` deletes
-    that store entry when it installs a new one, so a runner built from it exited 127 and the DM or
-    its reply was lost (#144658). The runner boots its own dependencies (``bot_mode_dm.py``'s
-    ``__main__``), so the bare store Python is enough; the same rule as ``runtime_command``.
-    Developer and PATH installs have no store and keep their own interpreter.
+    A host running on PM's store Python keeps the ``sys.executable`` it started with, and
+    ``hermes update`` deletes that store entry when it installs a new one, so a runner built from it
+    exited 127 and the DM or its reply was lost (#144658). Such a host's runner boots on the store's
+    current entry instead (the runner activates its own dependencies, ``bot_mode_dm.py``'s
+    ``__main__``; the ``runtime_command`` rule). Any other interpreter (a developer venv, a PATH
+    install) owns its dependencies and is kept while it exists, even when a store is present: a bare
+    store Python cannot boot a checkout that has no committed dependency environment.
     """
+    current = sys.executable or ""
     with contextlib.suppress(Exception):
         from hermes_cli._launchers import resolve_store_python
+        from pm.environments import store_root
 
-        store = resolve_store_python(Path(__file__).resolve().parents[1])
+        repo = Path(__file__).resolve().parents[1]
+        store = resolve_store_python(repo)
         if store is not None:
-            return str(store)
-    return sys.executable or "python3"
+            # The directory decides, never the link target: a venv's python is a symlink to its base
+            # interpreter, which may well be the store Python, and the venv still owns its packages.
+            host = Path(current).absolute()
+            on_store = bool(current) and host.parent.resolve().is_relative_to(store_root(repo))
+            if on_store or not current or not os.path.exists(current):
+                return str(store)
+    return current or "python3"
 
 
 def _hermes_cli() -> str:
