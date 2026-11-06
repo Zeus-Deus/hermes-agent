@@ -625,4 +625,30 @@ describe('a default with a custom handle (#89720)', () => {
     const remote = (await handler({ text: 'ask @atlas for the plan' })).text
     expect(remote).toMatch(/@atlas = agent profile "default" — on Server \(message_agent target: "default@server"\)/)
   })
+
+  it('pins the handle to its connection when another row answers the same bare tag', async () => {
+    const { handler, provide } = await contributions({
+      focused: 'researcher',
+      profiles: [
+        PROFILES[0],
+        PROFILES[1],
+        {
+          connectionId: 'server',
+          connectionKind: 'remote',
+          connectionLabel: 'Server',
+          handle: 'maia',
+          name: 'maia',
+          remoteSource: true,
+          sourceScoped: true,
+          title: 'Scribe'
+        }
+      ]
+    })
+
+    expect(provide('').map(item => item.insert)).toEqual(['@maia@local', '@scribe'])
+
+    const text = (await handler({ text: 'ask @maia@local for the plan' })).text
+    expect(text).toMatch(/@maia = agent profile "default"/)
+    expect(text).not.toMatch(/on Server/)
+  })
 })

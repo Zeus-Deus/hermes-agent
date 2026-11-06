@@ -291,6 +291,43 @@ describe('group rooms', () => {
   })
 })
 
+describe('room collisions through friendly names', () => {
+  it('keep a real bot’s name even when the default is also titled like its handle, in either seat order', () => {
+    const lead = {
+      connectionId: 'laptop',
+      handle: 'default-laptop',
+      name: 'default',
+      remoteSource: true,
+      title: 'Maia',
+      ...withHandle('maia')
+    } as RosterRow
+
+    const serverMaia = { connectionId: 'server', handle: 'maia', name: 'maia', remoteSource: true } as RosterRow
+
+    for (const seated of [
+      [serverMaia, lead],
+      [lead, serverMaia]
+    ]) {
+      const members = durableGroupChatMembers(seated)
+
+      expect([...parseGroupChatMentions('@maia go', members).mentioned]).toEqual(['server::maia'])
+    }
+  })
+
+  it('give two defaults titled and handled alike neither tag', () => {
+    const [laptop, , server] = twoMachines('maia', 'maia').map(row => ({ ...row, title: 'Maia' }))
+
+    for (const seated of [
+      [laptop, server],
+      [server, laptop]
+    ]) {
+      const members = durableGroupChatMembers(seated)
+
+      expect([...parseGroupChatMentions('@maia go', members).mentioned]).toEqual([])
+    }
+  })
+})
+
 describe('the roster resolver', () => {
   it('keeps a form three bots share unresolved', () => {
     const rows = ['a', 'b', 'c'].map(

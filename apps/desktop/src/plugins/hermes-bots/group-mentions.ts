@@ -47,24 +47,31 @@ function memberIdentityForms(member: GroupMember): Set<string> {
  *  another member's live identity: the same handle picked by another machine's default, or
  *  another machine's bot of that name. It is claimed only when no other seat answers to it — a
  *  real name keeps it, and two defaults sharing one name neither; each still answers its
- *  source-qualified earlier handle, which `groupReplyMentionTag` offers instead. */
+ *  source-qualified earlier handle, which `groupReplyMentionTag` offers instead. A contested
+ *  handle the default picked up another way (its title "Maia") goes back to the one other seat
+ *  that holds it by a real name, or to no one. */
 function claimUncontestedCustomHandles(members: GroupMember[], handles: Map<string, string>) {
-  const identities = members.map(member => [groupMemberKey(member), memberIdentityForms(member)] as const)
+  const identities = members.map(member => [member, groupMemberKey(member), memberIdentityForms(member)] as const)
 
-  for (const member of members) {
+  for (const [member, key] of identities) {
     const custom = customDefaultHandle(member.name, member)
-    const key = groupMemberKey(member)
-    const contested = !custom || identities.some(([other, forms]) => other !== key && forms.has(custom))
+    const holders = identities.filter(([other, otherKey, forms]) => otherKey !== key && custom && forms.has(custom))
 
-    if (contested) {
-      continue
-    }
+    for (const form of custom ? [custom, custom.replace(/[._-]+/g, '')] : []) {
+      if (!holders.length) {
+        // The collapsed spelling (`ma-ia` → `maia`) only fills a gap, like every other variant.
+        if (form === custom || !handles.has(form)) {
+          handles.set(form, key)
+        }
+      } else if (handles.get(form) === key) {
+        const owners = holders.filter(([other]) => customDefaultHandle(other.name, other) !== custom)
 
-    handles.set(custom, key)
-
-    // Its collapsed spelling (`ma-ia` → `maia`) only fills a gap, like every other variant.
-    if (!handles.has(custom.replace(/[._-]+/g, ''))) {
-      handles.set(custom.replace(/[._-]+/g, ''), key)
+        if (owners.length === 1) {
+          handles.set(form, owners[0][1])
+        } else {
+          handles.delete(form)
+        }
+      }
     }
   }
 }

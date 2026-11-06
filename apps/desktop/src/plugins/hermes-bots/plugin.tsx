@@ -45,6 +45,7 @@ import {
   $lastRoster,
   botHandle,
   botMentionTag,
+  botRosterKey,
   botSelectionKey,
   cachedUnionRoster,
   claimDefaultHandles,
@@ -166,6 +167,13 @@ export default {
           }
 
           const offered = profiles.filter(profile => profile?.name && !isActiveRosterBot(profile, live))
+
+          const resolvesTo = (text: string, profile: RosterRow) => {
+            const hits = resolveRosterMentions(text, profiles, live)
+
+            return hits.length === 1 && botRosterKey(hits[0]) === botRosterKey(profile)
+          }
+
           // Two rows tagging alike (two remote defaults both titled "CoS Bot")
           // cannot share a bare tag — it would resolve to neither. Pin the
           // ambiguous ones to their connection (#103731).
@@ -192,7 +200,11 @@ export default {
               continue
             }
 
-            const qualified = (tagCounts.get(tag.toLowerCase()) || 0) > 1 && profile.connectionId
+            // Also when the full resolver would not hand the bare tag to this row: a default's custom
+            // handle can match another row's name or friendly tag (#89720).
+            const qualified =
+              ((tagCounts.get(tag.toLowerCase()) || 0) > 1 || !resolvesTo(`@${tag}`, profile)) && profile.connectionId
+
             const insert = qualified ? `@${tag}@${profile.connectionId}` : `@${tag}`
             const source = profile.connectionLabel ? ` · ${profile.connectionLabel}` : ''
             items.push({
