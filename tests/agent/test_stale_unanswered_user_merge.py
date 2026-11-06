@@ -139,13 +139,60 @@ def test_stale_prompt_then_marker_then_new_request_is_labelled_once():
     assert merged.endswith(f"\n\n{DM}")
 
 
-def test_request_time_bookkeeping_never_reaches_the_wire():
-    from agent.message_metadata import MERGED_TURN_REQUEST_TS, PERSISTENCE_ONLY_MESSAGE_FIELDS
+def test_request_bookkeeping_is_local_and_only_where_needed():
+    from agent.message_metadata import MERGED_TURN_REQUEST, PERSISTENCE_ONLY_MESSAGE_FIELDS
 
     messages = _history(OLD_TS, DAYS_LATER)
+    messages[3]["display_kind"] = "internal_notification"
     repair_message_sequence(None, messages)
-    assert messages[2][MERGED_TURN_REQUEST_TS] == DAYS_LATER
-    assert MERGED_TURN_REQUEST_TS in PERSISTENCE_ONLY_MESSAGE_FIELDS
+    assert messages[2][MERGED_TURN_REQUEST] == {"at": DAYS_LATER, "machinery": True}
+    assert MERGED_TURN_REQUEST in PERSISTENCE_ONLY_MESSAGE_FIELDS
+    # A merge of rows with no known time adds nothing to the survivor.
+    bare = [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}]
+    repair_message_sequence(None, bare)
+    assert bare == [{"role": "user", "content": "a\n\nb", MERGED_TURN_PREFIX: "a"}]
+
+
+def test_person_then_bot_then_bot_labels_only_the_person_prompt():
+    """The second DM supplements the first; origin is the newest request's, not the survivor's first row."""
+    bot_v = {"role": "user", "content": "the ticket number is 123", "timestamp": OLD_TS + 70,
+             "display_kind": "internal_notification"}
+    messages = _history(OLD_TS, OLD_TS + 30) + [bot_v]
+    messages[3]["display_kind"] = "internal_notification"
+    assert repair_message_sequence(None, messages) == 2
+    merged = messages[2]["content"]
+    assert merged.count("[New message from") == 1
+    assert merged.endswith(f"asks you to.]\n\n{DM}\n\nthe ticket number is 123")
+
+
+def test_person_then_bot_then_person_labels_each_boundary():
+    person_w = {"role": "user", "content": "what about my question?", "timestamp": OLD_TS + 70}
+    messages = _history(OLD_TS, OLD_TS + 30) + [person_w]
+    messages[3]["display_kind"] = "internal_notification"
+    assert repair_message_sequence(None, messages) == 2
+    merged = messages[2]["content"]
+    assert merged.count("[New message from") == 2
+    assert merged.endswith("asks you to.]\n\nwhat about my question?")
+
+
+def test_gateway_replay_carries_what_the_repair_needs():
+    from agent.message_metadata import MERGED_TURN_REQUEST
+    from gateway.run import _build_gateway_agent_history
+
+    rows = [
+        {"role": "user", "content": "plain", "timestamp": OLD_TS},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "[System: model changed]", "display_kind": "model_switch", "timestamp": OLD_TS},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": DM, "display_kind": "internal_notification", "timestamp": OLD_TS},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "merged", "timestamp": OLD_TS,
+         MERGED_TURN_REQUEST: {"at": DAYS_LATER, "machinery": False}},
+    ]
+    replay = [m for m in _build_gateway_agent_history(rows)[0] if m["role"] == "user"]
+    assert [m.get(MERGED_TURN_REQUEST) for m in replay] == [
+        None, {"at": None, "machinery": None}, {"at": OLD_TS, "machinery": True},
+        {"at": DAYS_LATER, "machinery": False}]
 
 
 def test_empty_side_keeps_existing_behaviour():
@@ -194,40 +241,48 @@ def test_restore_labels_a_durable_stale_pair(tmp_path):
     assert second[2]["content"] == merged
 
 
+def _run_turn(db, agent, cli, surface, text, *, bot=False):
+    """One turn as the gateway (transcript reload + replay projection) or the classic CLI runs it; returns the
+    request the provider saw, system prompt dropped. A gateway bot DM is admitted as an internal event
+    (gateway.session_bot._admit): its row is ``internal_notification`` and names the sender as turn author."""
+    agent.client.chat.completions.create.side_effect = [rewind._reply(f"reply to {text[:12]}", 1_000)]
+    if surface == "gateway":
+        from gateway.run import _build_gateway_agent_history
+
+        history = _build_gateway_agent_history(db.get_messages_as_conversation("sid", repair_alternation=True))[0]
+        extra = {"persist_user_display_kind": "internal_notification",
+                 "turn_author": {"id": "bot:bob", "name": "bob", "is_bot": True}} if bot else {}
+        agent.run_conversation(user_message=text, conversation_history=history, task_id="sid",
+                               persist_user_message=text, **extra)
+    else:
+        from hermes_cli.cli_chat_turn_mixin import CLIChatTurnMixin
+
+        CLIChatTurnMixin._chat_stage_user_message(cli, agent, text)
+        result = agent.run_conversation(user_message=text, conversation_history=cli.conversation_history[:-1],
+                                        task_id="sid", persist_user_message=None)
+        cli.conversation_history = result.get("messages", cli.conversation_history)
+    return [m for m in agent.client.chat.completions.create.call_args.kwargs["messages"] if m["role"] != "system"]
+
+
+def _seed(db, *rows):
+    from types import SimpleNamespace
+
+    db.create_session("sid", "system prompt")
+    db.append_message(session_id="sid", role="user", content="earlier question", timestamp=OLD_TS - 60)
+    db.append_message(session_id="sid", role="assistant", content="earlier answer", timestamp=OLD_TS - 30)
+    for content, fields in rows:  # crash: no reply row after these
+        db.append_message(session_id="sid", role="user", content=content, **fields)
+    return SimpleNamespace(conversation_history=db.get_messages_as_conversation("sid", repair_alternation=True))
+
+
 @pytest.mark.parametrize("surface", ["gateway", "cli"])
 def test_full_turn_sends_the_new_message_as_the_current_request(session, surface):
     """Real agent + store: a prompt left unanswered days ago, then a DM. The request labels both parts, the
     stored row keeps those bytes, and the next turn replays the merged row unchanged (stable cache prefix)."""
-    from types import SimpleNamespace
-
     db, agent = session
-    db.create_session("sid", "system prompt")
-    db.append_message(session_id="sid", role="user", content="earlier question", timestamp=OLD_TS - 60)
-    db.append_message(session_id="sid", role="assistant", content="earlier answer", timestamp=OLD_TS - 30)
-    db.append_message(session_id="sid", role="user", content=STALE_ASK, timestamp=OLD_TS)  # crash: no reply row
-    cli = SimpleNamespace(conversation_history=db.get_messages_as_conversation("sid", repair_alternation=True))
+    cli = _seed(db, (STALE_ASK, {"timestamp": OLD_TS}))
 
-    def run(text):
-        agent.client.chat.completions.create.side_effect = [rewind._reply(f"reply to {text[:12]}", 1_000)]
-        if surface == "gateway":
-            from gateway.run import _build_gateway_agent_history
-
-            history = _build_gateway_agent_history(db.get_messages_as_conversation("sid", repair_alternation=True))[0]
-            # A bot DM is admitted as an internal event (gateway.session_bot._admit), so its row is
-            # ``internal_notification`` and carries the sender as the turn author.
-            agent.run_conversation(user_message=text, conversation_history=history, task_id="sid",
-                                   persist_user_message=text, persist_user_display_kind="internal_notification",
-                                   turn_author={"id": "bot:bob", "name": "bob", "is_bot": True})
-        else:
-            from hermes_cli.cli_chat_turn_mixin import CLIChatTurnMixin
-
-            CLIChatTurnMixin._chat_stage_user_message(cli, agent, text)
-            result = agent.run_conversation(user_message=text, conversation_history=cli.conversation_history[:-1],
-                                            task_id="sid", persist_user_message=None)
-            cli.conversation_history = result.get("messages", cli.conversation_history)
-        return [m for m in agent.client.chat.completions.create.call_args.kwargs["messages"] if m["role"] != "system"]
-
-    request = run(DM)
+    request = _run_turn(db, agent, cli, surface, DM, bot=True)
     assert [m["role"] for m in request] == ["user", "assistant", "user"]
     sent = request[-1]["content"]
     assert sent.startswith("[Earlier message from 2025-08-24 18:31 UTC") and f"\n\n{STALE_ASK}\n\n" in sent
@@ -238,9 +293,39 @@ def test_full_turn_sends_the_new_message_as_the_current_request(session, surface
     assert [m["role"] for m in stored] == ["user", "assistant", "user", "assistant"]
     assert stored[2]["content"] == sent
 
-    request = run("thanks")
+    request = _run_turn(db, agent, cli, surface, "thanks")
     assert [m["role"] for m in request] == ["user", "assistant", "user", "assistant", "user"]
     assert request[2]["content"] == sent
+
+
+@pytest.mark.parametrize("surface", ["gateway", "cli"])
+def test_full_turn_quick_follow_up_after_marker_and_prompt_is_not_labelled(session, surface):
+    """marker(an hour ago) -> prompt(10 s ago), both durable and unanswered, then a follow-up: one plain join,
+    and the next turn replays the same bytes."""
+    import time
+
+    db, agent = session
+    now = time.time()
+    cli = _seed(db, ("[System: model changed]", {"timestamp": now - 3600, "display_kind": "model_switch"}),
+                ("Investigate invoice drift.", {"timestamp": now - 10}))
+
+    request = _run_turn(db, agent, cli, surface, "The invoice number is 1234.")
+    sent = request[-1]["content"]
+    assert sent == "[System: model changed]\n\nInvestigate invoice drift.\n\nThe invoice number is 1234."
+    request = _run_turn(db, agent, cli, surface, "thanks")
+    assert request[2]["content"] == sent
+
+
+@pytest.mark.parametrize("surface", ["gateway", "cli"])
+def test_full_turn_person_after_an_unanswered_bot_dm_is_labelled(session, surface):
+    import time
+
+    db, agent = session
+    cli = _seed(db, (DM, {"timestamp": time.time() - 60, "display_kind": "internal_notification"}))
+
+    sent = _run_turn(db, agent, cli, surface, "What is on my calendar?")[-1]["content"]
+    assert sent.startswith("[Earlier message from ") and f"left without a reply:]\n\n{DM}\n\n[New message from " in sent
+    assert sent.endswith("asks you to.]\n\nWhat is on my calendar?")
 
 
 @pytest.mark.parametrize("surface", ["cli", "resume", "gateway"])

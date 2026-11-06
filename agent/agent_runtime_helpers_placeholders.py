@@ -31,17 +31,33 @@ STALE_UNANSWERED_TURN_SECS = 15 * 60
 _PIVOT_MARKER_DISPLAY_KINDS = frozenset({"model_switch", "personality_switch"})
 
 
-def _request_time(msg: dict) -> float | None:
-    """When *msg*'s newest request part arrived: a merge survivor records it (its own ``timestamp`` stays
-    the first row's), a pivot marker is not a request, and a non-numeric time is unknown."""
-    from agent.message_metadata import MERGED_TURN_REQUEST_TS
+def _request_info(msg: dict) -> tuple[float | None, bool | None]:
+    """``(time, machinery)`` of *msg*'s newest request part; ``(None, None)`` when it holds none (a pivot
+    marker). A merge survivor records it (its own ``timestamp`` and ``display_kind`` stay the first
+    row's), and a replay projection that drops ``display_kind`` carries it (``replay_request_info``)."""
+    from agent.message_metadata import MERGED_TURN_REQUEST
+    from gateway.response_filters import is_machinery_display_kind
 
-    if MERGED_TURN_REQUEST_TS in msg:
-        return msg[MERGED_TURN_REQUEST_TS]
+    recorded = msg.get(MERGED_TURN_REQUEST)
+    if isinstance(recorded, dict):
+        return recorded.get("at"), recorded.get("machinery")
+    kind = msg.get("display_kind")
+    if kind in _PIVOT_MARKER_DISPLAY_KINDS:
+        return None, None
     ts = msg.get("timestamp")
-    if msg.get("display_kind") in _PIVOT_MARKER_DISPLAY_KINDS or isinstance(ts, bool):
-        return None
-    return float(ts) if isinstance(ts, (int, float)) else None
+    return (float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else None,
+            is_machinery_display_kind(kind))
+
+
+def replay_request_info(msg: dict) -> dict | None:
+    """The request record a replay copy of user row *msg* must carry when it keeps only content and
+    timestamp; None when those already say it (a person's row, never merged)."""
+    from agent.message_metadata import MERGED_TURN_REQUEST
+
+    if isinstance(recorded := msg.get(MERGED_TURN_REQUEST), dict):
+        return dict(recorded)
+    at, machinery = _request_info(msg)
+    return None if machinery is False else {"at": at, "machinery": machinery}
 
 
 def stale_unanswered_turn_prefix(prev: dict, new: dict, prev_text: str, new_text: str) -> str | None:
@@ -50,19 +66,18 @@ def stale_unanswered_turn_prefix(prev: dict, new: dict, prev_text: str, new_text
     consecutive user turns, so both stay in one turn; the labels stop the model answering the old prompt
     as the new request. Not a follow-up: it arrived past the stale window, or from the other side of the
     person/machinery line (a bot DM or background notice after a person's prompt, or the reverse).
-    Records on *prev* when its newest request part arrived, so a later merge measures from that.
-    Call before the merge rewrites *prev*."""
-    from agent.message_metadata import MERGED_TURN_REQUEST_TS
-    from gateway.response_filters import is_machinery_display_kind
+    Records on *prev* its newest request part, so a later merge measures from that. Call before the
+    merge rewrites *prev*."""
+    from agent.message_metadata import MERGED_TURN_REQUEST
 
-    old_ts, new_ts = _request_time(prev), _request_time(new)
-    known = [ts for ts in (old_ts, new_ts) if ts is not None]
-    prev[MERGED_TURN_REQUEST_TS] = max(known) if known else None
-    if not prev_text or not new_text or old_ts is None or new_ts is None:
+    (old_ts, old_machinery), (new_ts, new_machinery) = _request_info(prev), _request_info(new)
+    newest = (new_ts, new_machinery) if new_machinery is not None else (old_ts, old_machinery)
+    if newest != (old_ts, old_machinery):
+        prev[MERGED_TURN_REQUEST] = {"at": newest[0], "machinery": newest[1]}
+    if (not prev_text or not new_text or old_ts is None or new_ts is None
+            or old_machinery is None or new_machinery is None):
         return None
-    other_origin = is_machinery_display_kind(prev.get("display_kind")) != is_machinery_display_kind(
-        new.get("display_kind"))
-    if not other_origin and new_ts - old_ts <= STALE_UNANSWERED_TURN_SECS:
+    if old_machinery == new_machinery and new_ts - old_ts <= STALE_UNANSWERED_TURN_SECS:
         return None
     from time import gmtime, strftime
 
