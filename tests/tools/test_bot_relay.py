@@ -276,6 +276,18 @@ def test_envelope_names_who_may_deliver_it(root):
     assert "target_install" not in env and env["target_publishers"] == ["local-bbbbbbbbbbbb"]
 
 
+def test_sender_stamp_on_a_colliding_connection_name_names_no_single_machine(root):
+    """A relayed DM from ``scout`` on ``homelab``, while two Desktops each call a different machine
+    ``homelab``: the stamp must not be either row's title slug (a reply would reach that one
+    machine whichever sent it), but the qualified form, which resolves to neither."""
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id="1" * 32, title="Red Bot")], "local-aaaaaaaaaaaa")
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id="2" * 32, title="Blue Bot")], "local-bbbbbbbbbbbb")
+    roster = bot_relay.read_remote_roster(root)
+    stamped = bot_relay.qualify_sender_stamp("Message from 🤖 Red Bot (@scout): hi", "scout", "homelab", roster)
+    assert stamped == "Message from 🤖 Red Bot (@scout@homelab): hi"
+    assert bot_relay.resolve_remote_target("scout@homelab", roster) == "ambiguous"
+
+
 def test_concurrent_pushes_never_lose_a_publisher(root, monkeypatch):
     """Pushes from several Desktops land concurrently (the gateway serves RPCs on a worker pool):
     the read-modify-write is serialised, so every publisher's slice survives."""

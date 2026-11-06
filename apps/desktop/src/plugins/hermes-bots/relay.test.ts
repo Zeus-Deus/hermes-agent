@@ -1879,12 +1879,46 @@ describe('each Desktop pushes its roster as its own slice (#139219)', () => {
       expect(await run({ ...base, target_connection: 'nas', target_publishers: ['local-bbbbbbbbbbbb'] })).toEqual([])
     })
 
-    it('a connection this Desktop lacks but its own roster listed: answers as before', async () => {
+    it('a connection this Desktop lacks but only its own roster listed: answers as before', async () => {
       const out = await run({ ...base, target_connection: 'nas', target_publishers: ['local-0123456789ab'] })
 
       expect(out).toEqual([
         expect.objectContaining({ method: 'bot_relay.reply', params: expect.objectContaining({ error: expect.stringMatching(/'nas' is not connected/) }) })
       ])
+    })
+
+    it('a connection this Desktop dropped while another listed Desktop still relays it: no reply', async () => {
+      expect(
+        await run({ ...base, target_connection: 'nas', target_publishers: ['local-0123456789ab', 'local-bbbbbbbbbbbb'] })
+      ).toEqual([])
+    })
+
+    it('checks the install the connection answers from at delivery, not the one the roster saw', async () => {
+      let srvInstall = 'f'.repeat(32)
+
+      const calls = respondWith(call => {
+        if (call.method === 'profiles.list') {
+          return call.connectionId === 'local'
+            ? { install_id: INSTALL, profiles: [{ name: 'ops' }] }
+            : { install_id: srvInstall, profiles: [{ name: 'scout' }] }
+        }
+
+        if (call.method === 'bot_relay.outbox.drain') {
+          return { envelopes: call.connectionId === 'local' ? [{ ...base, target_connection: 'srv', target_install: 'f'.repeat(32) }] : [] }
+        }
+
+        return {}
+      })
+
+      const { startBotRelay, stopBotRelay } = await loadRelay()
+
+      startBotRelay()
+      await vi.advanceTimersByTimeAsync(0)
+      srvInstall = 'e'.repeat(32) // 'srv' repointed at another machine since the roster fetch
+      await pushAndSettle()
+      stopBotRelay()
+
+      expect(calls.filter(call => call.method === 'bot_relay.deliver' || call.method === 'bot_relay.reply')).toEqual([])
     })
 
     it('a same-named connection answering from another install is not the target', async () => {

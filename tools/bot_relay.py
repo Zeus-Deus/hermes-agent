@@ -388,8 +388,13 @@ def qualify_sender_stamp(message: str, from_handle: Any, from_connection: Any, r
     match = _SENDER_STAMP_RE.match(str(message or ""))
     if not match or not conn or not _HANDLE_RE.match(handle) or not _HANDLE_RE.match(conn):
         return message
-    forms = dict(zip(((r["connection_id"].lower(), r["handle"].lower()) for r in roster), remote_target_forms(roster, local_taken)))
-    form = forms.get((conn.lower(), handle.lower())) or f"{handle}@{conn}"
+    keys = [(r["connection_id"].lower(), r["handle"].lower()) for r in roster]
+    forms = dict(zip(keys, remote_target_forms(roster, local_taken)))
+    # Two machines under one connection name (two Desktops' registries, #139219): which one sent
+    # this is unknown here, so the stamp is the qualified form, which names both and so resolves
+    # to neither — never one row's title slug.
+    key = (conn.lower(), handle.lower())
+    form = (forms.get(key) if keys.count(key) == 1 else None) or f"{handle}@{conn}"
     return f"{match.group(1)}{form}{match.group(3)}{message[match.end():]}"
 
 

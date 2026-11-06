@@ -220,24 +220,48 @@ function rosterPublisher(): string {
   return localRelayId !== null && LOCAL_RELAY_ID_RE.test(localRelayId) ? localRelayId : RUN_PUBLISHER_ID
 }
 
-/** Install id each relayed connection last reported (profiles.list), to tell this Desktop's
- *  connection from another Desktop's connection of the same name. */
-const connectionInstalls = new Map<string, string>()
-
-/** The envelope is another Desktop's to deliver: the sender gateway named the Desktops whose
- *  roster listed its target and this one is not among them, or the target's machine is not the
- *  one this Desktop's connection of that name answers from. Unknown either way → ours. */
-function anotherDesktopsEnvelope(envelope: RelayEnvelope, target: RelayConnection | undefined): boolean {
-  if (target) {
-    const want = String(envelope?.target_install || '').toLowerCase()
-    const have = connectionInstalls.get(target.id)
-
-    return Boolean(want && have && want !== have)
-  }
-
+/** The sender gateway listed the Desktops whose roster carried the envelope's target and it is
+ *  not this one's alone: when this Desktop has no connection of that name, a listed Desktop
+ *  that does delivers it, so a "not connected" reply here would beat that real answer. */
+function listedForOthers(envelope: RelayEnvelope): boolean {
   const listed = Array.isArray(envelope?.target_publishers) ? envelope.target_publishers.map(String) : []
 
-  return listed.length > 0 && !listed.includes(RUN_PUBLISHER_ID) && !(localRelayId !== null && listed.includes(localRelayId))
+  return listed.some(id => id !== RUN_PUBLISHER_ID && id !== localRelayId)
+}
+
+/** The install the target connection answers from right now; '' when it does not say (or the
+ *  ask fails — the delivery then reports that connection's state itself). Asked per envelope
+ *  that names a target install: a connection repointed since the last roster fetch would
+ *  otherwise pass a cached check. */
+async function liveInstall(target: RelayConnection): Promise<string> {
+  try {
+    const res = await host.requestProfile<{ install_id?: string }>(target.route, 'profiles.list', {
+      include_sessions: false
+    })
+
+    const install = String(res?.install_id || '')
+      .trim()
+      .toLowerCase()
+
+    return INSTALL_ID_RE.test(install) ? install : ''
+  } catch {
+    return ''
+  }
+}
+
+/** Two Desktops can give different machines one connection name (#139219): this Desktop's
+ *  connection of that name is not the target when it answers from another install than the
+ *  envelope names. */
+async function answersFromAnotherInstall(target: RelayConnection, envelope: RelayEnvelope): Promise<boolean> {
+  const want = String(envelope?.target_install || '').toLowerCase()
+
+  if (!want) {
+    return false
+  }
+
+  const have = await liveInstall(target)
+
+  return Boolean(have && have !== want)
 }
 
 /** A gateway from before the slices refusing the unknown `publisher` key: the canonical door
@@ -479,10 +503,6 @@ async function relayAgentsOn(
       .trim()
       .toLowerCase()
 
-    if (INSTALL_ID_RE.test(install)) {
-      connectionInstalls.set(connection.id, install)
-    }
-
     const rows = profiles
       .map(profile => ({
         profile: String(profile?.name || ''),
@@ -641,12 +661,6 @@ async function syncRelayRosters() {
     for (const id of [...relayAgentsCache.keys()]) {
       if (!liveIds.has(id)) {
         relayAgentsCache.delete(id)
-      }
-    }
-
-    for (const id of [...connectionInstalls.keys()]) {
-      if (!liveIds.has(id)) {
-        connectionInstalls.delete(id)
       }
     }
 
@@ -934,8 +948,9 @@ function learnLocalRelayId(queued: RelayQueuedEnvelope[], byId: Map<string, Rela
 }
 
 /** The envelope's target on this Desktop (`relayTargetOf`), or null when this Desktop must not
- *  act on it (yet). 'foreign' — another Desktop's machine, or a target only other Desktops relay
- *  (`anotherDesktopsEnvelope`): that Desktop drains this gateway too and delivers it. No reply either — the first reply wins, so an error here would beat its real
+ *  act on it (yet). 'foreign' — another Desktop's machine, or a connection this Desktop lacks
+ *  that other Desktops relay (`listedForOthers`): that Desktop drains this gateway too and
+ *  delivers it. No reply either — the first reply wins, so an error here would beat its real
  *  answer; the gateway re-offers the unanswered envelope on every drain until one lands or it
  *  times out. Unknown own id — the target may or may not be this machine, and a local sender has
  *  no name the recipient can reply to: stay pinned and mark the sender as having work, so a later
@@ -949,7 +964,7 @@ function actionableTarget(
 ): RelayConnection | null | undefined {
   const target = relayTargetOf(String(envelope?.target_connection || ''), byId)
 
-  if (target === 'foreign' || (target !== 'unresolved' && anotherDesktopsEnvelope(envelope, target))) {
+  if (target === 'foreign' || (target === undefined && listedForOthers(envelope))) {
     pending.delete(envelopeId)
 
     return null
@@ -983,6 +998,12 @@ async function deliverRelayEnvelope(
   const target = actionableTarget(sender, envelope, envelopeId, byId, pending)
 
   if (target === null) {
+    return
+  }
+
+  if (target && (await answersFromAnotherInstall(target, envelope))) {
+    pending.delete(envelopeId)
+
     return
   }
 
