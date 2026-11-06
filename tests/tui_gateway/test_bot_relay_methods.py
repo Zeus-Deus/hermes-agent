@@ -131,6 +131,13 @@ def test_deliver_forwards_stable_id_to_target_profile_authority(home, monkeypatc
     assert forwarded[-1][0] == home and forwarded[-1][1]["profile"] == "default"
     assert not spawned
 
+    # So does the default's custom @handle (#89720), with 'hermes' still beside it.
+    (home / "profile.yaml").write_text("ui_meta:\n  hermes-bots:\n    mentionHandle: maia\n")
+    for i, alias in enumerate(("maia", "hermes")):
+        _result(srv._methods["bot_relay.deliver"](4 + i, {"id": f"{i}" * 32, "profile": alias, "message": "x"}))
+        assert forwarded[-1][0] == home and forwarded[-1][1]["profile"] == "default"
+    assert srv._methods["bot_relay.deliver"](6, {"id": "d" * 32, "profile": "nobody", "message": "x"})["error"]
+
 
 def test_deliver_unreachable_authority_is_a_typed_refusal(home, monkeypatch):
     from tools import bot_live_delivery as live

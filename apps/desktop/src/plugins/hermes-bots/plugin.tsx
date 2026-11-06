@@ -48,6 +48,7 @@ import {
   botSelectionKey,
   cachedUnionRoster,
   claimDefaultHandles,
+  customDefaultHandle,
   isActiveRosterBot,
   migrateBotMeta,
   primeRoster,
@@ -865,12 +866,14 @@ export default {
             // local path a bare profile name or 'hermes'. botHandle() prefers
             // the row's source-qualified UI alias ('default-vera'), which
             // neither resolver accepts — annotate the canonical form instead.
-            // The default's canonical form is 'hermes' only while no real
-            // 'hermes' profile holds it; then it is 'default' itself.
+            // The default's canonical form is its custom handle when it has
+            // one (#89720), else 'hermes' only while no real 'hermes' profile
+            // holds it; then it is 'default' itself.
             const target =
               bot.remoteSource && bot.connectionId
                 ? `${bot.name}@${bot.connectionId}`
-                : botHandle(bot.name, { hermesHandleTaken: bot.hermesHandleTaken })
+                : customDefaultHandle(bot.name, bot) ||
+                  botHandle(bot.name, { hermesHandleTaken: bot.hermesHandleTaken })
 
             // Local rows get the same annotation whenever their UI alias
             // ('default-this-device') differs from the resolvable handle —

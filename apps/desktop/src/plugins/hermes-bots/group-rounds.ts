@@ -5,7 +5,7 @@
  */
 import { host } from '@hermes/plugin-sdk'
 
-import { botFriendlyNames, botHandle, botMentionTag, mentionNameForms } from './data'
+import { botFriendlyNames, botHandle, botMentionTag, mentionNameForms, precustomHandle } from './data'
 import { groupFailureReason, recordGroupActivity } from './group-activity'
 import {
   $groupChats,
@@ -46,6 +46,34 @@ import type { Attachment, GroupMember, GroupMessage } from './types'
 // which everyone passed means the conversation settled. Each member runs its
 // turn in its OWN persistent per-group Hermes session and is fed only the
 // room messages that are NEW since it last saw the room.
+
+/** `parseGroupChatMentions`' gap-fill pass: every live identity's forms are claimed first, so a
+ *  live name always wins. Renamed members answer to previous handles (#110200), and a default
+ *  with a custom handle to the handle it had before (#89720). Durable members are all
+ *  source-scoped, so a bare @hermes only goes to the room's one default — with two machines'
+ *  defaults seated it would name either by seat order. */
+function gapFillMemberForms(members: GroupMember[], handles: Map<string, string>) {
+  const defaultSeats = members.filter(member => String(member?.name || '').toLowerCase() === 'default').length
+
+  for (const member of members) {
+    const key = groupMemberKey(member)
+    const legacy = precustomHandle(member.name, member)
+
+    if (legacy && (legacy !== 'hermes' || defaultSeats === 1) && !handles.has(legacy)) {
+      handles.set(legacy, key)
+    }
+
+    const previous = Array.isArray(member.previous_names) ? member.previous_names : []
+
+    for (const name of previous) {
+      for (const form of mentionNameForms(name)) {
+        if (form && !handles.has(form)) {
+          handles.set(form, key)
+        }
+      }
+    }
+  }
+}
 
 /** Deterministic @mention parse. Handles @name, @"two words" via display
  *  titles, and @everyone/@all. Names match case-insensitively against member
@@ -104,19 +132,7 @@ export function parseGroupChatMentions(text: unknown, members: GroupMember[]) {
     }
   }
 
-  // Renamed members answer to previous handles, gap-fill only — every live identity's variants are claimed first, so a live name always wins (#110200).
-  for (const member of members) {
-    const key = groupMemberKey(member)
-    const previous = Array.isArray(member.previous_names) ? member.previous_names : []
-
-    for (const name of previous) {
-      for (const form of mentionNameForms(name)) {
-        if (form && !handles.has(form)) {
-          handles.set(form, key)
-        }
-      }
-    }
-  }
+  gapFillMemberForms(members, handles)
 
   for (const match of source.matchAll(/@([a-z0-9][a-z0-9._-]*)/gi)) {
     const handle = match[1].toLowerCase()

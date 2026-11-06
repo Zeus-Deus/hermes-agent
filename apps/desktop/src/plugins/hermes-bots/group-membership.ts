@@ -4,7 +4,7 @@
  * the roster UI both read.
  */
 
-import { $botMeta, botFriendlyNames, botHandle, botMetaKey, botRosterKey } from './data'
+import { $botMeta, botFriendlyNames, botHandle, botMetaKey, botRosterKey, customDefaultHandle } from './data'
 import { $groupChats, groupChatRoomKey } from './group-chat'
 import { botConnectionRoute, botRosterMeta, resolveBotConnectionRoute } from './routing'
 import type { BotMeta, GroupChat, GroupMember, GroupMessageAuthor, RosterRow } from './types'
@@ -431,6 +431,12 @@ export function durableGroupChatMembers(bots: RosterRow[]): GroupMember[] {
       ...(bot.hermesHandleTaken
         ? {
             hermesHandleTaken: true
+          }
+        : {}),
+      // The default's custom handle rides along for the same reason (#89720).
+      ...(customDefaultHandle(bot.name, bot)
+        ? {
+            mentionHandle: customDefaultHandle(bot.name, bot)
           }
         : {}),
       ...(title

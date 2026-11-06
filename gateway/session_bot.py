@@ -173,8 +173,11 @@ def _home(authority, actor, profile):
     from tools.bot_mode_probe import _handle, _hermes_root, _roster
     home = Path(authority.db.db_path).parent.resolve()
     name = served_profile_name(home)
-    handle = _handle(name, [n for n, _d in _roster(_hermes_root(home))]) if name == 'default' else name
-    if actor.profile_id != authority.profile_id or profile not in (name, handle):
+    root = _hermes_root(home)
+    names = [n for n, _d in _roster(root)]
+    # The default answers to @hermes beside its custom handle (``_profile_for_handle``).
+    handles = {_handle(name, names, root), _handle(name, names)} if name == 'default' else {name}
+    if actor.profile_id != authority.profile_id or profile not in {name, *handles}:
         raise RuntimeStoreError('profile_mismatch')
     if 'session:submit' not in actor.capabilities:
         raise RuntimeStoreError('permission_denied')

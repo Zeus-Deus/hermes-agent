@@ -582,3 +582,47 @@ describe('the local default when a real hermes profile exists', () => {
     expect(toHermes).not.toMatch(/agent profile "default"/)
   })
 })
+
+describe('a default with a custom handle (#89720)', () => {
+  const PROFILES = [
+    {
+      connectionId: 'local',
+      connectionKind: 'local',
+      connectionLabel: 'This device',
+      name: 'default',
+      ui_meta: { 'hermes-bots': { mentionHandle: 'maia' } }
+    },
+    { connectionId: 'local', connectionKind: 'local', connectionLabel: 'This device', name: 'researcher' },
+    {
+      connectionId: 'server',
+      connectionKind: 'remote',
+      connectionLabel: 'Server',
+      handle: 'default-server',
+      name: 'default',
+      remoteSource: true,
+      sourceScoped: true,
+      ui_meta: { 'hermes-bots': { mentionHandle: 'atlas' } }
+    }
+  ]
+
+  it('is offered under its handle in the @ picker', async () => {
+    const { provide } = await contributions({ focused: 'researcher', profiles: PROFILES })
+
+    expect(provide('').map(item => item.insert)).toEqual(['@maia', '@atlas'])
+    expect(provide('ma').map(item => item.insert)).toEqual(['@maia'])
+  })
+
+  it('hands the agent the custom handle as the local target, and @hermes still names it', async () => {
+    const { handler } = await contributions({ focused: 'researcher', profiles: PROFILES })
+
+    for (const tag of ['@maia', '@hermes']) {
+      const text = (await handler({ text: `ask ${tag} for the plan` })).text
+
+      expect(text).toMatch(/@maia = agent profile "default"/)
+      expect(text).not.toMatch(/message_agent target/)
+    }
+
+    const remote = (await handler({ text: 'ask @atlas for the plan' })).text
+    expect(remote).toMatch(/@atlas = agent profile "default" — on Server \(message_agent target: "default@server"\)/)
+  })
+})

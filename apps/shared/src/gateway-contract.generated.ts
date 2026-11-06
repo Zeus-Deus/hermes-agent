@@ -2231,6 +2231,7 @@ export interface ProfilesConfigureApplied {
   ui_meta?: boolean | null
   ui_meta_revisions?: Record<string, number> | null
   ui_meta_conflicts?: Record<string, UiMetaConflict> | null
+  ui_meta_error?: string | null
   soul?: boolean | null
   description?: boolean | null
   model?: boolean | null

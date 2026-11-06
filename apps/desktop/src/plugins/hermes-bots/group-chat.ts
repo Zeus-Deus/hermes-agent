@@ -390,6 +390,11 @@ export function groupChatSyncSnapshot(
           ? {
               hermesHandleTaken: true
             }
+          : {}),
+        ...(member?.mentionHandle
+          ? {
+              mentionHandle: String(member.mentionHandle).slice(0, 64)
+            }
           : {})
       })),
       ...(typeof room?.image === 'string' && room.image.length <= GROUP_CHAT_SYNC_IMAGE_CHARS

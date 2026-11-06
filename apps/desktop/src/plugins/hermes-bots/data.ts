@@ -311,6 +311,8 @@ export function noteBotMetaWrite(key: string) {
 type BotMetaServerOutcome = 'failed' | 'persisted' | 'unreachable' | 'unsupported'
 
 interface BotMetaSaveResult {
+  /** The backend's reason for refusing the write, for the user (an invalid or taken handle). */
+  serverError?: string
   serverOutcome: BotMetaServerOutcome
   serverPersisted: boolean
 }
@@ -321,6 +323,7 @@ interface ProfilesConfigureResult {
   applied?: {
     ui_meta?: boolean
     ui_meta_conflicts?: Record<string, unknown>
+    ui_meta_error?: string
   }
 }
 
@@ -424,13 +427,17 @@ async function persistBotMetaPatch(
 async function settleServerOutcome(
   request: Promise<null | ProfilesConfigureResult>,
   routed: boolean,
-  progress: { reached: boolean }
+  progress: { error?: string; reached: boolean }
 ): Promise<BotMetaServerOutcome> {
   try {
     const result = await request
 
     if (result?.applied?.ui_meta === true) {
       return 'persisted'
+    }
+
+    if (typeof result?.applied?.ui_meta_error === 'string' && result.applied.ui_meta_error) {
+      progress.error = result.applied.ui_meta_error
     }
 
     return result && typeof result === 'object' && result.applied && typeof result.applied === 'object' ? 'failed' : 'unsupported'
@@ -519,7 +526,7 @@ export async function saveBotMeta(
   // store instead (profiles.set_asset), which is server-side and uncapped by
   // the list call — so pfps follow the profile across machines too.
   let serverRequest: null | Promise<null | ProfilesConfigureResult> = null
-  const progress = { reached: false }
+  const progress: { error?: string; reached: boolean } = { reached: false }
 
   try {
     serverRequest = persistBotMetaPatch(bot, name, route, patch, progress, rebase)
@@ -592,7 +599,8 @@ export async function saveBotMeta(
 
   return {
     serverPersisted: serverOutcome === 'persisted',
-    serverOutcome
+    serverOutcome,
+    ...(progress.error ? { serverError: progress.error } : {})
   }
 }
 
@@ -1239,11 +1247,101 @@ export function mergeMultiSourceRoster(
  *  'default' — so the word 'default' never surfaces in the UI, unless a real
  *  `hermes` profile on the same source holds that handle (`claimDefaultHandles`). */
 export function botHandle(name: string, bot?: Partial<RosterRow> | null): string {
+  return customDefaultHandle(name, bot) || legacyBotHandle(name, bot)
+}
+
+/** `botHandle` without the default's custom handle: what the bot answered to before one was
+ *  set. The resolvers keep accepting it, so `@hermes` still reaches a renamed default. */
+function legacyBotHandle(name: string, bot?: Partial<RosterRow> | null): string {
   if (bot?.handle && bot.handle !== name && !(bot.hermesHandleTaken && bot.handle === 'hermes')) {
     return bot.handle
   }
 
   return (name || '').trim().toLowerCase() === 'default' && !bot?.hermesHandleTaken ? 'hermes' : name
+}
+
+/** Tokens no bot @handle may take: the mention parsers reserve them. */
+const RESERVED_MENTION_FORMS = ['all', 'everyone', 'user', 'default', 'hermes']
+
+/** `value` as a custom @handle — lower-cased, leading `@` dropped — or '' when it is not one: the
+ *  profile-id shape and no reserved token. Same rule as the backend's
+ *  `tools/bot_mode_probe.normalize_mention_handle`, which gates the save. */
+export function normalizeMentionHandle(value: unknown): string {
+  if (typeof value !== 'string') {
+    return ''
+  }
+
+  const handle = value.trim().replace(/^@/, '').toLowerCase()
+
+  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(handle) && !RESERVED_MENTION_FORMS.includes(handle) ? handle : ''
+}
+
+/** The custom handle a default row's OWN backend stores (`ui_meta['hermes-bots'].mentionHandle`,
+ *  or the copy a durable group member carries), ignoring whether it is claimed. Never read from
+ *  this window's local meta: it is a routing identity, and only the backend's copy is the one its
+ *  `message_agent`, relay door and system prompt answer to. */
+function storedCustomHandle(bot: Partial<RosterRow> | null | undefined): string {
+  const meta = bot?.ui_meta?.['hermes-bots']
+  const stored = meta && typeof meta === 'object' && 'mentionHandle' in meta ? meta.mentionHandle : bot?.mentionHandle
+
+  return normalizeMentionHandle(stored)
+}
+
+/** The default profile's custom @handle (#89720), or '' when it has none — or when a real profile
+ *  on the same source holds that name (`claimDefaultHandles`; the backend applies the same rule). */
+export function customDefaultHandle(name: null | string | undefined, bot?: Partial<RosterRow> | null): string {
+  if (
+    String(name || '')
+      .trim()
+      .toLowerCase() !== 'default' ||
+    bot?.customHandleTaken
+  ) {
+    return ''
+  }
+
+  return storedCustomHandle(bot)
+}
+
+/** What a default with a custom handle answered to before it had one (`hermes`, or a
+ *  device-suffixed `default-laptop`), lowercased; '' when it has no custom handle. A durable
+ *  member stores the custom handle as its `handle`, so that one is not a prior identity. The
+ *  resolvers keep it as a gap-fill form, so earlier tags still land (#89720). */
+export function precustomHandle(name: null | string | undefined, bot?: Partial<RosterRow> | null): string {
+  const custom = customDefaultHandle(name, bot)
+
+  if (!custom) {
+    return ''
+  }
+
+  const prior = legacyBotHandle(String(name || ''), bot?.handle === custom ? { ...bot, handle: undefined } : bot)
+
+  return String(prior || '').toLowerCase()
+}
+
+/** Whether another roster row already answers to `@handle`: its profile name, @handle, picker
+ *  tag or a friendly-name form. The Bots editor's pre-save check across every connected machine
+ *  this Desktop sees; the default's own backend re-checks its install on save. */
+export function mentionHandleTaken(
+  handle: string,
+  bot: Partial<RosterRow>,
+  roster: RosterRow[] | null | undefined
+): boolean {
+  const target = normalizeMentionHandle(handle)
+  const own = botRosterKey(bot)
+
+  return (
+    Boolean(target) &&
+    (roster || []).some(row => {
+      if (!row?.name || botRosterKey(row) === own) {
+        return false
+      }
+
+      const forms = [row.name, botHandle(row.name, row), botMentionTag(row), claimableRowHandle(row)]
+      const friendly = botFriendlyNames(row).flatMap(name => mentionNameForms(name))
+
+      return [...forms, ...friendly].some(form => String(form || '').toLowerCase() === target)
+    })
+  )
 }
 
 /** The row's own `handle` as a mention form, lowercased. A stale 'hermes'
@@ -1258,15 +1356,32 @@ function claimableRowHandle(bot: Partial<RosterRow>): string {
  *  `tools/bot_mode_probe._handle` applies the same rule). Rows group by
  *  connection; rows without one are the active source. */
 export function claimDefaultHandles<T extends Partial<RosterRow>>(rows: T[]): T[] {
-  const taken = new Set(
-    rows.filter(row => String(row?.name || '').trim() === 'hermes').map(row => String(row?.connectionId || ''))
-  )
+  const namesBySource = new Map<string, Set<string>>()
 
-  return rows.map(row =>
-    String(row?.name || '').trim() === 'default' && taken.has(String(row?.connectionId || ''))
-      ? { ...row, hermesHandleTaken: true }
+  for (const row of rows) {
+    const source = String(row?.connectionId || '')
+    namesBySource.set(source, (namesBySource.get(source) || new Set()).add(String(row?.name || '').trim()))
+  }
+
+  return rows.map(row => {
+    if (String(row?.name || '').trim() !== 'default') {
+      return row
+    }
+
+    const names = namesBySource.get(String(row?.connectionId || '')) || new Set<string>()
+    // A custom handle yields to a real profile of that name on the same source, like @hermes.
+    const custom = storedCustomHandle(row)
+    const hermesTaken = names.has('hermes')
+    const customTaken = Boolean(custom && names.has(custom))
+
+    return hermesTaken || customTaken
+      ? {
+          ...row,
+          ...(hermesTaken ? { hermesHandleTaken: true } : {}),
+          ...(customTaken ? { customHandleTaken: true } : {})
+        }
       : row
-  )
+  })
 }
 
 /** Taggable @-forms derived from a bot's friendly names — the core profile
@@ -1320,6 +1435,13 @@ export function botFriendlyNames(bot: Partial<RosterRow> | null | undefined): Ar
  *  the user gave the bot a real name, otherwise the profile @handle. The
  *  resolvers accept both, so older muscle memory keeps working. */
 export function botMentionTag(bot: GroupMember | RosterRow): string {
+  // A handle the user chose for the default outranks any name-derived tag.
+  const custom = customDefaultHandle(bot?.name, bot)
+
+  if (custom) {
+    return custom
+  }
+
   for (const friendly of botFriendlyNames(bot)) {
     const forms = mentionNameForms(friendly)
 
@@ -1419,6 +1541,41 @@ export function newBotChat(bot: RosterRow) {
   })
 }
 
+/** `resolveRosterMentions`' second pass: forms that only fill gaps, so a live name always wins.
+ *  Previous profile names keep a bot renamed after a handle was typed (or remembered) reachable
+ *  without stealing another bot's live name (#110200). A default with a custom handle keeps the
+ *  handle it had before (`@hermes`) the same way (#89720) — this source's own default only:
+ *  another machine's default must never pick up a bare @hermes by roster order. */
+function gapFillRosterForms(
+  members: RosterRow[],
+  active: RosterOwnerRef,
+  byForm: Map<string, RosterRow | null>,
+  formsByBot: Map<RosterRow, Set<string>>
+) {
+  for (const bot of members) {
+    if (!bot?.name || isActiveRosterBot(bot, active)) {
+      continue
+    }
+
+    const previous = Array.isArray(bot.previous_names) ? bot.previous_names : []
+
+    for (const name of previous) {
+      for (const form of mentionNameForms(name)) {
+        if (form && !byForm.has(form)) {
+          byForm.set(form, bot)
+        }
+      }
+    }
+
+    const legacy = precustomHandle(bot.name, bot)
+
+    if (legacy && !(bot.remoteSource && legacy === 'hermes') && !byForm.has(legacy)) {
+      byForm.set(legacy, bot)
+      formsByBot.get(bot)?.add(legacy)
+    }
+  }
+}
+
 /** Resolve @handles in prose against the Bot Mode roster (local + Connections).
  *  Skips the bot already speaking in this chat. Unique bare names match;
  *  duplicate names require the @name-device handle. */
@@ -1481,24 +1638,7 @@ export function resolveRosterMentions(
     }
   }
 
-  // Previous profile names fill gaps only: a bot renamed after a handle was
-  // typed (or remembered) still resolves, but a live name always wins over
-  // another bot's rename history (#110200).
-  for (const bot of members) {
-    if (!bot?.name || isActiveRosterBot(bot, active)) {
-      continue
-    }
-
-    const previous = Array.isArray(bot.previous_names) ? bot.previous_names : []
-
-    for (const name of previous) {
-      for (const form of mentionNameForms(name)) {
-        if (form && !byForm.has(form)) {
-          byForm.set(form, bot)
-        }
-      }
-    }
-  }
+  gapFillRosterForms(members, active, byForm, formsByBot)
 
   const mentioned: RosterRow[] = []
   const seen = new Set<string>()

@@ -89,6 +89,9 @@ export interface BotMeta {
   screenAutoOpen?: boolean
   shape?: string
   title?: string
+  /** The default profile's custom @handle (#89720), validated by its backend on save. Ignored on
+   *  named profiles: their handle is the profile name. */
+  mentionHandle?: string
   /** Creation timestamp in ms. Deliberately not copied when duplicating a bot. */
   created?: number
 }
@@ -108,6 +111,12 @@ export interface RosterRow {
    *  profile: that profile keeps @hermes and this row answers to @default.
    *  Set by `claimDefaultHandles`. */
   hermesHandleTaken?: boolean
+  /** A default row whose source also has a real profile named like its custom handle: that
+   *  profile keeps the name and this row falls back to @hermes. Set by `claimDefaultHandles`. */
+  customHandleTaken?: boolean
+  /** The default's custom @handle as a durable group member carries it, for when the live row
+   *  (and its `ui_meta`) is gone. */
+  mentionHandle?: string
   has_avatar?: boolean
   /** The connection's backend identity (/api/status `install_id`) when the
    *  roster source has seen it — stable across Desktops, unlike `connectionId`
@@ -151,6 +160,8 @@ export type GroupMember = Pick<
   | 'ghost'
   | 'handle'
   | 'hermesHandleTaken'
+  | 'customHandleTaken'
+  | 'mentionHandle'
   | 'installId'
   | 'name'
   | 'previous_names'

@@ -70,17 +70,27 @@ def _profile_name(home: Path) -> str:
     return home.name if home.parent.name == "profiles" else "default"
 
 
-def _handle(name: str, names: Collection[str]) -> str:
+def _handle(name: str, names: Collection[str], root: Path | None = None) -> str:
     """The @handle a local profile answers to; ``names`` are the roster's folder ids. The default
-    profile is @hermes only while no real profile holds that name: a pre-reservation
+    profile answers to its custom handle (``custom_default_handle``, read from ``root``) when it
+    has one, else @hermes while no real profile holds that name: a pre-reservation
     ``profiles/hermes`` keeps @hermes, and the default answers to @default."""
-    return "hermes" if name == "default" and "hermes" not in names else name
+    if name != "default":
+        return name
+    custom = custom_default_handle(root, names) if root is not None else ""
+    return custom or ("hermes" if "hermes" not in names else name)
 
 
-def _profile_for_handle(handle: str, names: Collection[str]) -> str:
+def _profile_for_handle(handle: str, names: Collection[str], root: Path | None = None) -> str:
     """The folder id a bare @handle names on this install: @hermes is the default profile's alias
-    only while no real profile holds that name (a pre-reservation ``profiles/hermes`` keeps it)."""
-    return "default" if handle == "hermes" and "hermes" not in names else handle
+    only while no real profile holds that name (a pre-reservation ``profiles/hermes`` keeps it);
+    the default's custom handle (read from ``root``) names it too. @hermes keeps working beside a
+    custom handle, so DMs addressed before the rename still land."""
+    if handle == "hermes" and "hermes" not in names:
+        return "default"
+    if root is not None and handle and handle == custom_default_handle(root, names):
+        return "default"
+    return handle
 
 
 def _roster(root: Path) -> list[tuple[str, Path]]:
@@ -181,15 +191,70 @@ def _friendly_names(profile_dir: Path) -> tuple[str, str]:
     return _swallow(_read, ("", ""))
 
 
-def _display_name(name: str, profile_dir: Path, names: Collection[str]) -> str:
+def _display_name(name: str, profile_dir: Path, names: Collection[str], root: Path | None = None) -> str:
     """Human-facing sender name, in the Desktop's ``botFriendlyNames`` order: Bot Mode title,
     then profile.yaml ``display_name`` (``hermes profile rename``), else the @handle — the
     renamed primary signs as ``Maia (@hermes)``, not ``hermes (@hermes)`` (#89720)."""
-    return next((n for n in _friendly_names(profile_dir) if n), None) or _handle(name, names)
+    return next((n for n in _friendly_names(profile_dir) if n), None) or _handle(name, names, root)
 
 
 # Tokens the Desktop mention parser reserves; a bot titled "Hermes" never hijacks @hermes.
 _RESERVED_ALIASES = frozenset({"all", "everyone", "user", "default", "hermes"})
+
+# ``ui_meta['hermes-bots']`` key holding the default profile's custom @handle (#89720). Only the
+# default profile reads it: every named profile's handle is its folder id.
+DEFAULT_HANDLE_KEY = "mentionHandle"
+
+
+def normalize_mention_handle(value: object) -> str:
+    """``value`` as a custom @handle — lower-cased, leading ``@`` dropped — or "" when it is not
+    one: the profile-id shape, and none of the tokens the mention parsers reserve. The Desktop's
+    ``normalizeMentionHandle`` applies the same rule."""
+    from hermes_constants import PROFILE_ID_RE
+
+    handle = str(value or "").strip().lstrip("@").lower() if isinstance(value, str) else ""
+    return handle if PROFILE_ID_RE.match(handle) and handle not in _RESERVED_ALIASES else ""
+
+
+def stored_default_handle(root: Path) -> str:
+    """The custom @handle stored in the default profile's ``profile.yaml`` (normalized), or ""."""
+    meta = _bots_meta(_read_yaml_dict(root / "profile.yaml", DEFAULT_HANDLE_KEY)) or {}
+    return normalize_mention_handle(meta.get(DEFAULT_HANDLE_KEY))
+
+
+def custom_default_handle(root: Path, names: Collection[str] | None = None) -> str:
+    """The default profile's custom @handle on the install rooted at ``root``, or "" when unset.
+    A live profile holding that name keeps it (the rule ``_handle`` applies to @hermes): the
+    default then falls back to @hermes instead of shadowing a real teammate. Never raises."""
+    def _read() -> str:
+        handle = stored_default_handle(root)
+        live = names if names is not None else [name for name, _d in _roster(root)]
+        return handle if handle and handle not in live else ""
+
+    return _swallow(_read, "")
+
+
+def validate_default_handle(root: Path, value: object) -> str:
+    """Normalized custom @handle for the default profile, "" to clear it; raises ``ValueError``
+    when it cannot be one on this install: a malformed or reserved token, an existing profile's
+    name, or another profile's friendly-name tag (``@maia`` would stop reaching a bot titled
+    "Maia"). The editor-save gate; readers never re-validate beyond ``custom_default_handle``."""
+    raw = str(value or "").strip().lstrip("@") if isinstance(value, str) or value is None else None
+    if raw is None:
+        raise ValueError("The handle must be text.")
+    if not raw:
+        return ""
+    handle = normalize_mention_handle(raw)
+    if not handle:
+        if raw.lower() in _RESERVED_ALIASES:
+            raise ValueError(f"@{raw.lower()} is reserved.")
+        raise ValueError("A handle uses lowercase letters, numbers, '-' or '_' (up to 64), starting with a letter or number.")
+    names = [name for name, _d in _roster(root)]
+    if handle in names:
+        raise ValueError(f"@{handle} is already the name of a profile on this machine.")
+    if any(owner != "default" for owner in local_alias_map(root).get(handle, set())):
+        raise ValueError(f"@{handle} already tags another bot on this machine.")
+    return handle
 
 
 def alias_forms(value: str) -> set[str]:
@@ -248,7 +313,9 @@ def local_taken_forms(home: Path) -> set[str]:
     @hermes). Read from the install root, so a named profile's home sees its siblings too."""
     root = _hermes_root(home)
     names = [name for name, _d in _roster(root)]
-    return set(names) | {_handle(name, names) for name in names} | set(local_alias_map(root))
+    # @hermes stays the default's alias beside a custom handle (``_profile_for_handle``).
+    return (set(names) | {_handle(name, names, root) for name in names} | {_handle("default", names)}
+            | set(local_alias_map(root)))
 
 
 def _remote_paragraph(root: Path) -> str:
@@ -293,7 +360,7 @@ def _build_section(home: Path) -> str:
 
     roster = _roster(root)
     names = [name for name, _d in roster]
-    roster_lines = [_bullet(f"@{_handle(name, names)}", _profile_role(d)) for name, d in roster if name != me]
+    roster_lines = [_bullet(f"@{_handle(name, names, root)}", _profile_role(d)) for name, d in roster if name != me]
     roster_block = "\n".join(roster_lines) or "- (no teammates yet)"
 
     return (
@@ -326,7 +393,7 @@ def _build_section(home: Path) -> str:
         "with an intentional silence token "
         "([SILENT] or NO_REPLY) — the transport swallows it, so the sender gets "
         "no acknowledgement ping-pong.\n"
-        f"You are `@{_handle(me, names)}`. Your teammates (live roster; roles from their "
+        f"You are `@{_handle(me, names, root)}`. Your teammates (live roster; roles from their "
         "profiles):\n"
         f"{roster_block}"
         + _remote_paragraph(home)
@@ -453,6 +520,11 @@ def capability_fingerprint(home: str | os.PathLike | None = None) -> str:
         # Roles are part of the messaging surface: renaming a bot or editing a
         # description must refresh the roster block teammates pick recipients from.
         surface["roster_roles"] = sorted(f"{n}:{_profile_role(d)}" for n, d in roster)
+        # The default's custom @handle is how every roster names it; only a set one joins the
+        # surface, so installs without one keep their stored epoch.
+        default_handle = custom_default_handle(root, [n for n, _d in roster])
+        if default_handle:
+            surface["default_handle"] = default_handle
     except Exception:
         surface["roster"] = []
     # Protocol-text version salt: bumping it refreshes every eternal Bot Chat

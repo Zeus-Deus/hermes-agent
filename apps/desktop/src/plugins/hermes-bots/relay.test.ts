@@ -24,6 +24,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type * as DataModule from './data'
 import { RELAY_DELIVER_TIMEOUT_MS } from './relay-budget'
 import type { ProfileRoute } from './types'
 
@@ -63,11 +64,17 @@ vi.mock('@hermes/plugin-sdk', async () => {
   return { atom, host: hostMock, LruCache: UnboundedCache }
 })
 
-vi.mock('./data', () => ({
-  botHandle: (name: string) => (name === 'default' ? 'hermes' : name),
-  clearBotAttention: clearBotAttentionMock,
-  noteBotAttention: noteBotAttentionMock
-}))
+vi.mock('./data', async () => {
+  // The real handle rules: the relay publishes each row under the handle the roster shows.
+  const actual = await vi.importActual<typeof DataModule>('./data')
+
+  return {
+    botHandle: actual.botHandle,
+    claimDefaultHandles: actual.claimDefaultHandles,
+    clearBotAttention: clearBotAttentionMock,
+    noteBotAttention: noteBotAttentionMock
+  }
+})
 
 const RELAY_PUSH_DEBOUNCE_MS = 250
 const RELAY_DRAIN_INTERVAL_MS = 30_000
@@ -697,6 +704,35 @@ describe('the roster loop pushes the OTHER connections’ agents', () => {
     // The primary profile is published by its callable alias, never "default".
     expect(syncs[1].params.agents).toEqual([
       expect.objectContaining({ connection_id: 'a', handle: 'hermes', profile: 'default' })
+    ])
+
+    stopBotRelay()
+  })
+
+  it('publishes a default by its custom handle, unless that machine has a profile of that name (#89720)', async () => {
+    const calls = respondWith(call => {
+      if (call.method === 'profiles.list') {
+        const ownDefault = { name: 'default', ui_meta: { 'hermes-bots': { mentionHandle: 'maia' } } }
+
+        return { profiles: call.connectionId === 'a' ? [ownDefault] : [ownDefault, { name: 'maia' }] }
+      }
+
+      return {}
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+
+    const syncs = calls.filter(call => call.method === 'bot_relay.roster.sync')
+
+    expect(syncs[1].params.agents).toEqual([
+      expect.objectContaining({ connection_id: 'a', handle: 'maia', profile: 'default' })
+    ])
+    expect(syncs[0].params.agents).toEqual([
+      expect.objectContaining({ connection_id: 'b', handle: 'hermes', profile: 'default' }),
+      expect.objectContaining({ connection_id: 'b', handle: 'maia', profile: 'maia' })
     ])
 
     stopBotRelay()

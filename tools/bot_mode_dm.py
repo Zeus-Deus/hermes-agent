@@ -173,7 +173,8 @@ def ensure_message_agent_tool(agent: Any) -> bool:
 
 def _resolve_local_name(target: str, roster: list[str], root: Path | None = None) -> Optional[str]:
     """Map a target to a local profile FOLDER id: 'hermes' → 'default' unless a real 'hermes'
-    profile holds that handle (``_profile_for_handle``); an exact folder id
+    profile holds that handle, and the default's custom handle → 'default' (``_profile_for_handle``,
+    which needs ``root`` for the custom one); an exact folder id
     (case-insensitive); else — when ``root`` is given — a friendly name or its Desktop @-slug
     (profile.yaml ``display_name`` / Bot Mode title: 'Scribe', '@scribe', 'Dr. Foo' → 'foo').
     Ambiguous friendly names resolve to None so a DM never lands on the wrong bot (#100671)."""
@@ -182,7 +183,7 @@ def _resolve_local_name(target: str, roster: list[str], root: Path | None = None
         return None
     from tools.bot_mode_probe import _profile_for_handle
 
-    want = _profile_for_handle(want, roster)
+    want = _profile_for_handle(want, roster, root)
     exact = next((name for name in roster if name.lower() == want), None)
     if exact is not None or root is None:
         return exact
@@ -263,7 +264,7 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
     roster_homes = dict(_roster(root))
     peers = _peers(root)
     sender = Sender(home=home, root=root, me=me, roster_homes=roster_homes, peers=peers,
-                    teammates=[_handle(n, list(roster_homes)) for n in roster_homes if n != me], task_id=task_id, agent=agent)
+                    teammates=[_handle(n, list(roster_homes), root) for n in roster_homes if n != me], task_id=task_id, agent=agent)
     if str(cancel or "").strip():
         from tools.bot_mode_dm_coordination import cancel_own_delivery
 
@@ -285,7 +286,7 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
         return _err(f"Too many targets ({len(targets)} > {FAN_OUT_MAX}); message the ones the task needs.")
     reply = _wants_reply(expects_reply)
     # Sender signature: the friendly name when the bot has one (#89720); the @handle stays the routing alias.
-    signature = f"Message from 🤖 {_display_name(me, roster_homes.get(me, Path(home)), list(roster_homes))} (@{_handle(me, list(roster_homes))}): "
+    signature = f"Message from 🤖 {_display_name(me, roster_homes.get(me, Path(home)), list(roster_homes), root)} (@{_handle(me, list(roster_homes), root)}): "
     from tools.bot_mode_dm_chain import send_gated
 
     # The runtime's chain rules run before any transport (hop cap, repeated ask, reply to a bot: #137027).
@@ -304,7 +305,7 @@ def _dispatch(raw_target: str, content: str, sender: Sender, *, wake: Any) -> st
     roster = list(roster_homes)
     delivery = dict(task_id=sender.task_id, agent=sender.agent, wake=wake)
     # Attribution for the recipient's memory hooks; the text prefix stays the human-facing signature.
-    author = {"id": f"bot:{me}", "name": _handle(me, roster), "is_bot": True, **sender.chain}
+    author = {"id": f"bot:{me}", "name": _handle(me, roster, root), "is_bot": True, **sender.chain}
 
     # Peer target: '<peer>/<agent>' or a bare registered peer name.
     peer_match = _PEER_TARGET_RE.match(raw_target)
@@ -356,11 +357,11 @@ def _dispatch(raw_target: str, content: str, sender: Sender, *, wake: Any) -> st
     if (getattr(sender.agent, "_turn_author", None) or {}).get("id") == f"bot:{resolved}":
         # One reply path (#95074): this turn answers @resolved's delivery, whose runner carries the
         # final response back. A second DM races it and lands in their chat as a separate turn.
-        return _err(f"@{_handle(resolved, roster)} messaged you this turn and your final response already goes back "
+        return _err(f"@{_handle(resolved, roster, root)} messaged you this turn and your final response already goes back "
                     "to them: put your reply in it instead of messaging them. Do not retry.")
     # Local teammates are admitted through the profile authority; the argv only names the
     # profile for the runner's home lookup and is never executed.
-    return _start_delivery([_hermes_cli(), "-p", resolved], content, f"@{_handle(resolved, roster)}",
+    return _start_delivery([_hermes_cli(), "-p", resolved], content, f"@{_handle(resolved, roster, root)}",
                            stdin_file=False, profile_home=roster_homes[resolved], author=author, **delivery)
 
 
@@ -388,7 +389,8 @@ def _try_relay_delivery(root: Path, raw_target: str, content: str, me: str, *,
             return _err(f"'{raw_target}' exists on several connected machines — disambiguate with one of: {forms}.")
         try:
             envelope = enqueue_envelope(root, target=match, message=content, sender_profile=me,
-                                       sender_handle=_handle(me, [n for n, _d in _roster(_hermes_root(root))]))
+                                       sender_handle=_handle(me, [n for n, _d in _roster(_hermes_root(root))],
+                                                             _hermes_root(root)))
         except EnvelopeRefusedError as exc:
             # Fail fast: target definitively offline — nothing was queued.
             # Structured refusal so the agent can distinguish it from a resolution error ('runtime_offline'

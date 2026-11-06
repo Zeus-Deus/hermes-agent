@@ -30301,6 +30301,18 @@
             "default": null,
             "title": "Ui Meta Conflicts"
           },
+          "ui_meta_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Ui Meta Error"
+          },
           "soul": {
             "anyOf": [
               {

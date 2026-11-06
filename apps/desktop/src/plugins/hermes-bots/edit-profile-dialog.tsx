@@ -23,8 +23,9 @@ import { useState } from 'react'
 
 import { avatarColor, botAppearance, BotFace } from './avatar'
 import { AvatarPicker } from './avatar-picker'
-import { $botMeta, botSelectionKey, ROSTER_KEY, saveBotMeta } from './data'
+import { $botMeta, $lastRoster, botSelectionKey, ROSTER_KEY, saveBotMeta } from './data'
 import { labeled } from './dialog-parts'
+import { DefaultHandleField, editedHandle, mergedPatch, openingHandle, saveFailureMessage } from './edit-profile-handle'
 import { editedLook, type EditProfileLook } from './edit-profile-look'
 import { useBots } from './i18n'
 import { displayName } from './labels'
@@ -77,8 +78,13 @@ export function EditProfileDialog({ bot, open, onClose }: EditProfileDialogProps
     title: openingTitle
   }
 
+  // The default bot's custom @handle (#89720), as its backend stores it.
+  const handleSeed = openingHandle(bot)
+
   const [opened, setOpened] = useState(opening)
   const [title, setTitle] = useState(openingTitle)
+  const [handle, setHandle] = useState(handleSeed.handle)
+  const [openedHandle, setOpenedHandle] = useState(handleSeed.handle)
   const [description, setDescription] = useState(bot?.description || '')
   const [busy, setBusy] = useState(false)
   const [advanced, setAdvanced] = useState(false)
@@ -97,6 +103,8 @@ export function EditProfileDialog({ bot, open, onClose }: EditProfileDialogProps
       setImage(appearance.image ?? null)
       setTitle(openingTitle)
       setOpened(opening)
+      setHandle(handleSeed.handle)
+      setOpenedHandle(handleSeed.handle)
       setDescription(bot.description || '')
       setBusy(false)
       setAdvanced(false)
@@ -113,11 +121,20 @@ export function EditProfileDialog({ bot, open, onClose }: EditProfileDialogProps
       return
     }
 
+    const handleEdit = editedHandle(bot, openedHandle, handle, $lastRoster.get(), b.editor)
+
+    if (handleEdit.error) {
+      host.notify({ kind: 'error', message: handleEdit.error })
+
+      return
+    }
+
     setBusy(true)
     let advancedFailed = false
 
     const look = editedLook(opened, { shape, color, image, title })
-    const persistence = look ? await saveBotMeta(bot, look) : null
+    const patch = mergedPatch(look, handleEdit)
+    const persistence = patch ? await saveBotMeta(bot, patch) : null
 
     // Only an explicit remote failure is an error — 'unsupported' is the
     // documented older-gateway fallback (local wins, silently), and toasting
@@ -127,7 +144,8 @@ export function EditProfileDialog({ bot, open, onClose }: EditProfileDialogProps
     if (lookFailed) {
       host.notify({
         kind: 'error',
-        message: b.avatar.savedLocally
+        // The backend names why it refused (a handle another profile holds).
+        message: saveFailureMessage(persistence, b.avatar.savedLocally)
       })
     }
 
@@ -227,6 +245,7 @@ export function EditProfileDialog({ bot, open, onClose }: EditProfileDialogProps
               value={title}
             />
           )}
+          <DefaultHandleField editor={b.editor} hidden={!handleSeed.edits} onChange={setHandle} value={handle} />
           {labeled(
             b.editor.description,
             <Textarea

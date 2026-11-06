@@ -167,8 +167,12 @@ def _target_ids(row: dict) -> set[str]:
 def _target_aliases(row: dict) -> set[str]:
     """Every lower-cased bare form that addresses ``row``: routing ids plus the Bot Mode title's
     mention slugs (``"CoS Bot"`` → ``cos-bot``/``cosbot``, what the Desktop picker inserts). A remote
-    ``default`` is ``@hermes`` on every gateway, so its title is the only bare form that can single it out."""
-    return _target_ids(row) | alias_forms(row.get("title") or "")
+    ``default`` is ``@hermes`` on every gateway unless it carries a custom handle, so its title is
+    otherwise the only bare form that can single it out. A remote default with a custom handle still
+    answers ``hermes`` (``hermes@<connection>`` from replies stamped before the rename) — as an alias,
+    so a real ``hermes`` profile on that machine keeps the exact match."""
+    legacy = {"hermes"} if row["profile"] == "default" and row["handle"].lower() not in ("hermes", "default") else set()
+    return _target_ids(row) | legacy | alias_forms(row.get("title") or "")
 
 
 def resolve_remote_target(raw_target: str, roster: list[dict]) -> Any:

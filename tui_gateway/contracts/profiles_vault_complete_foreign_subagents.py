@@ -293,6 +293,8 @@ class ProfilesConfigureApplied(Result):
     ui_meta: bool | None = None
     ui_meta_revisions: dict[str, int] | None = None
     ui_meta_conflicts: dict[str, UiMetaConflict] | None = None
+    # Why ``ui_meta`` was refused, for the user (an invalid or taken default @handle).
+    ui_meta_error: str | None = None
     soul: bool | None = None
     description: bool | None = None
     model: bool | None = None

@@ -9,7 +9,7 @@
 
 import { host, LruCache } from '@hermes/plugin-sdk'
 
-import { botHandle, clearBotAttention, noteBotAttention } from './data'
+import { botHandle, claimDefaultHandles, clearBotAttention, noteBotAttention } from './data'
 import { RELAY_DELIVER_TIMEOUT_MS } from './relay-budget'
 import { ID } from './shared'
 import type { ProfileRoute, RosterRow } from './types'
@@ -333,18 +333,15 @@ async function relayAgentsOn(
       }
     )
 
-    const profiles = Array.isArray(res?.profiles) ? res.profiles : []
-    // This connection's default is @hermes only while it has no real 'hermes' profile.
-    const hermesTaken = profiles.some(profile => profile?.name === 'hermes')
+    // This connection's default is @hermes only while it has no real 'hermes' profile, and its
+    // custom handle (when set) only while no real profile holds that name.
+    const profiles = claimDefaultHandles(Array.isArray(res?.profiles) ? res.profiles : [])
     const label = labels.get(connection.id) || connection.id
 
     const rows = profiles
       .map(profile => ({
         profile: String(profile?.name || ''),
-        handle: botHandle(
-          profile?.name,
-          hermesTaken && profile?.name === 'default' ? { ...profile, hermesHandleTaken: true } : profile
-        ),
+        handle: botHandle(profile?.name, profile),
         connection_id: connection.id,
         connection_label: label,
         title: String(profile?.ui_meta?.['hermes-bots']?.title || profile?.display_name || ''),

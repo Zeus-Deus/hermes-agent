@@ -66,6 +66,10 @@ export type BotsMessages = {
     checkingImage: string
     chooseImage: string
     editDescription: (name: string, profile: string) => string
+    handle: string
+    handleHint: string
+    handleInvalid: string
+    handleTaken: (handle: string) => string
     nameTaken: (name: string) => string
     nameTakenOn: (name: string, target: string) => string
     currentConnection: (name: string) => string

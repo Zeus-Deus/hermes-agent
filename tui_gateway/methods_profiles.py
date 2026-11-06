@@ -602,6 +602,32 @@ def _bots_title(ui_meta: dict):
     return bots.get("title") if isinstance(bots, dict) else None
 
 
+def _checked_default_handle(profile_dir, current: dict, incoming: dict) -> dict:
+    """``incoming`` with the default profile's custom @handle normalized, or ``ValueError`` when a
+    CHANGED handle is not valid on this install (``validate_default_handle``). Every Bots save
+    re-sends the whole ``hermes-bots`` block, so an unchanged handle is never re-judged: a profile
+    created later under the same name must not fail the next colour edit (readers already let
+    that profile keep the name). Named profiles have no custom handle; their blocks pass as-is."""
+    from pathlib import Path
+
+    from tools.bot_mode_probe import (
+        DEFAULT_HANDLE_KEY, _hermes_root, _profile_name, normalize_mention_handle, validate_default_handle)
+    block = incoming.get("hermes-bots")
+    if _profile_name(Path(profile_dir)) != "default" or not isinstance(block, dict) or DEFAULT_HANDLE_KEY not in block:
+        return incoming
+    stored = current.get("hermes-bots")
+    old = stored.get(DEFAULT_HANDLE_KEY) if isinstance(stored, dict) else None
+    new = block[DEFAULT_HANDLE_KEY]
+    if new == old:
+        return incoming
+    if isinstance(new, str) and normalize_mention_handle(new) and normalize_mention_handle(new) == normalize_mention_handle(old):
+        return incoming
+    if (new is None or new == "") and not normalize_mention_handle(old):
+        return incoming
+    handle = validate_default_handle(_hermes_root(Path(profile_dir)), new)
+    return {**incoming, "hermes-bots": {**block, DEFAULT_HANDLE_KEY: handle}}
+
+
 def _configure_ui_meta(profile_dir, params, applied) -> None:
     """Merge ``params["ui_meta"]`` key-wise into profile.yaml (None deletes). 64KB cap (rides
     every roster paint). ``ui_meta_expected_revisions``: per-key CAS, any mismatch rejects the
@@ -629,6 +655,11 @@ def _configure_ui_meta(profile_dir, params, applied) -> None:
                 return
             current = existing.get("ui_meta")
             current = current if isinstance(current, dict) else {}
+            try:
+                incoming = _checked_default_handle(profile_dir, current, incoming)
+            except ValueError as exc:
+                applied["ui_meta_error"] = str(exc)
+                return
             old_title = _bots_title(current)
             for key, value in incoming.items():
                 if value is None:
