@@ -179,30 +179,56 @@ const UNKNOWN_SENDER: MentionSender = { connectionId: '', exact: true, name: '' 
 
 const trimmed = (value: unknown) => String(value || '').trim()
 
-/** The send goes to the focused chat. The runtime id names the destination
- *  itself; the stored id may be a lineage root standing for the focused tip. */
-function sendsToFocusedChat(runtime: string, stored: string): boolean {
-  const focusedRuntime = trimmed(host.state.focusedSessionId?.get?.())
-  const focusedStored = trimmed(host.state.focusedStoredSessionId?.get?.())
+/** `lookup(id)` as an exact sender, or null. */
+function ownerSender(
+  lookup: (id: string) => null | { connectionId: string; profile: string },
+  id: string
+): MentionSender | null {
+  const owner = id ? focusedRosterOwner(lookup(id)) : null
 
-  return runtime ? runtime === focusedRuntime || (Boolean(stored) && stored === focusedStored) : stored === focusedStored
+  return owner?.connectionId ? { connectionId: owner.connectionId, exact: true, name: owner.name } : null
 }
 
 /** The submitting chat's owner when the send goes to a chat other than the
- *  focused one; undefined when focus already answers for it. */
+ *  focused one; undefined when focus already answers for it. The runtime id
+ *  names the destination itself; the stored id may be a lineage root shared
+ *  with the focused tip — or with a copied history on another gateway, so a
+ *  runtime that resolves elsewhere outranks stored-id equality. */
 function submittingChatSender(context: MentionSubmitContext | null | undefined): MentionSender | undefined {
   const lookup = host.sessionOwner
   const runtime = trimmed(context?.sessionId)
   const stored = trimmed(context?.storedSessionId)
 
-  if (!context || typeof lookup !== 'function' || sendsToFocusedChat(runtime, stored)) {
+  if (!context || typeof lookup !== 'function' || (runtime && runtime === trimmed(host.state.focusedSessionId?.get?.()))) {
     return undefined
   }
 
-  // The runtime id first: it maps to the destination's own stored id.
-  const owner = focusedRosterOwner((runtime && lookup(runtime)) || (stored && lookup(stored)) || null)
+  const byRuntime = ownerSender(lookup, runtime)
 
-  return owner?.connectionId ? { connectionId: owner.connectionId, exact: true, name: owner.name } : UNKNOWN_SENDER
+  if (byRuntime) {
+    return byRuntime
+  }
+
+  if (stored === trimmed(host.state.focusedStoredSessionId?.get?.())) {
+    return undefined
+  }
+
+  return ownerSender(lookup, stored) ?? UNKNOWN_SENDER
+}
+
+/** The focused chat's owner: the route a send to it takes (its tile's owner
+ *  route, via host.sessionOwner), else host.state.focusedSessionOwner. */
+function focusedChatSender(): MentionSender | null {
+  const lookup = host.sessionOwner
+  const routed = typeof lookup === 'function' ? ownerSender(lookup, trimmed(host.state.focusedStoredSessionId?.get?.())) : null
+
+  if (routed) {
+    return routed
+  }
+
+  const owner = focusedRosterOwner($focusedBotOwner.get?.() ?? null)
+
+  return owner?.authoritative && owner.connectionId ? { connectionId: owner.connectionId, exact: true, name: owner.name } : null
 }
 
 /** The bot that reads a mention note: the owner of the chat the send goes
@@ -220,11 +246,7 @@ export function mentionSender(context?: MentionSubmitContext | null): MentionSen
     return submitting
   }
 
-  const owner = focusedRosterOwner($focusedBotOwner.get?.() ?? null)
-
-  return owner?.authoritative && owner.connectionId
-    ? { connectionId: owner.connectionId, exact: true, name: owner.name }
-    : { connectionId: liveConnectionId() || 'local', name: focusedMentionProfile() }
+  return focusedChatSender() ?? { connectionId: liveConnectionId() || 'local', name: focusedMentionProfile() }
 }
 
 export function focusedRosterOwner(

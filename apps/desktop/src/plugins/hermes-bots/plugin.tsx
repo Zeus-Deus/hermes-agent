@@ -48,6 +48,7 @@ import {
   botSelectionKey,
   cachedUnionRoster,
   claimDefaultHandles,
+  forgetSourceIdentity,
   isActiveRosterBot,
   isUnknownMentionSender,
   localMentionHandle,
@@ -405,6 +406,9 @@ export default {
       if (typeof window !== 'undefined') {
         unbindConnectionsChanged =
           window.hermesDesktop?.connections?.onChanged?.(payload => {
+            // A saved/edited connection can point at another machine now.
+            forgetSourceIdentity(String(payload?.connectionId || ''))
+
             if (payload?.reason === 'removed') {
               sweepGroupChatMembersForRemovedConnection(payload.connectionId)
             }

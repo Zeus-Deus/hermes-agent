@@ -56,7 +56,9 @@ const { cache, hostMock, live, paneQuery } = vi.hoisted(() => {
       notify: vi.fn(),
       request: vi.fn(async (): Promise<unknown> => ({})),
       requestProfile: vi.fn(async () => ({})),
-      sessionOwner: (id: null | string | undefined) => (id && live.owners[id]) || null,
+      // The focused chat resolves to the focused owner unless a test names it.
+      sessionOwner: (id: null | string | undefined) =>
+        (id && (id in live.owners ? live.owners[id] : id === live.focusedStored ? live.owner : null)) || null,
       agents: vi.fn(async () => ({ agents: [], sources: [] })),
       state: {
         connectionId: { get: () => live.active, listen: () => () => undefined },
@@ -209,7 +211,7 @@ beforeEach(() => {
   live.focusedRuntime = 'rt-ops'
   live.focusedStored = 'ops-chat'
   live.owner = { connectionId: 'server', profile: 'ops' }
-  live.owners = { 'ops-chat': { connectionId: 'server', profile: 'ops' } }
+  live.owners = {}
   live.profile = 'default'
   live.socket = null
 })
@@ -575,6 +577,34 @@ describe('a queued send is written for the chat it drains into, not the focused 
     expect(text).not.toContain('"hermes"')
   })
 
+  it("lets a runtime that resolves elsewhere outrank a lineage root shared with the focused chat", async () => {
+    // The focused server chat and a local continuation of a copied history share root 'ops-chat'.
+    live.owners['rt-local-copy'] = { connectionId: 'local', profile: 'writer' }
+
+    const { handler } = await contributions({ profiles: BUILT_ON_LOCAL })
+
+    const { text } = await handler(
+      { text: 'ask @default-this-device' },
+      { sessionId: 'rt-local-copy', storedSessionId: 'ops-chat' }
+    )
+
+    expect(text).toContain('@default-this-device = agent profile "default" (message_agent target: "hermes")')
+  })
+
+  it("reads a focused tile's owner route before the focused-owner atom", async () => {
+    // The tile's route answers (host.sessionOwner); the atom lost its evicted owner hint.
+    live.owners['ops-chat'] = { connectionId: 'server', profile: 'ops' }
+    live.owner = null
+
+    const { handler, provide } = await contributions({ profiles: BUILT_ON_LOCAL })
+
+    expect((await handler({ text: 'send it to @default-server' })).text).toContain(
+      '@default-server = agent profile "default" (message_agent target: "hermes")'
+    )
+    // This device's default is not the sender.
+    expect(provide('').map(item => item.insert)).toContain('@default-this-device')
+  })
+
   it('reads the focused owner for a send from the focused chat itself', async () => {
     const { handler } = await contributions({ profiles: BUILT_ON_LOCAL })
 
@@ -700,6 +730,72 @@ describe('one server registered under two addresses', () => {
     expect((await handler({ text: 'send it to @default-server' })).text).toContain('(message_agent target: "hermes")')
     // server-b's ops is the sender itself.
     expect(provide('').map(item => item.insert)).not.toContain('@ops')
+  })
+
+  it('stops treating an address as the install once the registry edits it', async () => {
+    let changed: (payload: { connectionId: string; reason: string }) => void = () => undefined
+
+    vi.stubGlobal('hermesDesktop', {
+      connections: { onChanged: (listener: typeof changed) => ((changed = listener), () => undefined) }
+    })
+
+    try {
+      const { handler } = await contributions({ profiles: COLLAPSED, sources: sources('b'.repeat(32)) })
+
+      expect((await handler({ text: 'send it to @default-server' })).text).toContain('(message_agent target: "hermes")')
+
+      // server-b now points at another gateway: the install id the snapshot holds is void.
+      changed({ connectionId: 'server-b', reason: 'updated' })
+
+      expect((await handler({ text: 'send it to @default-server' })).text).toContain(
+        '(message_agent target: "default@server-b")'
+      )
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('never retains an install id seen before the registry edited that connection', async () => {
+    let changed: (payload: { connectionId: string; reason: string }) => void = () => undefined
+
+    vi.stubGlobal('hermesDesktop', {
+      connections: { onChanged: (listener: typeof changed) => ((changed = listener), () => undefined) }
+    })
+
+    try {
+      live.active = 'server-b'
+      hostMock.request.mockResolvedValue({ profiles: [{ name: 'default' }, { name: 'ops' }] })
+      // The edited address now reaches a gateway whose identity probe returns no install id.
+      hostMock.agents.mockResolvedValue({
+        agents: [
+          {
+            connectionId: 'server-b',
+            connectionKind: 'remote',
+            connectionLabel: 'Server',
+            handle: 'default-server',
+            profile: 'default'
+          }
+        ],
+        sources: [
+          { connectionId: 'server-a', installId: 'b'.repeat(32), kind: 'remote' },
+          { connectionId: 'server-b', kind: 'remote' }
+        ]
+      } as never)
+
+      const { handler } = await contributions({ profiles: null })
+
+      cache.set(JSON.stringify(['hermes-bots', 'roster', 'earlier']), {
+        key: ['hermes-bots', 'roster', 'earlier'],
+        value: { fetchedAt: 1, sources: sources('b'.repeat(32)) }
+      })
+      changed({ connectionId: 'server-b', reason: 'updated' })
+
+      expect((await handler({ text: 'send it to @default-server' })).text).toContain(
+        '(message_agent target: "default@server-b")'
+      )
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('keeps addresses distinct while their install ids are unknown', async () => {

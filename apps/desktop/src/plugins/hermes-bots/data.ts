@@ -854,6 +854,18 @@ function servedBy(
   return servedConnectionId ? { servedConnectionId } : {}
 }
 
+/** When each connection was last saved, edited or removed in the registry.
+ *  An install id seen before that may name the machine it pointed at then. */
+const identityResets = new Map<string, number>()
+
+/** The registry changed `connectionId` (hermes:connections:changed): stop
+ *  trusting install ids seen for it so far — cached, retained or in flight. */
+export function forgetSourceIdentity(connectionId: string, at: number = Date.now()): void {
+  if (connectionId) {
+    identityResets.set(connectionId, at)
+  }
+}
+
 /** Which registry addresses are one install, from the newest cached snapshot
  *  that knows — identity, not reachability, so a failed union keeps it. */
 function knownSourceIdentities(): SourceIdentity[] {
@@ -906,9 +918,17 @@ function freshSourceIdentities(sources: readonly GatewaySource[]): Pick<RosterSn
 
 /** Which registry addresses are one install, as the snapshot knows it. */
 export function snapshotIdentities(
-  snapshot: Pick<RosterSnapshot, 'sourceIdentities' | 'sources'> | null | undefined
+  snapshot: Pick<RosterSnapshot, 'fetchedAt' | 'sourceIdentities' | 'sources'> | null | undefined
 ): readonly SourceIdentity[] {
-  return snapshot?.sourceIdentities?.length ? snapshot.sourceIdentities : (snapshot?.sources ?? [])
+  const list = snapshot?.sourceIdentities?.length ? snapshot.sourceIdentities : (snapshot?.sources ?? [])
+  const seenAt = Number(snapshot?.fetchedAt || 0)
+
+  // An id issued no later than the connection's last registry change is void.
+  return list.map(source =>
+    seenAt > (identityResets.get(source.connectionId) ?? -Infinity)
+      ? source
+      : { connectionId: source.connectionId, installId: undefined }
+  )
 }
 
 async function fetchRosterSnapshot(activeConnectionId: null | string | undefined): Promise<RosterSnapshot> {
@@ -1500,7 +1520,7 @@ function sameInstallConnections(sources: readonly SourceIdentity[] | null | unde
  *  which other addresses name the owner's own install. */
 export function scopeMentionSender<T extends RosterOwnerRef>(
   owner: T,
-  snapshot: Pick<RosterSnapshot, 'servedConnectionId' | 'sourceIdentities' | 'sources'> | null | undefined
+  snapshot: Pick<RosterSnapshot, 'fetchedAt' | 'servedConnectionId' | 'sourceIdentities' | 'sources'> | null | undefined
 ): RosterOwnerRef & T {
   return {
     ...owner,
