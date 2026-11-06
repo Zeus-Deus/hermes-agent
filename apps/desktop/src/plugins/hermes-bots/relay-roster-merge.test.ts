@@ -747,6 +747,83 @@ describe('each Desktop pushes its roster as its own slice (#139219)', () => {
     expect(calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.connectionId)).toEqual(['srv'])
   })
 
+  it('a push from a stopped run is never written after the restarted run’s own', async () => {
+    // The old run's push (no rows yet) was still out when the relay stopped and restarted. Had
+    // the new run's push gone out beside it, the gateway could write the old one last and leave
+    // this window's slice empty, with the relay's record saying otherwise.
+    const landed: number[] = []
+    let scoutOnline = false
+    let landOldPush: (() => void) | null = null
+
+    const envelope = {
+      canonical_delivery_v1: true,
+      from_handle: 'ops',
+      from_profile: 'ops',
+      id: 'env-g',
+      message: 'hi',
+      target_connection: 'srv',
+      target_profile: 'scout',
+      target_publishers: ['desktop-aaaaaaaaaaaa', PUBLISHER]
+    }
+
+    const calls = respondWith(call => {
+      if (call.method === 'profiles.list') {
+        return call.connectionId === 'local'
+          ? { install_id: INSTALL, profiles: [{ name: 'ops' }] }
+          : { install_id: 'f'.repeat(32), profiles: scoutOnline ? [{ name: 'scout' }] : [] }
+      }
+
+      if (call.method === 'bot_relay.roster.sync' && call.connectionId === 'local') {
+        const agents = call.params.agents as unknown[]
+
+        if (landOldPush === null && !scoutOnline) {
+          return new Promise(resolve => {
+            landOldPush = () => {
+              landed.push(agents.length)
+              resolve({ count: agents.length })
+            }
+          })
+        }
+
+        landed.push(agents.length)
+
+        return { count: agents.length }
+      }
+
+      if (call.method === 'bot_relay.outbox.drain' && call.connectionId === 'local') {
+        return { envelopes: landed.at(-1) ? [envelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { status: 'settled', delivery_id: call.params.id, admission_id: 'admission', reply: 'done' }
+      }
+
+      return { envelopes: [] }
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(landOldPush).not.toBeNull()
+    stopBotRelay()
+    scoutOnline = true
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(landed).toEqual([]) // the new run's push waits for the old one
+
+    landOldPush!()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(landed).toEqual([0, 1]) // the old run's empty push first, this run's last
+
+    await pushAndSettle(1, { connectionId: 'local' })
+    stopBotRelay()
+
+    expect(calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.connectionId)).toEqual(['srv'])
+  })
+
   it('a gateway upgraded under the window: its first slice counts as a change though the rows match', async () => {
     // Before the upgrade the push fell back to the legacy way; the upgraded gateway offers mail
     // naming this window's machine only once this window's own slice lists it.

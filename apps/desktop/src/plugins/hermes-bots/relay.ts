@@ -647,6 +647,9 @@ const drainedSinceSlice = new Set<string>()
 // between two landed pushes longer than that less one roster tick may have let it expire.
 const RELAY_SLICE_EXPIRY_MS = 600_000 - RELAY_ROSTER_INTERVAL_MS
 
+// The last roster push per route, kept across relay runs (stopBotRelay does not clear it).
+const rosterPushTails = new Map<string, Promise<void>>()
+
 function relayRouteKey(connection: RelayConnection): string {
   return JSON.stringify(connection.route)
 }
@@ -656,13 +659,31 @@ function relayRouteKey(connection: RelayConnection): string {
  *  refused mail this slice now makes this window's). Throws as `pushRelayRoster` does. */
 async function publishRelayRoster(connection: RelayConnection, rows: RelayAgentRow[], isCurrent: () => boolean) {
   const key = relayRouteKey(connection)
+  // One push per route at a time, across relay runs too: a push from a stopped run still out
+  // could otherwise be written after the current run's and empty this window's slice again.
+  const previous = rosterPushTails.get(key)
+
+  let settle: () => void = () => {}
+
+  const tail = new Promise<void>(resolve => {
+    settle = resolve
+  })
+
+  rosterPushTails.set(key, tail)
 
   let landed: 'legacy' | 'slice'
-  // The gateway stamps the slice somewhere between the request and its answer, and the answer can
-  // be processed much later (a renderer suspended meanwhile): age the slice from the request.
-  const sent = Date.now()
+  let sent: number
 
   try {
+    await previous
+
+    if (!isCurrent()) {
+      return
+    }
+
+    // The gateway stamps the slice somewhere between the request and its answer, and the answer
+    // can be processed much later (a renderer suspended meanwhile): age the slice from the request.
+    sent = Date.now()
     landed = await pushRelayRoster(connection.route, rows)
   } catch (error) {
     // What the gateway holds is unknown now (or ages out unrefreshed): the next push that lands
@@ -670,6 +691,12 @@ async function publishRelayRoster(connection: RelayConnection, rows: RelayAgentR
     pushedRosters.delete(key)
 
     throw error
+  } finally {
+    settle()
+
+    if (rosterPushTails.get(key) === tail) {
+      rosterPushTails.delete(key)
+    }
   }
 
   if (!isCurrent()) {
