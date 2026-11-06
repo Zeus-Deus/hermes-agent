@@ -32,11 +32,19 @@ interface Contribution {
 type Owner = { connectionId: string; profile: string } | null
 
 const { cache, hostMock, live } = vi.hoisted(() => {
-  const live = { active: 'local', focused: 'ops', owner: null as Owner, profile: 'default' }
+  // `socket`: where host.request answers when it differs from the published `active` (mid-apply).
+  const live = {
+    active: 'local',
+    focused: 'ops',
+    owner: null as Owner,
+    profile: 'default',
+    socket: null as null | string
+  }
 
   return {
     cache: new Map<string, { key: unknown[]; value: unknown }>(),
     hostMock: {
+      activeConnectionId: () => live.socket ?? live.active,
       notify: vi.fn(),
       request: vi.fn(async (): Promise<unknown> => ({})),
       requestProfile: vi.fn(async () => ({})),
@@ -181,6 +189,7 @@ beforeEach(() => {
   live.focused = 'ops'
   live.owner = { connectionId: 'server', profile: 'ops' }
   live.profile = 'default'
+  live.socket = null
 })
 
 describe('mention targets follow the focused chat owner, not the active connection', () => {
@@ -322,6 +331,39 @@ describe('mention targets follow the focused chat owner, not the active connecti
     // This tile still submits to this device: 'hermes' would reach its own default.
     expect((await pending).text).toContain('(message_agent target: "default@server")')
   })
+
+  it.each([
+    ['the cold profiles.list fallback', true],
+    ['a prime with no keyed route', false]
+  ])(
+    'never credits %s to the published connection while another gateway holds the socket',
+    async (_label, primeFails) => {
+      // Mid-apply: this device is published as primary, the server's socket still answers.
+      live.socket = 'server'
+      live.owner = { connectionId: 'server', profile: 'default' }
+      live.focused = 'default'
+      hostMock.request.mockImplementation(async (...args: unknown[]) => {
+        if (args[0] !== 'profiles.list') {
+          return {}
+        }
+
+        if (primeFails && (args[1] as Record<string, unknown>)?.include_sessions !== false) {
+          throw new Error('offline')
+        }
+
+        return { profiles: [{ name: 'default' }, { name: 'writer' }] }
+      })
+      hostMock.agents.mockRejectedValue(new Error('offline'))
+
+      const { handler } = await contributions({ profiles: null })
+      const { text } = await handler({ text: 'ask @writer and @hermes' })
+
+      // The server's rows: its writer is local to the sender, its default is the sender.
+      expect(text).toContain('@writer = agent profile "writer"')
+      expect(text).not.toContain('@local')
+      expect(text).not.toContain('agent profile "default"')
+    }
+  )
 
   it('places rows the union enumeration failed to scope on the gateway that served them', async () => {
     // profiles.list answers, host.agents fails: the cached rows carry no connectionId.

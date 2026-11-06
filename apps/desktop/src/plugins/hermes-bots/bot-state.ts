@@ -159,7 +159,7 @@ export const $focusedBotOwner = host.state.focusedSessionOwner || {
 }
 
 /** The connection of the live gateway socket ('' when unknown). */
-export function liveConnectionId(): string {
+function liveConnectionId(): string {
   return String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || '').trim()
 }
 

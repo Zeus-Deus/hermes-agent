@@ -35,7 +35,6 @@ import {
   $selectedBot,
   $selectedRosterHydrated,
   $selectedRosterKey,
-  liveConnectionId,
   mentionSender
 } from './bot-state'
 import { isCanonicalChatOnScreen, openBotCanonicalChat } from './canonical-chat'
@@ -53,7 +52,8 @@ import {
   mentionTargetConnection,
   migrateBotMeta,
   primeRoster,
-  resolveRosterMentions
+  resolveRosterMentions,
+  socketConnectionId
 } from './data'
 import {
   $groupChats,
@@ -824,7 +824,7 @@ export default {
 
           if (!roster) {
             // host.request answers on the live socket: note which one before asking.
-            sender = { ...owner, unscopedConnectionId: liveConnectionId() }
+            sender = { ...owner, unscopedConnectionId: socketConnectionId() }
 
             try {
               const res = await host.request<{ profiles?: RosterRow[] }>('profiles.list', {

@@ -829,11 +829,22 @@ function traceRosterSnapshot(
 /** One roster snapshot for `activeConnectionId` — the pane's query and the
  *  composer's cold-cache prime (`primeRoster`) share it, so both see the same
  *  cross-connection rows. */
-/** The snapshot's serving connection, when the query key names one. */
-function servedBy(activeConnectionId: null | string | undefined): Pick<RosterSnapshot, 'servedConnectionId'> {
+/** The connection of the socket `host.request` answers on right now ('' when
+ *  unknown). Not `host.state.connectionId`: mid-apply that can already name
+ *  the new primary while a foreground secondary still holds the socket. */
+export function socketConnectionId(): string {
+  return String(host.activeConnectionId?.() || '').trim()
+}
+
+/** The snapshot's serving connection: the query key, when the request was
+ *  routed to it or the ambient socket provably serves it. Read before asking. */
+function servedBy(
+  activeConnectionId: null | string | undefined,
+  routed: boolean
+): Pick<RosterSnapshot, 'servedConnectionId'> {
   const servedConnectionId = String(activeConnectionId || '').trim()
 
-  return servedConnectionId ? { servedConnectionId } : {}
+  return servedConnectionId && (routed || socketConnectionId() === servedConnectionId) ? { servedConnectionId } : {}
 }
 
 async function fetchRosterSnapshot(activeConnectionId: null | string | undefined): Promise<RosterSnapshot> {
@@ -885,6 +896,8 @@ async function fetchRosterSnapshot(activeConnectionId: null | string | undefined
     ? routes.find(r => r?.connectionId === activeConnectionId && r?.profile === activeBot.name)
     : undefined
 
+  const served = servedBy(activeConnectionId, Boolean(route))
+
   const local = route
     ? await host.requestProfile<RosterSnapshot>(route, 'profiles.list', {})
     : await requestForBot<RosterSnapshot>(activeBot, 'profiles.list', {})
@@ -893,8 +906,6 @@ async function fetchRosterSnapshot(activeConnectionId: null | string | undefined
   // session's system prompt (agent.bot_mode_protocol) — SOUL.md must not
   // carry a second copy. Older gateways lack the flag: keep appending.
   serverInjectsProtocol = Boolean(local?.bot_mode_protocol)
-
-  const served = servedBy(activeConnectionId)
 
   // Multi-source desktops (hermes-agent #86875) also expose the union
   // agent roster across every registered connection. Merge agents from
