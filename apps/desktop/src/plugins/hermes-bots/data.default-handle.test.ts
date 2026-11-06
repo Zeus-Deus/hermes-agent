@@ -397,6 +397,27 @@ describe('a custom handle equal to another default’s collapsed custom handle',
   )
 })
 
+describe('a custom handle two defaults share, next to a bot named like its collapsed spelling', () => {
+  it('reaches no one, never the other bot, in every seat order', () => {
+    const [laptop, , server] = twoMachines('ma-ia', 'ma-ia')
+    const serverMaia = { connectionId: 'server', handle: 'maia', name: 'maia', remoteSource: true } as RosterRow
+    const rows = [laptop, server, serverMaia]
+
+    for (const seated of rows.flatMap(a =>
+      rows.filter(b => b !== a).map(b => [a, b, rows.find(c => c !== a && c !== b)!])
+    )) {
+      for (const members of [seated as GroupMember[], durableGroupChatMembers(seated)]) {
+        const tagged = (text: string) => [...parseGroupChatMentions(text, members).mentioned]
+
+        expect(tagged('@ma-ia go')).toEqual([])
+        expect(tagged('@ma_ia go')).toEqual([])
+        expect(tagged('@ma-ia @default-laptop go')).toEqual(['laptop::default'])
+        expect(tagged('@maia go')).toEqual(['server::maia'])
+      }
+    }
+  })
+})
+
 describe('a custom handle equal to a sibling’s -local address', () => {
   it('leaves @<name>-local with that sibling, in either seat order', () => {
     const lead = { connectionId: 'local', mentionHandle: 'writer-local', name: 'default' } as GroupMember

@@ -65,9 +65,12 @@ function memberIdentityForms(member: GroupMember): Set<string> {
  *  real name keeps it, and two defaults sharing one name neither; each still answers its
  *  source-qualified earlier handle, which `groupReplyMentionTag` offers instead. A contested
  *  handle the default picked up another way (its title "Maia") goes back to the one other seat
- *  that holds it by a real name, or to no one. */
-function claimUncontestedCustomHandles(members: GroupMember[], handles: Map<string, string>) {
+ *  that holds it by a real name, or to no one. Returns the collapsed spellings of the contested
+ *  handles left with no one: the parser must not reach another bot through them (`ma-ia` →
+ *  a bot named `maia`). */
+function claimUncontestedCustomHandles(members: GroupMember[], handles: Map<string, string>): Set<string> {
   const identities = members.map(member => [member, groupMemberKey(member), memberIdentityForms(member)] as const)
+  const unresolved = new Set<string>()
 
   for (const [member, key] of identities) {
     const custom = customDefaultHandle(member.name, member)
@@ -93,7 +96,13 @@ function claimUncontestedCustomHandles(members: GroupMember[], handles: Map<stri
         }
       }
     }
+
+    if (custom && holders.length && !handles.has(custom)) {
+      unresolved.add(custom.replace(/[._-]+/g, ''))
+    }
   }
+
+  return unresolved
 }
 
 /** Deterministic @mention parse. Handles @name, @"two words" via display
@@ -159,7 +168,7 @@ export function parseGroupChatMentions(text: unknown, members: GroupMember[]) {
   }
 
   gapFillMemberForms(members, handles)
-  claimUncontestedCustomHandles(members, handles)
+  const unresolved = claimUncontestedCustomHandles(members, handles)
 
   for (const match of source.matchAll(/@([a-z0-9][a-z0-9._-]*)/gi)) {
     const handle = match[1].toLowerCase()
@@ -174,7 +183,9 @@ export function parseGroupChatMentions(text: unknown, members: GroupMember[]) {
       continue
     }
 
-    const resolved = handles.get(handle) || handles.get(handle.replace(/[._-]+/g, ''))
+    const collapsed = handle.replace(/[._-]+/g, '')
+    // A spelling of a custom handle the room gave to no one stays unresolved (see above).
+    const resolved = handles.get(handle) || (unresolved.has(collapsed) ? undefined : handles.get(collapsed))
 
     if (resolved) {
       mentioned.add(resolved)
