@@ -226,6 +226,21 @@ async def test_a_hosted_room_member_never_gets_it_even_from_a_declared_desktop(o
     assert bot_mode_dm.message_agent_authorized(_Agent(owner.db, room, "bot_room")) is False
 
 
+@pytest.mark.asyncio
+async def test_a_config_bypass_launch_carries_no_mark(owner, tmp_path):
+    """``--safe-mode`` / ``--ignore-user-config`` launches (never made by the Desktop app) keep the
+    unmarked policy they always had: the capability adds no new provenance path."""
+    from gateway.session_local import stage_local_session
+    from gateway.session_local_recovery import restore_local_session
+    from hermes_state_local import commit_local_session
+    staged = stage_local_session(owner.authority, owner.actor, {
+        "request_id": "bypass", "source": "gui", "cwd": str(tmp_path), "model": "fixture", "provider": "custom",
+        "base_url": "http://127.0.0.1:9/v1", "ignore_user_config": True}, client_local=True, desktop_local=True)
+    commit_local_session(owner.authority.db, epoch=owner.authority.epoch, receipt=staged)
+    sid = restore_local_session(owner.authority, staged["session_id"]).session_id
+    assert bot_mode_dm.message_agent_authorized(_Agent(owner.db, sid)) is False
+
+
 @pytest.mark.parametrize("source", ["cli", "tui", "bot_room", "kanban", "cron", "a2a", "local", None])
 def test_only_a_gui_policy_carries_the_capability(source):
     from gateway.session_policy import LOCAL_DESKTOP_CHAT, is_local_desktop_chat
@@ -259,12 +274,65 @@ def test_a_worker_store_answers_from_the_policy_it_was_handed():
     assert bot_mode_dm.local_desktop_chat_capability(_Agent(db, "s2")) is False
 
 
-def test_the_worker_bootstrap_stamps_the_store_from_the_frozen_policy():
-    import inspect
-    from agent import managed_worker
-    source = inspect.getsource(managed_worker.execute)
-    assert "store.desktop_chat = is_local_desktop_chat(policy)" in source
-    assert source.index("store.desktop_chat") < source.index("_construct_agent(")
+@pytest.mark.parametrize("marked,granted", [(True, True), (False, False)])
+def test_the_worker_bootstrap_hands_the_frozen_mark_to_the_agents_store(tmp_path, monkeypatch, marked, granted):
+    """The owner's bootstrap frame carries the frozen policy; the worker stamps its store before the
+    agent is built, so the gate reads the same answer in a worker as in the owner."""
+    import threading
+    from agent import managed_worker as worker
+    from gateway.session_policy import LOCAL_DESKTOP_CHAT
+    from tests.gateway.test_managed_turn_contract import assignment
+
+    seen = {}
+
+    class RPC:
+        def __init__(self, home): pass
+        def __call__(self, method, **params): return {"owner_epoch": 1}
+        def close(self): pass
+
+    class Store:
+        def __init__(self, rpc, scope, *args):
+            self.scope = dict(scope)
+        def get_messages_as_conversation(self, sid): return []
+        def flush_token_counts(self): pass
+        def finish(self): pass
+        def close(self): pass
+
+    from agent.runtime_session_store import RuntimeSessionStore
+    Store.local_desktop_chat = RuntimeSessionStore.local_desktop_chat
+    Store.desktop_chat = False
+
+    class Agent:
+        def __init__(self, **kwargs):
+            agent = _Agent(kwargs["session_db"], kwargs["session_id"], kwargs["platform"])
+            seen["granted"] = bot_mode_dm.local_desktop_chat_capability(agent)
+            self.session_prompt_tokens = self.session_completion_tokens = 0
+        def run_conversation(self, text, **kwargs):
+            return {"final_response": "ok", "completed": True}
+
+    class Controls:
+        def __init__(self, *args):
+            self.stopped, self.finish = threading.Event(), threading.Event()
+            self.finish.set()
+        def approval(self, data): pass
+        def clarify(self, questions): pass
+
+    frame, _ = assignment(tmp_path, monkeypatch)
+    config = json.loads(frame["policy"]["config_json"])
+    if marked:
+        config[LOCAL_DESKTOP_CHAT] = True
+    frame["policy"] = {**frame["policy"], "source": "gui", "platform": "desktop", "config_json": json.dumps(config)}
+    monkeypatch.setattr(worker, "bind_worker_policy", lambda frame: None)
+    monkeypatch.setattr(worker, "discover_profile_mcp", lambda policy: None)
+    monkeypatch.setattr(worker, "retire_agent", lambda agent: None)
+    monkeypatch.setattr(worker, "WorkerControls", Controls)
+    monkeypatch.setattr("agent.runtime_session_store.WorkerRPC", RPC)
+    monkeypatch.setattr("agent.runtime_session_store.RuntimeSessionStore", Store)
+    monkeypatch.setattr("tools.process_registry.process_registry.recover_from_checkpoint", lambda: None)
+    monkeypatch.setattr("run_agent.AIAgent", Agent)
+    monkeypatch.setattr("agent.title_generator.wait_for_title_upgrades", lambda: None)
+    worker.execute(frame, SimpleNamespace(send=lambda kind, **payload: None))
+    assert seen["granted"] is granted
 
 
 def test_an_unreadable_receipt_grants_nothing_and_is_not_cached():
