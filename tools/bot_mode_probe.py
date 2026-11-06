@@ -288,7 +288,8 @@ def _peer_paragraph(root: Path) -> str:
     listed = ", ".join(f"`{p}`" for p in peers)
     shared = _shadowed_peers(root)
     shadowed = (f" A local teammate wins a name it shares with a peer ({', '.join(f'`{p}`' for p in shared)}): "
-                'reach that peer\'s main agent as "<peer>/default".') if shared else ""
+                'address that peer only as "<peer>/<agent-name>" ("<peer>/default" is its default '
+                "profile).") if shared else ""
     return (
         "\n\nTeammates on OTHER machines: this install also has peer gateways "
         f"registered ({listed}). Message an agent on a peer the same way — "

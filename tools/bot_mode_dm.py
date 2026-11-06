@@ -297,7 +297,7 @@ def bare_peer(target: str, sender: Any) -> bool:
     """``target`` is a bare registered peer name that no local profile folder id (or @handle) also
     names. A local profile wins that shared name (#145241): the peer route carries another identity,
     credentials and privacy boundary, so it is never taken silently; the peer stays reachable as
-    ``<peer>/<agent>`` (``<peer>/default`` for its main agent). Friendly names are soft aliases and
+    ``<peer>/<agent>`` (``<peer>/default`` for its default profile). Friendly names are soft aliases and
     keep yielding to a peer, and the sender's own name is no local target, so a peer named like the
     sender keeps that name."""
     if target.lower() not in sender.peers:

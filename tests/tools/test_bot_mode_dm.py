@@ -606,7 +606,7 @@ def test_the_protocol_names_the_explicit_form_for_a_shadowed_peer(tmp_path):
     shadowed = _peer_paragraph(_managed_home(tmp_path / "a", teammates=("ops",), peers=("ops", "spark")))
     plain = _peer_paragraph(_managed_home(tmp_path / "b", teammates=("ops",), peers=("spark",)))
 
-    assert "(`ops`)" in shadowed and '"<peer>/default"' in shadowed
+    assert "(`ops`)" in shadowed and '"<peer>/<agent-name>"' in shadowed and '"<peer>/default"' in shadowed
     assert "shares with a peer" not in plain and "`spark`" in plain
 
 
