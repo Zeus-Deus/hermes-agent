@@ -353,6 +353,25 @@ describe('a custom handle equal to a title’s first word', () => {
   })
 })
 
+describe('a custom handle equal to a collapsed title', () => {
+  it.each(['Alice-Bob', 'Alice_Bob'])(
+    'leaves %j’s collapsed spelling with the titled default, in either seat order',
+    title => {
+      const [laptop, , server] = twoMachines('alicebob', 'atlas')
+      const titled = { ...server, title }
+
+      for (const seated of [
+        [laptop, titled],
+        [titled, laptop]
+      ]) {
+        const members = durableGroupChatMembers(seated)
+
+        expect([...parseGroupChatMentions('@alicebob go', members).mentioned]).toEqual(['server::default'])
+      }
+    }
+  )
+})
+
 describe('a custom handle shaped like a device tag', () => {
   it('is not a handle, so a default never loses its own device tag to @hermes', () => {
     const [laptop, , server] = twoMachines('maia', 'default-server')

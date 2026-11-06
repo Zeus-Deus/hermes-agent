@@ -30,10 +30,18 @@ function gapFillMemberForms(members: GroupMember[], handles: Map<string, string>
   }
 }
 
+/** The forms `parseGroupChatMentions` seats for a title: as written, collapsed ("Alice-Bob" →
+ *  `alicebob`) and its first word ("Alice Smith" → `alice`), lower-cased. */
+function titleForms(title: string): string[] {
+  return title
+    ? [title.toLowerCase(), title.toLowerCase().replace(/[\s_-]+/g, ''), title.split(/\s+/)[0].toLowerCase()]
+    : []
+}
+
 /** Every lower-cased form a member answers to by its live identity: profile name, @handle,
  *  picker tag, the handle a custom-handle default had before (`default-server`), each also
- *  collapsed as the parser reads it, and its title / friendly-name forms — the title's first
- *  word too ("Alice Smith" answers `@alice`), as the parser seats it. */
+ *  collapsed as the parser reads it, its title forms exactly as the parser seats them
+ *  (`titleForms`), and its title / friendly-name slugs. */
 function memberIdentityForms(member: GroupMember): Set<string> {
   const title = String(member.title || '').trim()
 
@@ -41,8 +49,8 @@ function memberIdentityForms(member: GroupMember): Set<string> {
     [member.name, botHandle(member.name, member), botMentionTag(member), precustomHandle(member.name, member)]
       .map(form => String(form || '').toLowerCase())
       .flatMap(form => [form, form.replace(/[\s_-]+/g, '')])
+      .concat(titleForms(title))
       .concat([title, ...botFriendlyNames(member)].flatMap(name => mentionNameForms(name)))
-      .concat(title ? [title.split(/\s+/)[0].toLowerCase()] : [])
       .filter(Boolean)
   )
 }
@@ -106,9 +114,7 @@ export function parseGroupChatMentions(text: unknown, members: GroupMember[]) {
       member.name.toLowerCase(),
       member.name.toLowerCase().replace(/[\s_-]+/g, ''),
       ...(handle ? [handle.toLowerCase(), handle.toLowerCase().replace(/[\s_-]+/g, '')] : []),
-      ...(title
-        ? [title.toLowerCase(), title.toLowerCase().replace(/[\s_-]+/g, ''), title.split(/\s+/)[0].toLowerCase()]
-        : [])
+      ...titleForms(title)
     ])
 
     // Renamed members answer to their friendly names too (profile

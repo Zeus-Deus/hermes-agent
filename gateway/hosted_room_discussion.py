@@ -347,7 +347,7 @@ def resolve_mentions(
     texts: Iterable[str], members: Sequence[DiscussionMember], *, default_all: bool = True
 ) -> tuple[DiscussionMember, ...]:
     """Resolve member handles deterministically against the frozen roster."""
-    by_handle = {member.handle.casefold(): member for member in members}
+    by_handle = _mention_handles(members)
     mentioned: set[str] = set()
     everyone = False
     for text in texts:
@@ -356,10 +356,25 @@ def resolve_mentions(
             if handle in {"all", "everyone"}:
                 everyone = True
             elif handle in by_handle:
-                mentioned.add(handle)
+                mentioned.add(by_handle[handle].member_id)
     if everyone or (default_all and not mentioned):
         return tuple(members)
-    return tuple(member for member in members if member.handle.casefold() in mentioned)
+    return tuple(member for member in members if member.member_id in mentioned)
+
+
+def _mention_handles(members: Sequence[DiscussionMember]) -> dict[str, DiscussionMember]:
+    """Each member's frozen handle, plus ``hermes`` for the local default seated under its custom
+    Bot Mode @handle (#89720): @hermes keeps reaching the default everywhere else, so it does here,
+    unless a member holds that handle or profile. A default frozen as ``default`` (a real
+    ``hermes`` profile held @hermes then) gets no alias."""
+    by_handle = {member.handle.casefold(): member for member in members}
+    if "hermes" in by_handle or any(member.profile.casefold() == "hermes" for member in members):
+        return by_handle
+    defaults = [member for member in members
+                if (member.target or {}).get("kind") == "local" and member.profile == "default"]
+    if len(defaults) == 1 and defaults[0].handle.casefold() != "default":
+        by_handle["hermes"] = defaults[0]
+    return by_handle
 
 
 def _unaddressed_member_mentions(
