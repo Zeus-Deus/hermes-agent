@@ -406,6 +406,38 @@ describe('a custom handle equal to another default’s collapsed custom handle',
   )
 })
 
+describe('a custom handle that ends in a separator, next to a default handled without it', () => {
+  it.each([
+    ['maia_', 'maia'],
+    ['maia-', 'maia'],
+    ['maia__', 'maia']
+  ])(
+    'keeps laptop %j through closing punctuation and emphasis (server %j), in either seat order',
+    (laptopHandle, serverHandle) => {
+      const [laptop, , server] = twoMachines(laptopHandle, serverHandle)
+
+      for (const seated of [
+        [laptop, server],
+        [server, laptop]
+      ]) {
+        for (const members of [seated as GroupMember[], durableGroupChatMembers(seated)]) {
+          const tagged = (text: string) => [...parseGroupChatMentions(text, members).mentioned]
+
+          expect(tagged(`@${laptopHandle} go`)).toEqual(['laptop::default'])
+
+          // The handle's own separator survives the trim; only the prose after it is peeled.
+          for (const tail of ['.', '_', '-', '__.', '...']) {
+            expect(tagged(`Thanks @${laptopHandle}${tail}`)).toEqual(['laptop::default'])
+          }
+
+          expect(tagged(`Thanks @${serverHandle}.`)).toEqual(['server::default'])
+          expect(tagged(`@${serverHandle} go`)).toEqual(['server::default'])
+        }
+      }
+    }
+  )
+})
+
 describe('a custom handle two defaults share, next to a bot named like its collapsed spelling', () => {
   it('reaches no one, never the other bot, in every seat order', () => {
     const [laptop, , server] = twoMachines('ma-ia', 'ma-ia')

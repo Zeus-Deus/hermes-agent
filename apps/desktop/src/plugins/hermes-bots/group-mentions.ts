@@ -174,8 +174,14 @@ export function parseGroupChatMentions(text: unknown, members: GroupMember[]) {
     const written = match[1].toLowerCase()
     // Trailing separators are prose, not handle: a closing period (`Thanks @ma-ia.`) or Markdown
     // emphasis (`_@ma-ia_`, `__@ma-ia__.`). Left on, the collapsed fallback below would read `maia`
-    // and could reach another bot. A token that is itself a room handle as written keeps them.
-    const handle = handles.has(written) ? written : written.replace(/[._-]+$/, '')
+    // and could reach another bot. Peel one separator at a time and keep the longest spelling
+    // that is a room handle as written (`@maia_.` keeps a handle `maia_`); only when none is
+    // does the fully trimmed token go on to the collapsed fallback.
+    let handle = written
+
+    while (!handles.has(handle) && /[._-]$/.test(handle)) {
+      handle = handle.slice(0, -1)
+    }
 
     if (handle === 'everyone' || handle === 'all') {
       everyone = true
