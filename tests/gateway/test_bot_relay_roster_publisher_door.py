@@ -1,5 +1,6 @@
 """The canonical gateway's ``bot_relay.roster.sync`` door takes the pushing Desktop's ``publisher``
 (#139219): each Desktop's push replaces only its own slice, as on the tui_gateway door."""
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -26,5 +27,20 @@ def test_session_door_merges_publishers(tmp_path):
         assert [r['profile'] for r in bot_relay.read_remote_roster(home)] == ['alice', 'bob']
         with pytest.raises(RuntimeStoreError, match='invalid_params'):
             _push(authority, {'agents': [], 'other': 1})
+    finally:
+        db.close()
+
+
+def test_session_door_drains_for_the_named_publisher(tmp_path):
+    db, authority, _execute, _returned = _authority(tmp_path, _Agent())
+    try:
+        door = SimpleNamespace(authority=authority, actor=CRON)
+        env = bot_relay.enqueue_envelope(tmp_path, target={'connection_id': 'lan', 'profile': 'scout', 'handle': 'scout'},
+                                         message='hi', sender_profile='ops', sender_handle='ops')
+        path = bot_relay.relay_root(tmp_path) / 'outbox' / f"{env['id']}.json"
+        path.write_text(json.dumps({**env, 'target_publishers': ['desktop-aaaaaaaaaaaa']}))
+        assert session_bot.relay_operation(door, 'outbox', {}) == {'envelopes': []}
+        drained = session_bot.relay_operation(door, 'outbox', {'publisher': 'desktop-aaaaaaaaaaaa'})
+        assert [e['id'] for e in drained['envelopes']] == [env['id']]
     finally:
         db.close()

@@ -14,6 +14,7 @@ when the target is definitively offline (fail fast instead of queueing a DM nobo
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Optional
+from typing import Any, Callable, Iterator, Mapping, Optional
 
 from tools.bot_mode_probe import _default_home, _hermes_root, alias_forms
 from utils import atomic_json_write, unlink_files_older_than
@@ -511,9 +512,50 @@ def _queued_at(path: Path) -> tuple[float, str]:
     return (0.0, path.name)
 
 
-def claim_pending_envelopes(root: Path | str) -> list[dict]:
-    """Drain the outbox (rename → claimed/ so a second drain can't double-deliver).
-    TTL-expired envelopes get a 'queued_expired' reply and are removed instead.
+def _drainer_relays(root: Path | str, drainer: str, now: float) -> Callable[[dict], bool]:
+    """``relays(envelope)``: whether ``drainer``'s fresh roster slice lists the envelope's target
+    machine RIGHT NOW. Read once per drain; an unreadable roster lists nothing."""
+    try:
+        stamp, rows = _roster_slices(root).get(drainer, (0.0, []))
+    except Exception:
+        logger.debug("bot_relay drainer roster read failed", exc_info=True)
+        stamp, rows = 0.0, []
+    rows = rows if now - stamp <= ROSTER_FRESH_SECONDS else []
+
+    def relays(envelope: dict) -> bool:
+        target = {"connection_id": envelope.get("target_connection"), "profile": envelope.get("target_profile"),
+                  "install_id": envelope.get("target_install") or None}
+        return any(_lists_target(row, target) for row in rows)
+    return relays
+
+
+def _offered_to(envelope: dict, drainer: str, relays: Callable[[dict], bool]) -> bool:
+    """Whether the Desktop window ``drainer`` (a ``_publisher_key``) may claim ``envelope``
+    (#139219). One that lists publishers goes to the Desktops that relay its target's machine —
+    those listed at send time, or one whose fresh slice lists that machine now (a restarted
+    Desktop window has a new id) — while another Desktop may call a different machine by the
+    same connection name. An older Desktop drains with no publisher (``LEGACY_PUBLISHER``) and
+    ignores both targeting fields, so it never gets an envelope naming a machine it does not list.
+    An envelope naming no publisher (stale or unreadable roster at send time) stays everyone's."""
+    listed = envelope.get("target_publishers")
+    if isinstance(listed, list) and listed:
+        return drainer in {str(item) for item in listed} or relays(envelope)
+    return drainer != LEGACY_PUBLISHER or not envelope.get("target_install") or relays(envelope)
+
+
+def _read_envelope(path: Path) -> Optional[dict]:
+    with contextlib.suppress(OSError, ValueError):
+        envelope = json.loads(path.read_text(encoding="utf-8-sig"))
+        if isinstance(envelope, dict):
+            return envelope
+    return None
+
+
+def claim_pending_envelopes(root: Path | str, publisher: Any = None) -> list[dict]:
+    """Drain the outbox (rename → claimed/ so a second drain can't double-deliver) for the Desktop
+    window ``publisher`` (none: an older Desktop): an envelope it is not offered (``_offered_to``)
+    stays queued for the Desktops that are. TTL-expired envelopes get a 'queued_expired' reply and
+    are removed instead, whoever drains.
 
     Envelopes older than ``bot_mode.envelope_ttl_seconds`` are NOT delivered: each gets an error reply
     (reason ``'queued_expired'``) so the sender's waiter resolves, and its outbox file is removed (#93091
@@ -523,6 +565,8 @@ def claim_pending_envelopes(root: Path | str) -> list[dict]:
     _sweep_stale(base)
     ttl = _envelope_ttl_seconds()
     now = time.time()
+    drainer = _publisher_key(publisher)
+    offered = functools.partial(_offered_to, drainer=drainer, relays=_drainer_relays(root, drainer, now))
     out: list[tuple[tuple[float, str], dict]] = []
     # Oldest first: the Desktop delivers each target's claimed envelopes in the order this list
     # gives them, so a sender's two DMs to one agent arrive in the order they were sent. Sorting
@@ -531,6 +575,9 @@ def claim_pending_envelopes(root: Path | str) -> list[dict]:
         if ttl > 0 and _expire_if_stale(root, path, ttl, now):
             with contextlib.suppress(OSError):
                 path.unlink()
+            continue
+        # Envelope files are written once (atomically), so this read is what the claim moves.
+        if (queued := _read_envelope(path)) is not None and not offered(queued):
             continue
         claimed = base / CLAIMED_DIR / path.name
         order = _queued_at(path)
@@ -543,11 +590,12 @@ def claim_pending_envelopes(root: Path | str) -> list[dict]:
     seen = {row["id"] for _order, row in out}
     # One enqueue-ordered list: a claimed-but-unanswered DM (Desktop reconnected before its reply)
     # is OLDER than mail queued since, so appending replays after fresh rows reversed them.
-    out.extend(_replay_unanswered(root, base, seen, now))
+    out.extend(_replay_unanswered(root, base, seen, now, offered))
     return [envelope for _order, envelope in sorted(out, key=lambda item: item[0])]
 
 
-def _replay_unanswered(root: Path | str, base: Path, seen: set, now: float) -> list[tuple[tuple[float, str], dict]]:
+def _replay_unanswered(root: Path | str, base: Path, seen: set, now: float,
+                       offered: Callable[[dict], bool]) -> list[tuple[tuple[float, str], dict]]:
     """``claimed/`` canonical envelopes whose reply has not landed yet, replayed on EVERY drain.
 
     A drained envelope is not "delivered": its stable id is handed out again until the target's
@@ -581,7 +629,8 @@ def _replay_unanswered(root: Path | str, base: Path, seen: set, now: float) -> l
                     f"no reply from {label} within {REPLY_WAIT_SECONDS}s of sending — the Desktop picked "
                     "the message up but never reported a delivery. It will not be retried; resend if it matters."))
                 continue
-            out.append((_queued_at(path), envelope))
+            if offered(envelope):
+                out.append((_queued_at(path), envelope))
     return out
 
 

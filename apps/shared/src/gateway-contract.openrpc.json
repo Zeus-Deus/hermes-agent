@@ -7426,6 +7426,18 @@
             ],
             "default": null,
             "title": "Profile"
+          },
+          "publisher": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Publisher"
           }
         },
         "title": "BotRelayOutboxDrainParams",

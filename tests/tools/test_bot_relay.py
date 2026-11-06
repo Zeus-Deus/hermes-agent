@@ -298,6 +298,71 @@ def test_a_row_without_install_never_borrows_another_machines(root):
     assert bot_relay.resolve_remote_target("scout@homelab", roster) == "ambiguous"
 
 
+def test_drain_offers_a_targeted_envelope_only_to_the_desktops_it_names(root):
+    """An older Desktop (no publisher, ignores the targeting fields) lists Red Bot as
+    ``homelab/scout``; a newer Desktop lists Blue Bot, another machine, under the same name. A
+    unique title slug still queues for Blue Bot, so the GATEWAY must keep that envelope from the
+    older Desktop's drain — it would deliver it to its own Red Bot. A drain is offered an envelope
+    that lists publishers only when it is one of them (a drain naming no publisher is the legacy
+    one); an untargeted envelope stays everyone's, as before."""
+    new, other = "desktop-bbbbbbbbbbbb", "desktop-cccccccccccc"
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", title="Red Bot")])
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id="2" * 32, title="Blue Bot")], new)
+    roster = bot_relay.read_remote_roster(root)
+    blue = bot_relay.enqueue_envelope(root, target=bot_relay.resolve_remote_target("blue-bot", roster),
+                                      message="hello Blue", sender_profile="work", sender_handle="work")
+    assert blue["target_publishers"] == [new]
+    ids = lambda envs: [e["id"] for e in envs]
+    assert bot_relay.claim_pending_envelopes(root) == []  # the older Desktop never sees it
+    assert bot_relay.claim_pending_envelopes(root, other) == []  # nor a Desktop it does not name
+    assert ids(bot_relay.claim_pending_envelopes(root, new)) == [blue["id"]]
+    # the unanswered claim replays to the named Desktop only
+    assert bot_relay.claim_pending_envelopes(root) == []
+    assert bot_relay.claim_pending_envelopes(root, other) == []
+    assert ids(bot_relay.claim_pending_envelopes(root, new)) == [blue["id"]]
+    bot_relay.write_reply(root, blue["id"], reply="hi")
+    # Red Bot is the older Desktop's: its legacy drain gets it, the newer Desktop's does not
+    red = bot_relay.enqueue_envelope(root, target=bot_relay.resolve_remote_target("red-bot", roster),
+                                     message="hello Red", sender_profile="work", sender_handle="work")
+    assert red["target_publishers"] == [bot_relay.LEGACY_PUBLISHER]
+    assert bot_relay.claim_pending_envelopes(root, new) == []
+    assert ids(bot_relay.claim_pending_envelopes(root, "")) == [red["id"]]
+    bot_relay.write_reply(root, red["id"], reply="hi")
+
+
+def test_a_restarted_desktop_window_still_gets_the_mail_its_machine_was_sent(root):
+    """A Desktop app restart gives its window a new publisher id while envelopes queued (or
+    claimed and unanswered, #111021) before it still list the old one. The drain offers them to a
+    Desktop whose fresh slice lists the target machine NOW, so the replay is not stranded — while
+    a Desktop listing only another machine of that name still never gets them."""
+    old, restarted, legacy_row = "desktop-aaaaaaaaaaaa", "desktop-dddddddddddd", _row("scout", "homelab", title="Red Bot")
+    bot_relay.write_remote_roster(root, [legacy_row])
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id="2" * 32, title="Blue Bot")], old)
+    blue = bot_relay.enqueue_envelope(root, target=bot_relay.resolve_remote_target("blue-bot", bot_relay.read_remote_roster(root)),
+                                      message="hi", sender_profile="w", sender_handle="w")
+    assert [e["id"] for e in bot_relay.claim_pending_envelopes(root, old)] == [blue["id"]]  # claimed, then the app quits
+    assert bot_relay.claim_pending_envelopes(root, restarted) == []  # its new window has not pushed yet
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id="2" * 32, title="Blue Bot")], restarted)
+    assert [e["id"] for e in bot_relay.claim_pending_envelopes(root, restarted)] == [blue["id"]]
+    assert bot_relay.claim_pending_envelopes(root) == []  # the older Desktop's Red Bot is another machine
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id="9" * 32)], "desktop-eeeeeeeeeeee")
+    assert bot_relay.claim_pending_envelopes(root, "desktop-eeeeeeeeeeee") == []
+
+
+def test_drain_hands_an_untargeted_envelope_to_any_desktop(root):
+    """No publisher listed it (stale or unreadable roster at send time): any drain takes it, as
+    before the slices — except one naming a machine an older Desktop could not check."""
+    loose = bot_relay.enqueue_envelope(root, target=_target(), message="hi", sender_profile="w", sender_handle="w")
+    assert "target_publishers" not in loose
+    assert [e["id"] for e in bot_relay.claim_pending_envelopes(root)] == [loose["id"]]
+    bot_relay.write_reply(root, loose["id"], reply="ok")
+    pinned = bot_relay.enqueue_envelope(root, target={**_target(), "install_id": "3" * 32}, message="hi",
+                                        sender_profile="w", sender_handle="w")
+    assert "target_publishers" not in pinned and pinned["target_install"] == "3" * 32
+    assert bot_relay.claim_pending_envelopes(root) == []  # the older Desktop ignores target_install
+    assert [e["id"] for e in bot_relay.claim_pending_envelopes(root, "desktop-aaaaaaaaaaaa")] == [pinned["id"]]
+
+
 def test_sender_stamp_on_a_colliding_connection_name_names_no_single_machine(root):
     """A relayed DM from ``scout`` on ``homelab``, while two Desktops each call a different machine
     ``homelab``: the stamp must not be either row's title slug (a reply would reach that one

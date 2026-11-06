@@ -59,10 +59,12 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
 @method("bot_relay.outbox.drain")
 def _(rid, params: dict, _root=_relay_root) -> dict:
     """Claim every pending cross-connection envelope queued here → ``{envelopes}``; claimed
-    envelopes move to ``claimed/`` atomically so concurrent drains can't double-deliver."""
+    envelopes move to ``claimed/`` atomically so concurrent drains can't double-deliver.
+    ``publisher`` names the draining Desktop window: an envelope listing the Desktops that relay
+    its target goes to those only (#139219); a drain without one is an older Desktop's."""
     try:
         from tools.bot_relay import claim_pending_envelopes
-        return _ok(rid, {"envelopes": claim_pending_envelopes(_root())})
+        return _ok(rid, {"envelopes": claim_pending_envelopes(_root(), params.get("publisher"))})
     except Exception as e:
         return _err(rid, 5091, str(e))
 

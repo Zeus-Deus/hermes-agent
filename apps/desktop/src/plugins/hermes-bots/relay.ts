@@ -821,11 +821,7 @@ async function drainRelayOutboxes() {
       }
 
       try {
-        const res = await host.requestProfile<{ envelopes?: RelayEnvelope[] }>(
-          sender.route,
-          'bot_relay.outbox.drain',
-          {}
-        )
+        const res = await drainRelayOutbox(sender.route)
 
         const pending = pendingRelaysFor(sender)
         const offered = Array.isArray(res?.envelopes) ? res.envelopes : []
@@ -870,6 +866,23 @@ async function drainRelayOutboxes() {
       relay.drainRerun = false
       scheduleRelayPushDrain()
     }
+  }
+}
+
+/** Claim `route`'s outbox as this window: the gateway offers an envelope that lists the Desktops
+ *  relaying its target to those only (#139219). A gateway from before the slices refuses the key
+ *  and drains the legacy way. */
+async function drainRelayOutbox(route: ProfileRoute): Promise<{ envelopes?: RelayEnvelope[] }> {
+  try {
+    return await host.requestProfile<{ envelopes?: RelayEnvelope[] }>(route, 'bot_relay.outbox.drain', {
+      publisher: rosterPublisher()
+    })
+  } catch (error: any) {
+    if (!refusedPublisher(error)) {
+      throw error
+    }
+
+    return host.requestProfile<{ envelopes?: RelayEnvelope[] }>(route, 'bot_relay.outbox.drain', {})
   }
 }
 
@@ -1099,6 +1112,10 @@ async function deliverRelayEnvelope(
     return
   }
 
+  // The install check below can outlast this relay: stopBotRelay() (or a stop and restart) or
+  // Bot Mode turned off while it runs must stop the delivery, so the lifecycle is fenced too.
+  const generation = relay.rosterGeneration
+
   const release = target ? await holdTarget(deliveryRouteOf(target, envelope), envelope) : () => {}
 
   if (release === null) {
@@ -1110,9 +1127,14 @@ async function deliverRelayEnvelope(
 
   try {
     // The check can outlast a drain that no longer offers the envelope (answered or timed out
-    // meanwhile, forgetSettledPins): only a still-pinned envelope goes out.
-    if (pending.has(envelopeId)) {
+    // meanwhile, forgetSettledPins): only a still-pinned envelope goes out, and only from the
+    // relay run that started the check.
+    if (!relay.disposed && relay.rosterGeneration === generation && relayBotModeOn() && pending.has(envelopeId)) {
       await deliverOrAnswer(sender, envelope, envelopeId, target, pending)
+    } else if (!relay.disposed && pending.has(envelopeId)) {
+      // Bot Mode off, or a relay restarted meanwhile: still unanswered, so the gateway re-offers
+      // it and the running relay's backstop drain checks it again.
+      noteRelayOutboxWork({ connectionId: sender.id })
     }
   } finally {
     release()

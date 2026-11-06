@@ -1935,6 +1935,7 @@ export interface BotRelayRosterSyncResult {
 }
 export interface BotRelayOutboxDrainParams {
   profile?: string | null
+  publisher?: string | null
 }
 export interface BotRelayOutboxDrainResult {
   envelopes: RelayEnvelope[]

@@ -250,6 +250,47 @@ describe('each Desktop pushes its roster as its own slice (#139219)', () => {
     }
   )
 
+  it.each([undefined, 'canonical', 'tui'] as const)(
+    'drains as this window (gateway door predating it: %s), so the gateway offers only its mail',
+    async door => {
+      const envelope = { from_handle: 'ops', from_profile: 'ops', id: 'env-d', message: 'hi', target_connection: 'srv', target_profile: 'scout' }
+
+      const calls = respondWith(call => {
+        if (call.method === 'profiles.list') {
+          return call.connectionId === 'local'
+            ? { install_id: INSTALL, profiles: [{ name: 'ops' }] }
+            : { install_id: 'f'.repeat(32), profiles: [{ name: 'scout' }] }
+        }
+
+        if (call.method === 'bot_relay.outbox.drain') {
+          if (door && 'publisher' in call.params) {
+            throw REFUSALS[door]()
+          }
+
+          return { envelopes: call.connectionId === 'local' ? [envelope] : [] }
+        }
+
+        if (call.method === 'bot_relay.deliver') {
+          return { status: 'settled', delivery_id: call.params.id, admission_id: 'admission', reply: 'done' }
+        }
+
+        return {}
+      })
+
+      const { startBotRelay, stopBotRelay } = await loadRelay()
+
+      startBotRelay()
+      await vi.advanceTimersByTimeAsync(0)
+      await pushAndSettle()
+      stopBotRelay()
+
+      const drains = calls.filter(call => call.method === 'bot_relay.outbox.drain' && call.connectionId === 'local')
+
+      expect(drains.map(call => call.params)).toEqual(door ? [{ publisher: PUBLISHER }, {}] : [{ publisher: PUBLISHER }])
+      expect(calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.connectionId)).toEqual(['srv'])
+    }
+  )
+
   describe('an envelope only another Desktop relays is left to it', () => {
     function drainOne(envelope: Record<string, unknown>) {
       return respondWith(call => {
@@ -536,6 +577,117 @@ describe('each Desktop pushes its roster as its own slice (#139219)', () => {
       stopBotRelay()
 
       expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
+    })
+
+    describe('a relay lifecycle change while the install check runs stops that delivery', () => {
+      const envelope = { ...base, canonical_delivery_v1: true, target_connection: 'srv', target_install: 'f'.repeat(32) }
+      const SRV_LIST = { install_id: 'f'.repeat(32), profiles: [{ name: 'scout' }] }
+
+      function holdChecks() {
+        const checks: Array<(value: unknown) => void> = []
+
+        const calls = respondWith(call => {
+          if (call.method === 'profiles.list') {
+            if (call.connectionId === 'srv' && call.route.profile === 'scout') {
+              return new Promise(resolve => checks.push(resolve))
+            }
+
+            return call.connectionId === 'local' ? { install_id: INSTALL, profiles: [{ name: 'ops' }] } : SRV_LIST
+          }
+
+          if (call.method === 'bot_relay.outbox.drain') {
+            return { envelopes: call.connectionId === 'local' ? [envelope] : [] }
+          }
+
+          if (call.method === 'bot_relay.deliver') {
+            return { status: 'settled', delivery_id: call.params.id, admission_id: 'admission', reply: 'done' }
+          }
+
+          return {}
+        })
+
+        return { calls, checks }
+      }
+
+      it('stopBotRelay() during the check: no delivery', async () => {
+        const { calls, checks } = holdChecks()
+        const { startBotRelay, stopBotRelay } = await loadRelay()
+
+        startBotRelay()
+        await vi.advanceTimersByTimeAsync(0)
+        await pushAndSettle() // the install check is now waiting on 'srv'
+        expect(checks).toHaveLength(1)
+        stopBotRelay()
+        checks[0](SRV_LIST)
+        await vi.advanceTimersByTimeAsync(0)
+
+        expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
+      })
+
+      it('stop and restart during the check: the old check delivers nothing', async () => {
+        const { calls, checks } = holdChecks()
+        const { startBotRelay, stopBotRelay } = await loadRelay()
+
+        startBotRelay()
+        await vi.advanceTimersByTimeAsync(0)
+        await pushAndSettle()
+        expect(checks).toHaveLength(1)
+        stopBotRelay()
+        startBotRelay()
+        await vi.advanceTimersByTimeAsync(0)
+        checks[0](SRV_LIST)
+        await vi.advanceTimersByTimeAsync(0)
+
+        expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
+
+        // Not lost: the restarted relay's backstop drain checks it again and delivers it once.
+        await vi.advanceTimersByTimeAsync(30_000)
+        expect(checks).toHaveLength(2)
+        checks[1](SRV_LIST)
+        await vi.advanceTimersByTimeAsync(0)
+        stopBotRelay()
+
+        expect(calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.connectionId)).toEqual(['srv'])
+      })
+
+      it('Bot Mode turned off during the check: no delivery', async () => {
+        const { calls, checks } = holdChecks()
+        const { startBotRelay, stopBotRelay } = await loadRelay()
+
+        startBotRelay()
+        await vi.advanceTimersByTimeAsync(0)
+        await pushAndSettle()
+        expect(checks).toHaveLength(1)
+        window.localStorage.setItem(PLUGIN_DECISIONS_KEY, JSON.stringify({ 'hermes-bots': false }))
+        checks[0](SRV_LIST)
+        await vi.advanceTimersByTimeAsync(30_000)
+
+        expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
+
+        // Bot Mode back on: the backstop drain picks the envelope up again, no new event needed.
+        window.localStorage.setItem(PLUGIN_DECISIONS_KEY, JSON.stringify({ 'hermes-bots': true }))
+        await vi.advanceTimersByTimeAsync(30_000)
+        expect(checks).toHaveLength(2)
+        checks[1](SRV_LIST)
+        await vi.advanceTimersByTimeAsync(0)
+        stopBotRelay()
+
+        expect(calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.connectionId)).toEqual(['srv'])
+      })
+
+      it('nothing changes during the check: delivered once it answers', async () => {
+        const { calls, checks } = holdChecks()
+        const { startBotRelay, stopBotRelay } = await loadRelay()
+
+        startBotRelay()
+        await vi.advanceTimersByTimeAsync(0)
+        await pushAndSettle()
+        checks[0](SRV_LIST)
+        await vi.advanceTimersByTimeAsync(0)
+        stopBotRelay()
+
+        expect(calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.connectionId)).toEqual(['srv'])
+      })
     })
 
     it('a same-named connection answering from another install is not the target', async () => {

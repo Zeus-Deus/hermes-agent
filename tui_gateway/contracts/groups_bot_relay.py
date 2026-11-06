@@ -609,7 +609,9 @@ method("bot_relay.roster.sync", params=BotRelayRosterSyncParams, result=BotRelay
 
 
 class BotRelayOutboxDrainParams(ProfileParams):
-    pass
+    # The draining Desktop window (the roster push's ``publisher``): an envelope that lists the
+    # Desktops relaying its target is offered to those only. Absent = an older Desktop's drain.
+    publisher: str | None = None
 
 
 class RelayEnvelope(OpenModel):

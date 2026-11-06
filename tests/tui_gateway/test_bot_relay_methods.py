@@ -78,6 +78,22 @@ def test_roster_sync_contract_accepts_the_publisher():
     assert canonical_param_problems(contract, {"agents": [], "publisher": "local-aaaaaaaaaaaa"}) == []
 
 
+def test_outbox_drain_offers_a_targeted_envelope_only_to_its_publishers(home):
+    """#139219: the drain names the draining Desktop; an envelope listing publishers is offered to
+    those only, and a drain naming none (an older Desktop, which ignores the targeting) gets only
+    untargeted mail."""
+    from tui_gateway.contracts.registry import METHODS, canonical_param_problems
+    assert canonical_param_problems(METHODS["bot_relay.outbox.drain"], {"publisher": "desktop-aaaaaaaaaaaa"}) == []
+    env = bot_relay.enqueue_envelope(home, target={"connection_id": "lan", "profile": "scout", "handle": "scout"},
+                                     message="hi", sender_profile="ops", sender_handle="ops")
+    path = home / "bot_relay" / "outbox" / f"{env['id']}.json"
+    path.write_text(json.dumps({**env, "target_publishers": ["desktop-aaaaaaaaaaaa"]}))
+    drain = srv._methods["bot_relay.outbox.drain"]
+    assert _result(drain(1, {}))["envelopes"] == []
+    assert _result(drain(2, {"publisher": "desktop-bbbbbbbbbbbb"}))["envelopes"] == []
+    assert [e["id"] for e in _result(drain(3, {"publisher": "desktop-aaaaaaaaaaaa"}))["envelopes"]] == [env["id"]]
+
+
 def test_outbox_drain_replays_canonical_envelope_until_reply_acknowledged(home):
     """A drained envelope is not "delivered" — its stable id is replayed on every
     drain until the target's terminal reply is written under that id, so a
