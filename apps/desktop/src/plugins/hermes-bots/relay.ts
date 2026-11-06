@@ -258,9 +258,9 @@ function listedForOthers(envelope: RelayEnvelope): boolean {
 /** The install the target connection answers from right now ('' when it reports none), or
  *  null when it could not be asked. Asked per envelope that names a target install: a
  *  connection repointed since the last roster fetch would pass a cached check. */
-async function liveInstall(target: RelayConnection): Promise<null | string> {
+async function liveInstall(route: ProfileRoute): Promise<null | string> {
   try {
-    const res = await host.requestProfile<{ install_id?: string }>(target.route, 'profiles.list', {
+    const res = await host.requestProfile<{ install_id?: string }>(route, 'profiles.list', {
       include_sessions: false
     })
 
@@ -278,16 +278,53 @@ async function liveInstall(target: RelayConnection): Promise<null | string> {
  *  Desktop's connection of that name is the machine the envelope names. 'other' — it answers
  *  from another install, or reports none (the target's gateway did); 'unknown' — it could not
  *  be asked, so the envelope waits for a later drain instead of being delivered on a guess. */
-async function targetInstallMatch(target: RelayConnection, envelope: RelayEnvelope): Promise<'other' | 'ok' | 'unknown'> {
+async function targetInstallMatch(route: ProfileRoute, want: string): Promise<'other' | 'ok' | 'unknown'> {
+  const have = await liveInstall(route)
+
+  return have === null ? 'unknown' : have === want ? 'ok' : 'other'
+}
+
+/** The route an envelope is delivered on: the target connection, scoped to the target profile. */
+function deliveryRouteOf(target: RelayConnection, envelope: RelayEnvelope): ProfileRoute {
+  return { ...target.route, profile: String(envelope.target_profile), targetProfile: String(envelope.target_profile) }
+}
+
+/** Pin `route`'s socket for one delivery once it answers from the install the envelope names:
+ *  the check and the delivery then ride ONE socket (the pool keys sockets per connection and
+ *  profile, so a representative route could answer from the machine before an edit). Returns
+ *  the release, or null when the envelope must wait (other install, or none could be asked). */
+async function holdTarget(route: ProfileRoute, envelope: RelayEnvelope): Promise<(() => void) | null> {
   const want = String(envelope?.target_install || '').toLowerCase()
 
   if (!want) {
-    return 'ok'
+    return () => {}
   }
 
-  const have = await liveInstall(target)
+  let held: unknown = null
 
-  return have === null ? 'unknown' : have === want ? 'ok' : 'other'
+  try {
+    held = typeof host.retainProfileSocket === 'function' ? host.retainProfileSocket(route) : null
+  } catch {
+    held = null
+  }
+
+  const release = () => {
+    try {
+      if (typeof held === 'function') {
+        held()
+      }
+    } catch {
+      // Disposer from an older shell shape — never break delivery.
+    }
+  }
+
+  if ((await targetInstallMatch(route, want)) === 'ok') {
+    return release
+  }
+
+  release()
+
+  return null
 }
 
 /** A gateway from before the slices refusing the unknown `publisher` key: the canonical door
@@ -990,13 +1027,19 @@ function actionableTarget(
 ): RelayConnection | null | undefined {
   const target = relayTargetOf(String(envelope?.target_connection || ''), byId)
 
-  if (target === 'foreign' || (target === undefined && listedForOthers(envelope))) {
+  if (target === 'foreign') {
     pending.delete(envelopeId)
 
     return null
   }
 
-  if (target === 'unresolved' || (sender.id === LOCAL_CONNECTION_ID && localRelayId === null)) {
+  // Left to the listed Desktops, but re-checked on later drains: this Desktop may gain the
+  // connection, or be the only one left relaying it.
+  if (
+    target === 'unresolved' ||
+    (target === undefined && listedForOthers(envelope)) ||
+    (sender.id === LOCAL_CONNECTION_ID && localRelayId === null)
+  ) {
     noteRelayOutboxWork({ connectionId: sender.id })
 
     return null
@@ -1027,18 +1070,31 @@ async function deliverRelayEnvelope(
     return
   }
 
-  const match = target ? await targetInstallMatch(target, envelope) : 'ok'
+  const release = target ? await holdTarget(deliveryRouteOf(target, envelope), envelope) : () => {}
 
-  if (match !== 'ok') {
-    if (match === 'other') {
-      pending.delete(envelopeId)
-    } else {
-      noteRelayOutboxWork({ connectionId: sender.id })
-    }
+  if (release === null) {
+    // Not the machine the envelope names, or that could not be checked: a later drain re-checks.
+    noteRelayOutboxWork({ connectionId: sender.id })
 
     return
   }
 
+  try {
+    await deliverOrAnswer(sender, envelope, envelopeId, target, pending)
+  } finally {
+    release()
+  }
+}
+
+/** Deliver `envelope` on `target` (or answer that its connection is not here) and post the
+ *  reply back to the sender gateway for its waiter. */
+async function deliverOrAnswer(
+  sender: RelayConnection,
+  envelope: RelayEnvelope,
+  envelopeId: string,
+  target: RelayConnection | undefined,
+  pending: Map<string, RelayEnvelope>
+) {
   const postReply = async (payload: { error?: string; reason?: string; reply?: string }) => {
     try {
       await host.requestProfile(sender.route, 'bot_relay.reply', {
@@ -1065,7 +1121,7 @@ async function deliverRelayEnvelope(
 
   try {
     const res = await host.requestProfile<RelayDeliverResult>(
-      { ...target.route, profile: String(envelope.target_profile), targetProfile: String(envelope.target_profile) },
+      deliveryRouteOf(target, envelope),
       'bot_relay.deliver',
       relayDeliverParams(sender, envelope, envelopeId),
       RELAY_DELIVER_TIMEOUT_MS

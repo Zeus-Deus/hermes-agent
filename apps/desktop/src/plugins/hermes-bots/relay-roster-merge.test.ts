@@ -377,6 +377,77 @@ describe('each Desktop pushes its roster as its own slice (#139219)', () => {
       stopBotRelay()
     })
 
+    it('checks the install on the delivery route itself, pinned through the delivery', async () => {
+      const pins: { released: boolean; route: ProfileRoute }[] = []
+
+      ;(hostMock.retainProfileSocket as ReturnType<typeof vi.fn>).mockImplementation((pinned: ProfileRoute) => {
+        const pin = { released: false, route: structuredClone(pinned) }
+
+        pins.push(pin)
+
+        return () => {
+          pin.released = true
+        }
+      })
+
+      const calls = drainOne({ ...base, target_connection: 'srv', target_install: 'f'.repeat(32) })
+      const { startBotRelay, stopBotRelay } = await loadRelay()
+
+      startBotRelay()
+      await vi.advanceTimersByTimeAsync(0)
+      const before = calls.length
+      await pushAndSettle()
+
+      const deliveryRoute = { ...route('srv'), profile: 'scout', targetProfile: 'scout' }
+      const after = calls.slice(before).filter(call => call.connectionId === 'srv' && call.method !== 'bot_relay.outbox.drain')
+
+      expect(after.map(call => [call.method, call.route])).toEqual([
+        ['profiles.list', deliveryRoute],
+        ['bot_relay.deliver', deliveryRoute]
+      ])
+      expect(pins.filter(pin => pin.route.profile === 'scout')).toEqual([{ released: true, route: deliveryRoute }])
+
+      stopBotRelay()
+    })
+
+    it('an envelope left to another install is re-checked by the backstop drain, no new event needed', async () => {
+      let srvInstall = 'e'.repeat(32)
+
+      const calls = respondWith(call => {
+        if (call.method === 'profiles.list') {
+          return call.connectionId === 'local'
+            ? { install_id: INSTALL, profiles: [{ name: 'ops' }] }
+            : { install_id: srvInstall, profiles: [{ name: 'scout' }] }
+        }
+
+        if (call.method === 'bot_relay.outbox.drain') {
+          return { envelopes: call.connectionId === 'local' ? [{ ...base, target_connection: 'srv', target_install: 'f'.repeat(32) }] : [] }
+        }
+
+        if (call.method === 'bot_relay.deliver') {
+          return { status: 'settled', delivery_id: call.params.id, admission_id: 'admission', reply: 'done' }
+        }
+
+        return {}
+      })
+
+      const { startBotRelay, stopBotRelay } = await loadRelay()
+      const delivered = () => calls.filter(call => call.method === 'bot_relay.deliver')
+
+      startBotRelay()
+      await vi.advanceTimersByTimeAsync(0)
+      await pushAndSettle()
+
+      expect(delivered()).toEqual([])
+
+      srvInstall = 'f'.repeat(32) // the connection is pointed back at the target's machine
+      await vi.advanceTimersByTimeAsync(30_000)
+
+      expect(delivered().map(call => call.connectionId)).toEqual(['srv'])
+
+      stopBotRelay()
+    })
+
     it('a same-named connection answering from another install is not the target', async () => {
       expect(await run({ ...base, target_connection: 'srv', target_install: 'e'.repeat(32) })).toEqual([])
 
