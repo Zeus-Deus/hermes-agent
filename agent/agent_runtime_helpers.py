@@ -34,7 +34,7 @@ from agent.error_classifier import FailoverReason
 from agent.retry_utils import parse_retry_after_seconds, reset_delay_from_message
 from agent.message_metadata import MERGED_TURN_PREFIX
 from agent.turn_context import drop_stale_api_content
-from agent.agent_runtime_helpers_placeholders import _INTERRUPTED_PLACEHOLDER
+from agent.agent_runtime_helpers_placeholders import _INTERRUPTED_PLACEHOLDER, stale_unanswered_turn_prefix
 from agent.primary_runtime_snapshot import _build_primary_runtime_snapshot
 from utils import base_url_host_matches, base_url_hostname, env_var_enabled, atomic_json_write
 logger = logging.getLogger(__name__)
@@ -686,9 +686,9 @@ def _merge_consecutive_users(messages: list[dict]) -> tuple[list[dict], int]:
             and _plain_text(prev.get("content", "")) and _plain_text(msg.get("content", ""))
         ):
             prev_content, new_content = prev.get("content", ""), msg.get("content", "")
-            merged_content = (
-                (prev_content + "\n\n" + new_content) if prev_content and new_content else (prev_content or new_content)
-            )
+            # A stale unanswered turn is labelled so the new one is not read as continuing it.
+            prefix = stale_unanswered_turn_prefix(prev, msg, prev_content, new_content) or prev_content
+            merged_content = (prefix + "\n\n" + new_content) if prefix and new_content else (prefix or new_content)
             had_api_sidecar = "api_content" in prev
             # Read before the marker is popped below. An unpersisted turn folded in ends the claim:
             # the dict no longer stands for durable rows only.
@@ -699,8 +699,8 @@ def _merge_consecutive_users(messages: list[dict]) -> tuple[list[dict], int]:
             prev["content"] = merged_content
             # The clean-text persist override must replace only the absorbed turn, never the
             # unanswered text before it; kept across replay passes (an empty turn absorbs too).
-            if prev_content:
-                prev[MERGED_TURN_PREFIX] = prev_content
+            if prefix:
+                prev[MERGED_TURN_PREFIX] = prefix
             # Merged content invalidates the api_content sidecar; drop it so replay cannot use stale bytes.
             drop_stale_api_content(prev)
             # A display-marker row (e.g. a model-switch marker persisted as role=user on

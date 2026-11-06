@@ -1,0 +1,202 @@
+"""A stale unanswered user turn merged with a new one is labelled, never passed off as the new request.
+
+A process death between a turn's start and its reply leaves that prompt in the store with no
+assistant row. Once the crash marker has aged out nothing re-sends it, so the next message (a
+person's, or a bot DM delivered days later) lands right behind it and the alternation repair folds
+both into one user turn. Providers reject consecutive user turns, so the merge stays; what changes
+is that an old unanswered part is labelled as such and the new part is marked as the current
+request. A quick double send keeps the plain ``"\\n\\n"`` join.
+"""
+
+import pytest
+
+from agent.agent_runtime_helpers import repair_message_sequence
+from agent.message_metadata import MERGED_TURN_PREFIX
+from agent.session_persistence import SessionPersistenceMixin, _db_flush_row
+from hermes_state import SessionDB
+from tests.agent import test_in_place_preflight_rewind as rewind
+
+session = rewind.session  # shared fixture: AIAgent with a mocked client over a temp SessionDB
+
+OLD_TS = 1_756_060_279.0  # 2025-08-24 18:31:19 UTC
+DAYS_LATER = OLD_TS + 5 * 24 * 3600
+STALE_ASK = "Tell me which workspace I'm on."
+DM = "Message from bot (@bob): please investigate X"
+
+
+def _history(old_ts, new_ts, **extra):
+    return [
+        {"role": "user", "content": "earlier question"},
+        {"role": "assistant", "content": "earlier answer"},
+        {"role": "user", "content": STALE_ASK, "timestamp": old_ts, **extra},
+        {"role": "user", "content": DM, "timestamp": new_ts},
+    ]
+
+
+def test_stale_unanswered_prompt_is_labelled_and_new_message_marked_current():
+    messages = _history(OLD_TS, DAYS_LATER)
+
+    assert repair_message_sequence(None, messages) == 1
+
+    # One provider turn (strict alternation), both texts kept, in order.
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    merged = messages[2]["content"]
+    assert merged != f"{STALE_ASK}\n\n{DM}"
+    old_label, rest = merged.split(f"\n\n{STALE_ASK}\n\n", 1)
+    new_label, new_text = rest.split("\n\n", 1)
+    assert new_text == DM
+    assert old_label == "[Earlier message from 2025-08-24 18:31 UTC, left without a reply:]"
+    assert "current request" in new_label and "2025-08-29 18:31 UTC" in new_label
+    # The persist override still replaces only the absorbed (current) turn.
+    assert messages[2][MERGED_TURN_PREFIX] == merged[: -len(DM) - 2]
+    # Settled: the next pre-request pass does not touch it again.
+    assert repair_message_sequence(None, messages) == 0
+
+
+@pytest.mark.parametrize("gap", [0.0, 30.0, 14 * 60.0])
+def test_fresh_consecutive_prompts_keep_the_plain_join(gap):
+    messages = _history(OLD_TS, OLD_TS + gap)
+    assert repair_message_sequence(None, messages) == 1
+    assert messages[2]["content"] == f"{STALE_ASK}\n\n{DM}"
+    assert messages[2][MERGED_TURN_PREFIX] == STALE_ASK
+
+
+@pytest.mark.parametrize("old_ts,new_ts", [(None, DAYS_LATER), (OLD_TS, None), ("x", DAYS_LATER), (True, DAYS_LATER)])
+def test_unknown_timestamps_keep_the_plain_join(old_ts, new_ts):
+    messages = _history(old_ts, new_ts)
+    assert repair_message_sequence(None, messages) == 1
+    assert messages[2]["content"] == f"{STALE_ASK}\n\n{DM}"
+
+
+def test_display_marker_rows_are_not_labelled_as_unanswered_prompts():
+    messages = _history(OLD_TS, DAYS_LATER, display_kind="model_switch")
+    assert repair_message_sequence(None, messages) == 1
+    assert messages[2]["content"] == f"{STALE_ASK}\n\n{DM}"
+    messages = _history(OLD_TS, DAYS_LATER)
+    messages[3]["display_kind"] = "hidden"
+    assert repair_message_sequence(None, messages) == 1
+    assert messages[2]["content"] == f"{STALE_ASK}\n\n{DM}"
+
+
+def test_empty_side_keeps_existing_behaviour():
+    messages = _history(OLD_TS, DAYS_LATER)
+    messages[3]["content"] = ""
+    assert repair_message_sequence(None, messages) == 1
+    assert messages[2]["content"] == STALE_ASK
+
+
+def test_persist_override_keeps_labels_and_replaces_only_the_current_turn():
+    wire = "[2025-08-29T20:31:19+0200] " + DM
+    messages = _history(OLD_TS, DAYS_LATER)
+    messages[3]["content"] = wire
+    assert repair_message_sequence(None, messages) == 1
+    merged_wire = messages[2]["content"]
+    agent = object.__new__(SessionPersistenceMixin)
+    agent._persist_user_message_idx = 2
+    agent._persist_user_message_override = DM
+    agent._persist_user_message_timestamp = None
+    agent._persist_user_message_platform_id = None
+    expected = merged_wire[: -len(wire)] + DM
+    row = _db_flush_row(agent, messages[2], True)
+    assert row["content"] == expected
+    assert row["api_content"] == merged_wire
+    agent._apply_persist_user_message_override(messages)
+    assert messages[2]["content"] == expected
+
+
+def test_restore_labels_a_durable_stale_pair(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("s1", "system prompt")
+        db.append_message(session_id="s1", role="user", content="earlier question", timestamp=OLD_TS - 60)
+        db.append_message(session_id="s1", role="assistant", content="earlier answer", timestamp=OLD_TS - 30)
+        db.append_message(session_id="s1", role="user", content=STALE_ASK, timestamp=OLD_TS)
+        db.append_message(session_id="s1", role="user", content=DM, timestamp=DAYS_LATER)
+        first = db.get_messages_as_conversation("s1", repair_alternation=True)
+        second = db.get_messages_as_conversation("s1", repair_alternation=True)
+    finally:
+        db.close()
+    assert [m["role"] for m in first] == ["user", "assistant", "user"]
+    merged = first[2]["content"]
+    assert f"\n\n{STALE_ASK}\n\n" in merged and merged.endswith(f"\n\n{DM}")
+    assert "left without a reply" in merged and "current request" in merged
+    # Deterministic: every reload yields the same bytes (prompt-cache prefix stays stable).
+    assert second[2]["content"] == merged
+
+
+@pytest.mark.parametrize("surface", ["gateway", "cli"])
+def test_full_turn_sends_the_new_message_as_the_current_request(session, surface):
+    """Real agent + store: a prompt left unanswered days ago, then a DM. The request labels both parts, the
+    stored row keeps those bytes, and the next turn replays the merged row unchanged (stable cache prefix)."""
+    from types import SimpleNamespace
+
+    db, agent = session
+    db.create_session("sid", "system prompt")
+    db.append_message(session_id="sid", role="user", content="earlier question", timestamp=OLD_TS - 60)
+    db.append_message(session_id="sid", role="assistant", content="earlier answer", timestamp=OLD_TS - 30)
+    db.append_message(session_id="sid", role="user", content=STALE_ASK, timestamp=OLD_TS)  # crash: no reply row
+    cli = SimpleNamespace(conversation_history=db.get_messages_as_conversation("sid", repair_alternation=True))
+
+    def run(text):
+        agent.client.chat.completions.create.side_effect = [rewind._reply(f"reply to {text[:12]}", 1_000)]
+        if surface == "gateway":
+            from gateway.run import _build_gateway_agent_history
+
+            history = _build_gateway_agent_history(db.get_messages_as_conversation("sid", repair_alternation=True))[0]
+            agent.run_conversation(user_message=text, conversation_history=history, task_id="sid",
+                                   persist_user_message=text)
+        else:
+            from hermes_cli.cli_chat_turn_mixin import CLIChatTurnMixin
+
+            CLIChatTurnMixin._chat_stage_user_message(cli, agent, text)
+            result = agent.run_conversation(user_message=text, conversation_history=cli.conversation_history[:-1],
+                                            task_id="sid", persist_user_message=None)
+            cli.conversation_history = result.get("messages", cli.conversation_history)
+        return [m for m in agent.client.chat.completions.create.call_args.kwargs["messages"] if m["role"] != "system"]
+
+    request = run(DM)
+    assert [m["role"] for m in request] == ["user", "assistant", "user"]
+    sent = request[-1]["content"]
+    assert sent.startswith("[Earlier message from 2025-08-24 18:31 UTC") and f"\n\n{STALE_ASK}\n\n" in sent
+    assert sent.endswith(f"current request; treat the earlier message as background and act on it only if this one "
+                         f"asks you to.]\n\n{DM}")
+
+    stored = [m for m in db.get_messages_as_conversation("sid", repair_alternation=True)]
+    assert [m["role"] for m in stored] == ["user", "assistant", "user", "assistant"]
+    assert stored[2]["content"] == sent
+
+    request = run("thanks")
+    assert [m["role"] for m in request] == ["user", "assistant", "user", "assistant", "user"]
+    assert request[2]["content"] == sent
+
+
+@pytest.mark.parametrize("surface", ["cli", "resume", "gateway"])
+def test_in_place_compaction_carries_the_labelled_row_once(session, surface):
+    """The labelled merge is still one dict for two durable rows: compaction keeps exactly one copy of it."""
+    import time
+    from types import SimpleNamespace
+
+    db, agent = session
+    cli = SimpleNamespace(conversation_history=[])
+    for n in range(1, 13):
+        rewind._turn(db, agent, cli, surface, n, 5_000)
+    db.append_message("sid", "user", "U12x this prompt never got a reply", timestamp=time.time() - 3 * 86400)
+    if surface == "cli":
+        cli.conversation_history = db.get_messages_as_conversation("sid", repair_alternation=True)
+    elif surface == "resume":
+        cli.conversation_history = db.get_resume_conversations("sid")[0]
+    rewind._turn(db, agent, cli, surface, 13, 5_000)
+    rewind._turn(db, agent, cli, surface, 14, 200_000)  # over the threshold: the next turn compacts first
+    rewind._turn(db, agent, cli, surface, 15, 20_000)
+
+    assert getattr(agent, "_last_compaction_in_place", None) is True
+    assert {f"A{n}" for n in range(1, 16)} <= rewind._replies_displayed(db)
+    live = [m["content"] for m in db.get_messages_as_conversation("sid") if isinstance(m.get("content"), str)]
+    [carried_prompt] = [c for c in live if "U12x" in c]
+    assert carried_prompt.startswith("[Earlier message from ")
+    assert carried_prompt.endswith("\n\nU13 please continue with the next step")
+    recalled = [row["content"] for row in db._conn.execute(
+        "SELECT content FROM messages WHERE session_id = 'sid' AND (active = 1 OR compacted = 1)").fetchall()]
+    carried = live[next(i for i, c in enumerate(live) if "Numbered steps" in c) + 1:]
+    assert [recalled.count(c) for c in carried] == [carried.count(c) for c in carried]
+    assert [c.split(" ")[0] for c in live[-2:]] == ["U15", "A15"]
