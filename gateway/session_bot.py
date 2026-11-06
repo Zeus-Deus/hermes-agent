@@ -203,13 +203,46 @@ async def _target(authority, actor):
         # A Bot Chat handed off to a messaging lane stays the bot's chat there: delivery follows it.
         ref = lane = handed_off_ref(authority, target['id'])
         if ref is None:
-            ref = resolve_local_target(authority, actor, target['id'])
+            try:
+                ref = resolve_local_target(authority, actor, target['id'])
+            except RuntimeStoreError as exc:
+                if exc.reason != 'not_found' or exc.detail:
+                    raise
+                # Kept local history this sender may not adopt (a served login's Desktop row, #140183):
+                # never moved aside, so name it instead of the bare code every retry would repeat.
+                raise RuntimeStoreError('not_found', field='bot_chat', detail=(
+                    "this profile's 'Bot Chat' is local history this sender cannot adopt; "
+                    'open or rename it from the client that owns it')) from exc
     authority.authorize(actor, ref, 'session:submit')
     live = authority.sessions[ref.session_id]
     entry = authority.runner.session_store.lookup_by_session_key(live.route)
     if (live.source.platform != Platform.LOCAL and lane is None) or entry is None:
         raise RuntimeStoreError('admission_conflict')
     return ref, live, entry
+
+
+async def heal_bot_chat_lookup(authority, actor, title, exc):
+    """The Bots roster's registry lookup (``session.list title="Bot Chat"``) refused *exc*: the title
+    is held by a conversation no FIFO can own (an API or messaging row, an unbound local row this
+    caller cannot adopt). The deliver door moves such a holder aside and mints the profile's local
+    Bot Chat (``_target``), but the Desktop asks the registry first and fails closed on the refusal,
+    so the bot never opened until another bot happened to message it (#146785). Take the door's
+    step here too and answer with the minted chat; anything else re-raises *exc*."""
+    from gateway.session_runtime_workers import track_mutation
+    from tools.bot_mode_probe import BOT_CHAT_TITLE
+    row = authority.db.get_session_by_title(BOT_CHAT_TITLE)
+    if (exc.reason != 'not_found' or title != BOT_CHAT_TITLE or row is None
+            or actor.profile_id != authority.profile_id or not {'session:create', 'session:read'} <= actor.capabilities
+            or (displaced := displaceable_bot_chat(authority, row, actor.subject)) is None):
+        raise exc
+    authority._require_admission_open()
+    ref = await asyncio.shield(track_mutation(authority, _create_bot_chat(authority, actor, displace=displaced)))
+    if ref is None:
+        # A concurrent delivery or open moved it first: answer whatever holds the title now.
+        from gateway.session_local_title import resolve_titled_session
+        return resolve_titled_session(authority, actor, title, missing_ok=True)
+    authority.authorize(actor, ref, 'session:read')
+    return ref
 
 
 def displaceable_bot_chat(authority, row, subject=None):
@@ -874,7 +907,7 @@ async def _deliver(connection, params):
             return await _admit(authority, actor, home, root, key, message, ref, live, entry, author=author,
                                 notification_category=category)
         except RuntimeStoreError as exc:
-            raise await _held_by_another_writer(home, key, exc) or exc
+            raise await _not_admitted(authority, home, key, exc) or exc
 
 
 async def settle(connection, params):
@@ -926,29 +959,52 @@ def _not_sent_record(authority, actor, home, key, message, author, category):
     if admitted is not None or row is None:
         raise RuntimeStoreError('unknown_execution')
     from gateway.session_automation import automation_notification_metadata
+    # The refusal this owner answered the id with while it held the lock (``_not_admitted``); an
+    # owner restarted since, or a settle with no refusal before it, keeps the held reason.
+    reason = getattr(authority, '_bot_refusals', {}).pop(key, HELD_NOT_SENT)
+    error = ('Settled as not sent after a session-writer refusal' if reason == HELD_NOT_SENT
+             else f'Settled as not sent after a {reason} refusal')
     record = dict(delivery_id=key, profile_home=str(home), session_id=authority.db.get_compression_tip(row['id']),
                   principal_id=actor.subject, message=message, status='failed', refused=True, reply='',
-                  error='Settled as not sent after a session-writer refusal', reason=HELD_NOT_SENT)
+                  error=error, reason=reason)
     record.update(automation_notification_metadata({'notification_category': category}))
     if author is not None:
         record['author'] = dict(author)
     return record
 
 
-async def _held_by_another_writer(home, key, exc):
-    """The settleable form of a ``runtime_coordination_required`` refusal, or None.
+# Refusal reasons remembered for ``settle`` per delivery id; bounded, a settle normally follows at once.
+_REMEMBERED_REFUSALS = 256
 
-    Another session writer holds the chat (a pre-authority Desktop backend's lease on a legacy Bot
-    Chat, a live CLI). Nothing was admitted under this id when it still has no receipt: ``_admit``
-    pins one before it admits and withdraws it only when nothing committed. That holds only while
-    this request has the lock, so ``admitted=False`` is a hint, not the verdict: the sender asks
-    ``settle`` before it reports a no-send. Any other refusal keeps its unknown outcome."""
-    if exc.reason != HELD_NOT_SENT or (await read_receipt(home, key))[1] is not None:
+
+async def _not_admitted(authority, home, key, exc):
+    """The settleable form of a door refusal that committed nothing under this id, or None.
+
+    Every refusal raised here holds the mailbox lock, and ``_admit`` pins a receipt before it
+    admits, withdrawing it only when nothing committed (or settling it ``refused``). So with no
+    receipt, or only a ``refused`` one, and no ``bot:<id>`` row in the FIFO, nothing was admitted:
+    a Bot Chat that could not be resolved (``not_found``), a busy or draining owner, another
+    session writer holding the chat (#147949). That holds only while this request has the lock, so
+    ``admitted=False`` is a hint, not the verdict: the sender asks ``settle`` before it reports a
+    no-send. A pin left by a commit that may have landed keeps the unknown outcome."""
+    record = (await read_receipt(home, key))[1]
+    if record is not None and not (record.get('refused') is True and not record.get('admission_id')):
         return None
-    held = RuntimeStoreError(exc.reason, field='session_writer',
-                             detail='another session writer holds the Bot Chat; nothing was admitted yet')
-    held.admitted = False
-    return held
+    with authority.db._read_ctx() as conn:
+        if conn.execute('SELECT 1 FROM session_admissions WHERE request_id=?', ('bot:' + key,)).fetchone():
+            return None
+    if exc.reason == HELD_NOT_SENT:
+        exc = RuntimeStoreError(exc.reason, field='session_writer',
+                                detail='another session writer holds the Bot Chat; nothing was admitted yet')
+    refusals = getattr(authority, '_bot_refusals', None)
+    if refusals is None:
+        refusals = authority._bot_refusals = {}
+    refusals.pop(key, None)
+    refusals[key] = exc.reason
+    while len(refusals) > _REMEMBERED_REFUSALS:
+        refusals.pop(next(iter(refusals)))
+    exc.admitted = False
+    return exc
 
 
 async def _admit(authority, actor, home, root, key, message, ref, live, entry, author=None, legacy=None,

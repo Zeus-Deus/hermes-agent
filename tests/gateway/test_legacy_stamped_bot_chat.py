@@ -27,12 +27,15 @@ _OWN = 'uid:desk'
 _FOREIGN = ('uid:4242', 'basic:alice', 'auth:v1:["dashboard","","alice"]', 'nous:acct-1')
 
 
-async def _bot_chat_lookup(tmp_path, monkeypatch, source, user_id):
+async def _bot_chat_lookup(tmp_path, monkeypatch, source, user_id, rows=None):
     from gateway.run_runtime import initialize_gateway_runtime
     from gateway.runtime_ownership import process_ownership
     from gateway.session_authorities import authority_for_profile_id, owner_scope
     from gateway.session_controls import AuthorityConnection
     root, homes = _reserve_homes(tmp_path, monkeypatch)
+    for _, home in homes:
+        # A profile model, so a Bot Chat the lookup mints (a holder moved aside) has a policy.
+        (home / 'config.yaml').write_text('model:\n  default: fixture-model\n')
     process_ownership.reserve([home for _, home in homes])
     connections, runner, replies = [], None, {}
     try:
@@ -58,6 +61,8 @@ async def _bot_chat_lookup(tmp_path, monkeypatch, source, user_id):
             with owner_scope(host.authority):
                 replies[prof] = await host.dispatch({'id': 1, 'method': 'session.list', 'params': {
                     'profile': prof, 'title': 'Bot Chat', 'include_hidden': True, 'limit': 200}})
+            if rows is not None:
+                rows[prof] = authority_for_profile_id(runner, ids[prof]).db.get_session(prof + '-bot-chat')
     finally:
         for connection in connections:
             with owner_scope(connection.authority):
@@ -81,10 +86,22 @@ async def test_bot_chat_stamped_with_the_callers_own_subject_opens(tmp_path, mon
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('user_id', _FOREIGN)
-async def test_bot_chat_stamped_with_another_principal_stays_refused(tmp_path, monkeypatch, user_id):
-    replies = await _bot_chat_lookup(tmp_path, monkeypatch, 'cli', user_id)
+async def test_bot_chat_stamped_with_another_principal_is_never_opened(tmp_path, monkeypatch, user_id):
+    # Never adopted for the caller. A row the host owner would adopt (a login label) stays the
+    # owner's and is refused; one no caller can adopt is moved aside under its own stamp, as the
+    # deliver door does, and the lookup answers a fresh Bot Chat (#146785).
+    rows = {}
+    replies = await _bot_chat_lookup(tmp_path, monkeypatch, 'cli', user_id, rows)
     for prof, reply in replies.items():
-        assert reply.get('error', {}).get('message') == 'not_found', (prof, reply)
+        if user_id == 'basic:alice':
+            assert reply.get('error', {}).get('message') == 'not_found', (prof, reply)
+            assert rows[prof]['title'] == 'Bot Chat', rows[prof]
+            continue
+        assert 'error' not in reply, (prof, reply)
+        assert [s['session_id'] for s in reply['result']['sessions']] != [prof + '-bot-chat'], (prof, reply)
+        moved = rows[prof]
+        assert (moved['title'], moved['user_id'], moved['chat_id']) == (
+            f'Bot Chat (cli {prof}-bot-chat)', user_id, None), moved
 
 
 def test_legacy_validation_names_the_subject_it_adopts_for(tmp_path):

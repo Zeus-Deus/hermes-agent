@@ -496,11 +496,15 @@ class LiveTargetUnavailableError(RuntimeError):
     resend = "once the target is up"
 
 
-class LiveTargetHeldError(LiveTargetUnavailableError):
-    """The owner refused because another session writer holds the Bot Chat, and settled this
-    delivery id as never sent (``bot_relay.settle``): every later attempt under the id gets that
-    disposition, so this is a definite no-send too. A refusal without that settlement stays the
-    ambiguous outcome."""
+class LiveTargetSettledError(LiveTargetUnavailableError):
+    """The owner refused before anything was admitted and settled this delivery id as never sent
+    (``bot_relay.settle``): every later attempt under the id gets that disposition, so this is a
+    definite no-send whose payload goes too. A refusal without that settlement stays the ambiguous
+    outcome."""
+
+
+class LiveTargetHeldError(LiveTargetSettledError):
+    """The settled refusal was another session writer holding the Bot Chat."""
 
     resend = "after that session closes"
 
@@ -508,6 +512,41 @@ class LiveTargetHeldError(LiveTargetUnavailableError):
     def reason(self) -> str:
         from tools.bot_failure_reasons import HELD_NOT_SENT
         return HELD_NOT_SENT
+
+
+# Owner-state refusals (gateway/session_bot.py ``_OWNER_STATE_REFUSALS``): a fresh send admits once
+# they clear, without anything changing on the target.
+_TRANSIENT_REFUSALS = frozenset({
+    "queue_full", "runtime_draining", "runtime_retired", "stale_epoch", "stale_generation",
+    "storage_unavailable", "session_busy",
+})
+
+
+class LiveTargetRefusedError(LiveTargetSettledError):
+    """Any other settled refusal: the target's Bot Chat could not be resolved (``not_found``), a
+    busy or draining owner, a refusal of this delivery (#147949). Named, with the owner's detail."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        self._reason = reason if re.fullmatch(r"[a-z][a-z_]{0,63}", reason or "") else "unknown"
+        if self._reason == "not_found":
+            what = "the target profile's Bot Chat could not be resolved"
+        elif self._reason in _TRANSIENT_REFUSALS:
+            what = "the target is busy or restarting"
+        else:
+            what = "the target refused the delivery"
+        super().__init__(f"{what} ({self._reason}{': ' + detail if detail else ''})")
+
+    @property
+    def reason(self) -> str:
+        return self._reason
+
+    @property
+    def resend(self) -> str:  # type: ignore[override]
+        if self._reason in _TRANSIENT_REFUSALS:
+            return "in a moment"
+        if self._reason == "not_found":
+            return "once that profile's Bot Chat opens (open it from that profile)"
+        return "once that refusal is resolved"
 
 
 class DeliveryNotStartedError(LiveTargetUnavailableError):
@@ -589,11 +628,15 @@ def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dic
         try:
             record = deliver_to_live_owner(home, intent["owner"], intent["message"], **identity)
         except GatewayRPCError as exc:
-            if str(exc) != HELD_NOT_SENT or exc.data.get("admitted") is not False:
+            if exc.data.get("admitted") is not False:
                 raise
             # Nothing was admitted while that refusal held the owner's lock, but a same-id attempt
             # may have admitted since: only the owner's settle decides, under that same lock.
             record = settle_held_delivery(home, intent["owner"], intent["message"], **identity)
+            if (str(exc) != HELD_NOT_SENT and isinstance(record, dict) and record.get("refused") is True
+                    and not record.get("admission_id")):
+                # The callers remove the intent and payload (``_settled_no_send``).
+                raise LiveTargetRefusedError(str(exc), str(exc.data.get("detail") or "")) from exc
         except PreDialError as exc:
             if not pinned_now:
                 raise  # an earlier attempt under this intent may have admitted: outcome unknown
@@ -800,7 +843,7 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool,
         if home is not None or os.path.exists(_live_intent_file(dm_file)):
             try:
                 record = _admit_live_dm(home, dm_file, author)
-            except LiveTargetHeldError as exc:
+            except LiveTargetSettledError as exc:
                 print(_settled_no_send(dm_file, exc))  # the owner settled the id: drop the payload too
                 return 1
             except LiveTargetUnavailableError as exc:

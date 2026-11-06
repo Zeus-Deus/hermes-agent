@@ -215,10 +215,10 @@ async def test_the_runner_settles_a_held_refusal_with_its_payload(held, capsys):
 async def test_an_older_owner_without_the_marker_stays_ambiguous(held, monkeypatch):
     from gateway import session_bot
 
-    async def old_owner(home, key, exc):
+    async def old_owner(authority, home, key, exc):
         return None
 
-    monkeypatch.setattr(session_bot, '_held_by_another_writer', old_owner)
+    monkeypatch.setattr(session_bot, '_not_admitted', old_owner)
     result = await _send(held, 'ping')
     assert result.get('status') == 'ambiguous' and 'Do not resend' in result['error'], result
     assert [path.name for path in held.dm_dir.glob('*.live.json')], 'an unproven refusal keeps its intent'

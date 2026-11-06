@@ -581,7 +581,12 @@ class AuthorityConnection:
             # resolver `session.resume title=` uses, so a hidden canonical chat answers here
             # instead of being re-minted. Never confirms another principal's titles.
             from gateway.session_local_title import resolve_titled_session
-            found = resolve_titled_session(self.authority, self.actor, params['title'], missing_ok=True)
+            try:
+                found = resolve_titled_session(self.authority, self.actor, params['title'], missing_ok=True)
+            except RuntimeStoreError as exc:
+                # A Bot Chat title held by a conversation no FIFO can own: the deliver door's move-aside.
+                from gateway.session_bot import heal_bot_chat_lookup
+                found = await heal_bot_chat_lookup(self.authority, self.actor, params['title'], exc)
             if found is None:
                 return {'sessions': [], 'scope': 'stored'}
             row = self.authority.db.get_session(found.session_id) or {}
