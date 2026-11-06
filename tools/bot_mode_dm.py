@@ -293,6 +293,19 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
                       sender)
 
 
+def bare_peer(target: str, sender: Any) -> bool:
+    """``target`` is a bare registered peer name that no local profile folder id (or @handle) also
+    names. A local profile wins that shared name (#145241): the peer route carries another identity,
+    credentials and privacy boundary, so it is never taken silently; the peer stays reachable as
+    ``<peer>/<agent>`` (``<peer>/default`` for its main agent). Friendly names are soft aliases and
+    keep yielding to a peer, and the sender's own name is no local target, so a peer named like the
+    sender keeps that name."""
+    if target.lower() not in sender.peers:
+        return False
+    local = _resolve_local_name(target, list(sender.roster_homes))
+    return local is None or local == getattr(sender, "me", None)
+
+
 def _dispatch(raw_target: str, content: str, sender: Sender, *, wake: Any) -> str:
     """Resolve one target and hand ``content`` to its transport. ``wake`` is how the reply comes
     back: ``"notify"`` (a tracked runner whose completion wakes the sender), ``"none"`` (notify-only:
@@ -308,7 +321,7 @@ def _dispatch(raw_target: str, content: str, sender: Sender, *, wake: Any) -> st
 
     # Peer target: '<peer>/<agent>' or a bare registered peer name.
     peer_match = _PEER_TARGET_RE.match(raw_target)
-    if peer_match or raw_target.lower() in peers:
+    if peer_match or bare_peer(raw_target, sender):
         peer_name, peer_profile = peer_match.groups() if peer_match else (raw_target.lower(), None)
         if peer_name not in peers:
             return sender.roster_err(f"No registered peer named '{peer_name}'.")

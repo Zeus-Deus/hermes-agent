@@ -59,7 +59,8 @@ def _destination(name: str, sender: Any) -> tuple[str, str]:
     from tools.bot_mode_dm import _PEER_TARGET_RE, _resolve_local_name
 
     peer = _PEER_TARGET_RE.match(name)
-    if peer or name.lower() in sender.peers:
+    from tools.bot_mode_dm import bare_peer  # a local profile wins a shared name, as in ``_dispatch``
+    if peer or bare_peer(name, sender):
         peer_name, peer_profile = peer.groups() if peer else (name.lower(), None)
         return "peer", f"{peer_name}/{peer_profile or ''}".lower()
     if "@" in name:

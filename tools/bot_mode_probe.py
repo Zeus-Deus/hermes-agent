@@ -276,11 +276,16 @@ def _peer_paragraph(root: Path) -> str:
     if not peers:
         return ""
     listed = ", ".join(f"`{p}`" for p in peers)
+    # A local profile wins a name it shares with a peer (tools/bot_mode_dm.bare_peer, #145241).
+    names = [name for name, _d in _roster(root)]
+    shared = sorted(set(peers) & {form.lower() for name in names for form in (name, _handle(name, names))})
+    shadowed = (f" A local teammate wins a name it shares with a peer ({', '.join(f'`{p}`' for p in shared)}): "
+                'reach that peer\'s main agent as "<peer>/default".') if shared else ""
     return (
         "\n\nTeammates on OTHER machines: this install also has peer gateways "
         f"registered ({listed}). Message an agent on a peer the same way — "
         'message_agent with target "<peer>/<agent-name>" (or "<peer>" alone '
-        "for the peer's main agent). Run `hermes peer list` for the live "
+        f"for the peer's main agent).{shadowed} Run `hermes peer list` for the live "
         "peer list."
     )
 

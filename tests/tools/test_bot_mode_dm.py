@@ -562,6 +562,71 @@ def test_peer_delivery_command(tmp_path, monkeypatch):
     assert transport_argv == ["hermes", "-p", "default", "peer", "dm", "spark"]
 
 
+@pytest.mark.parametrize("target", ["ops", "@ops", "OPS"])
+def test_a_local_teammate_wins_over_a_same_named_peer(tmp_path, monkeypatch, target):
+    """A bare name that is both a local profile and a registered peer reaches the LOCAL bot (#145241):
+    the peer route has another identity, credentials and privacy boundary, so it must never be taken
+    silently. The peer stays reachable by its explicit '<peer>/<agent>' form."""
+    calls = _capture_spawn(monkeypatch)
+    monkeypatch.setattr(bot_relay, "_hermes_cli", lambda: "hermes")
+    home = _managed_home(tmp_path, teammates=("ops",), peers=("ops",))
+    _canonical_target(monkeypatch, home / "profiles" / "ops")
+    agent = _FakeAgent(home)
+
+    local = json.loads(bot_mode_dm.message_agent_tool(target=target, message="ping", agent=agent))
+    peer = json.loads(bot_mode_dm.message_agent_tool(target="ops/default", message="ping", agent=agent))
+
+    assert local["status"] == "queued" and local["to"] == "@ops", local
+    assert peer["status"] == "queued" and "peer 'ops'" in peer["to"], peer
+    argvs = [_runner_parts(c["command"])[2][1:] for c in calls]
+    assert argvs == [["-p", "ops"], ["-p", "default", "peer", "dm", "ops/default"]]
+
+
+def test_a_peer_named_like_the_sender_itself_stays_the_peer(tmp_path, monkeypatch):
+    """The sender's own profile name is no local target (a bot cannot message itself), so the
+    same-named peer is the only reading of that name and keeps its route."""
+    calls = _capture_spawn(monkeypatch)
+    monkeypatch.setattr(bot_relay, "_hermes_cli", lambda: "hermes")
+    home = _managed_home(tmp_path, teammates=("ops",), peers=("ops",))
+
+    result = json.loads(bot_mode_dm.message_agent_tool(target="ops", message="ping",
+                                                       agent=_FakeAgent(home / "profiles" / "ops")))
+
+    assert result["status"] == "queued" and "peer 'ops'" in result["to"], result
+    assert _runner_parts(calls[0]["command"])[2][1:] == ["-p", "default", "peer", "dm", "ops"]
+
+
+def test_the_protocol_names_the_explicit_form_for_a_shadowed_peer(tmp_path):
+    """The prompt teaches '<peer>' alone for a peer's main agent; where a local profile shares that
+    name, it names the form that still reaches the peer — and stays unchanged everywhere else."""
+    from tools.bot_mode_probe import _peer_paragraph
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    shadowed = _peer_paragraph(_managed_home(tmp_path / "a", teammates=("ops",), peers=("ops", "spark")))
+    plain = _peer_paragraph(_managed_home(tmp_path / "b", teammates=("ops",), peers=("spark",)))
+
+    assert "(`ops`)" in shadowed and '"<peer>/default"' in shadowed
+    assert "shares with a peer" not in plain and "`spark`" in plain
+
+
+def test_fan_out_and_chain_identity_follow_the_local_precedence(tmp_path, monkeypatch):
+    """``split_targets`` and the chain gate resolve names in ``_dispatch``'s order: a local
+    teammate shadowing a peer is that local bot to both, and its explicit peer form stays the peer."""
+    from tools.bot_mode_dm_chain import recipient_key
+    from tools.bot_mode_dm_coordination import _destination, split_targets
+
+    home = _managed_home(tmp_path, teammates=("ops",), peers=("ops",))
+    sender = bot_mode_dm.Sender(home=str(home), root=home, me="default",
+                                roster_homes={"default": home, "ops": home / "profiles" / "ops"},
+                                peers=["ops"], teammates=["ops"], task_id=None, agent=_FakeAgent(home))
+
+    assert _destination("ops", sender) == ("local", "ops")
+    assert split_targets("ops, @ops, ops/default", sender) == ["ops", "ops/default"]
+    assert recipient_key("ops", sender) == "bot:ops"
+    assert recipient_key("ops/default", sender) == "peer:ops/default"
+
+
 def test_delivery_pins_the_hermes_entrypoint_beside_this_interpreter(tmp_path, monkeypatch):
     """A background delivery must not rely on PATH: the runner's service context
     lacks the gateway's venv bin dir, so a bare ``hermes`` resolves to a system

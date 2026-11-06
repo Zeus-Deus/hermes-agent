@@ -23,7 +23,8 @@ def recipient_key(raw_target: str, sender: Any) -> str:
 
     name = raw_target.strip().lstrip("@")
     peer = _PEER_TARGET_RE.match(name)
-    if peer or name.lower() in sender.peers:
+    from tools.bot_mode_dm import bare_peer  # a local profile wins a shared name, as in ``_dispatch``
+    if peer or bare_peer(name, sender):
         peer_name, peer_profile = peer.groups() if peer else (name.lower(), None)
         return _peer_key(peer_name, peer_profile or "default", sender)
     row = _relay_row(name, sender) if "@" in name else None
