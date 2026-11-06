@@ -669,4 +669,28 @@ describe('a default with a custom handle (#89720)', () => {
     expect(provide('').map(item => item.insert)).toEqual(['@maia@local', '@writer@local'])
     expect((await handler({ text: 'ask @writer@local' })).text).toMatch(/@writer = agent profile "writer"/)
   })
+
+  it('pins each bot by its profile name when their titles cross', async () => {
+    const crossedDefault = { ...PROFILES[0], title: 'Writer' }
+
+    const writer = {
+      connectionId: 'local',
+      connectionKind: 'local',
+      connectionLabel: 'This device',
+      name: 'writer',
+      title: 'Maia'
+    }
+
+    const { handler, provide } = await contributions({
+      focused: 'researcher',
+      profiles: [crossedDefault, PROFILES[1], writer]
+    })
+
+    expect(provide('').map(item => item.insert)).toEqual(['@maia@local', '@writer@local'])
+
+    const toWriter = (await handler({ text: 'ask @writer@local' })).text
+    expect(toWriter).toMatch(/@writer = agent profile "writer"/)
+    expect(toWriter).not.toMatch(/agent profile "default"/)
+    expect((await handler({ text: 'ask @maia@local' })).text).toMatch(/@maia = agent profile "default"/)
+  })
 })

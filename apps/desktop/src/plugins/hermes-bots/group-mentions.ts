@@ -32,7 +32,8 @@ function gapFillMemberForms(members: GroupMember[], handles: Map<string, string>
 
 /** Every lower-cased form a member answers to by its live identity: profile name, @handle,
  *  picker tag, the handle a custom-handle default had before (`default-server`), each also
- *  collapsed as the parser reads it, and its title / friendly-name forms. */
+ *  collapsed as the parser reads it, and its title / friendly-name forms — the title's first
+ *  word too ("Alice Smith" answers `@alice`), as the parser seats it. */
 function memberIdentityForms(member: GroupMember): Set<string> {
   const title = String(member.title || '').trim()
 
@@ -41,6 +42,7 @@ function memberIdentityForms(member: GroupMember): Set<string> {
       .map(form => String(form || '').toLowerCase())
       .flatMap(form => [form, form.replace(/[\s_-]+/g, '')])
       .concat([title, ...botFriendlyNames(member)].flatMap(name => mentionNameForms(name)))
+      .concat(title ? [title.split(/\s+/)[0].toLowerCase()] : [])
       .filter(Boolean)
   )
 }

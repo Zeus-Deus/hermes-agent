@@ -8,7 +8,9 @@ import type { RosterRow } from './types'
 const RESERVED_MENTION_FORMS = ['all', 'everyone', 'user', 'default', 'hermes']
 
 /** `value` as a custom @handle — lower-cased, leading `@` dropped — or '' when it is not one: the
- *  profile-id shape and no reserved token. Same rule as the backend's
+ *  profile-id shape, no reserved token, and not a `default-<device>` tag (the connection
+ *  registry's name for a default on several machines: a default handled like one could not tell
+ *  its own device tag from its custom handle). Same rule as the backend's
  *  `tools/bot_mode_probe.normalize_mention_handle`, which gates the save. */
 export function normalizeMentionHandle(value: unknown): string {
   if (typeof value !== 'string') {
@@ -17,7 +19,11 @@ export function normalizeMentionHandle(value: unknown): string {
 
   const handle = value.trim().replace(/^@/, '').toLowerCase()
 
-  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(handle) && !RESERVED_MENTION_FORMS.includes(handle) ? handle : ''
+  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(handle) &&
+    !RESERVED_MENTION_FORMS.includes(handle) &&
+    !handle.startsWith('default-')
+    ? handle
+    : ''
 }
 
 /** The custom handle a default row's OWN backend answers to (`mention_handle`, which only a

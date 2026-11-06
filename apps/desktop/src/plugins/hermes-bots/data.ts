@@ -441,7 +441,9 @@ async function settleServerOutcome(
       progress.error = result.applied.ui_meta_error
     }
 
-    return result && typeof result === 'object' && result.applied && typeof result.applied === 'object' ? 'failed' : 'unsupported'
+    return result && typeof result === 'object' && result.applied && typeof result.applied === 'object'
+      ? 'failed'
+      : 'unsupported'
   } catch (error) {
     // The pooled local backend keeps the documented fallback: its local copy is the save.
     if (!routed || rpcMethodMissing(error)) {
@@ -587,7 +589,9 @@ export async function saveBotMeta(
   //                   unchanged ui_meta wins again on reconnect.
   // A routed row that answered the read but whose write then failed for any
   // reason other than a missing method is 'failed', never 'unsupported'.
-  const serverOutcome = serverRequest ? await settleServerOutcome(serverRequest, Boolean(route), progress) : 'unsupported'
+  const serverOutcome = serverRequest
+    ? await settleServerOutcome(serverRequest, Boolean(route), progress)
+    : 'unsupported'
 
   if (serverRequest) {
     // Re-stamp now that the server write settled: a roster snapshot fetched
@@ -1540,6 +1544,21 @@ function gapFillRosterForms(
   }
 }
 
+/** The row `@token@connection` names: the one whose profile name is `token`, else whose @handle
+ *  is, else the single row on that connection answering `token` some other way (a title). A
+ *  friendly form two rows there share names neither, so the profile name stays the one exact
+ *  address (#89720: a default handled `maia` beside a sibling titled "Maia"). */
+function connectionMention(formsByBot: Map<RosterRow, Set<string>>, token: string, connection: string) {
+  const rows = [...formsByBot].filter(
+    ([row, forms]) => String(row.connectionId || '').toLowerCase() === connection && forms.has(token)
+  )
+
+  const named = rows.find(([row]) => String(row.name || '').toLowerCase() === token)
+  const handled = rows.find(([row]) => String(botHandle(row.name, row) || '').toLowerCase() === token)
+
+  return (named || handled || (rows.length === 1 ? rows[0] : undefined))?.[0]
+}
+
 /** Resolve @handles in prose against the Bot Mode roster (local + Connections).
  *  Skips the bot already speaking in this chat. Unique bare names match;
  *  duplicate names require the @name-device handle. */
@@ -1613,11 +1632,7 @@ export function resolveRosterMentions(
       token = byForm.has('hermes') ? 'hermes' : token
     }
 
-    const bot = connection
-      ? [...formsByBot].find(
-          ([row, forms]) => String(row.connectionId || '').toLowerCase() === connection && forms.has(token)
-        )?.[0]
-      : byForm.get(token)
+    const bot = connection ? connectionMention(formsByBot, token, connection) : byForm.get(token)
 
     if (!bot) {
       continue

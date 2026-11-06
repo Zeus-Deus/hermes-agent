@@ -111,6 +111,28 @@ interface ComposerDraftPayload {
   text: string
 }
 
+/** What the @ picker inserts for `profile`: the bare tag, unless another row shares it
+ *  (`shared`) or the full resolver would not hand it to this row — a default's custom handle can
+ *  match another row's name or friendly tag (#89720) — then the connection-qualified tag. That
+ *  can still be shared on the connection (a sibling titled like the default's handle), so the
+ *  last resort is the qualified profile name, which the resolver gives that profile first. */
+function pickerInsert(
+  tag: string,
+  profile: RosterRow,
+  shared: boolean,
+  resolvesTo: (text: string, profile: RosterRow) => boolean
+): string {
+  const bare = `@${tag}`
+
+  if (!profile.connectionId || (!shared && resolvesTo(bare, profile))) {
+    return bare
+  }
+
+  const qualified = `@${tag}@${profile.connectionId}`
+
+  return resolvesTo(qualified, profile) ? qualified : `@${profile.name}@${profile.connectionId}`
+}
+
 export default {
   id: ID,
   name: translateNow('common.bots'),
@@ -200,18 +222,7 @@ export default {
               continue
             }
 
-            // Also when the full resolver would not hand the bare tag to this row: a default's custom
-            // handle can match another row's name or friendly tag (#89720).
-            const qualified =
-              ((tagCounts.get(tag.toLowerCase()) || 0) > 1 || !resolvesTo(`@${tag}`, profile)) && profile.connectionId
-
-            // A qualified tag can still be shared on that connection (a sibling titled like the
-            // default's handle); the profile name pins it then.
-            const forms = qualified
-              ? [`@${tag}@${profile.connectionId}`, `@${profile.name}@${profile.connectionId}`]
-              : [`@${tag}`]
-
-            const insert = forms.find(form => resolvesTo(form, profile)) || forms[0]
+            const insert = pickerInsert(tag, profile, (tagCounts.get(tag.toLowerCase()) || 0) > 1, resolvesTo)
             const source = profile.connectionLabel ? ` · ${profile.connectionLabel}` : ''
             items.push({
               insert,

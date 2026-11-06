@@ -208,12 +208,14 @@ DEFAULT_HANDLE_KEY = "mentionHandle"
 
 def normalize_mention_handle(value: object) -> str:
     """``value`` as a custom @handle — lower-cased, leading ``@`` dropped — or "" when it is not
-    one: the profile-id shape, and none of the tokens the mention parsers reserve. The Desktop's
-    ``normalizeMentionHandle`` applies the same rule."""
+    one: the profile-id shape, none of the tokens the mention parsers reserve, and not a
+    ``default-<device>`` tag (the Desktop's name for a default on several machines, which a custom
+    handle must not be mistaken for). The Desktop's ``normalizeMentionHandle`` applies the same rule."""
     from hermes_constants import PROFILE_ID_RE
 
     handle = str(value or "").strip().lstrip("@").lower() if isinstance(value, str) else ""
-    return handle if PROFILE_ID_RE.match(handle) and handle not in _RESERVED_ALIASES else ""
+    reserved = handle in _RESERVED_ALIASES or handle.startswith("default-")
+    return handle if PROFILE_ID_RE.match(handle) and not reserved else ""
 
 
 def stored_default_handle(root: Path) -> str:
@@ -252,6 +254,8 @@ def validate_default_handle(root: Path, value: object) -> str:
     if not handle:
         if raw.lower() in _RESERVED_ALIASES:
             raise ValueError(f"@{raw.lower()} is reserved.")
+        if raw.lower().startswith("default-"):
+            raise ValueError("A handle cannot start with 'default-': that is how a default is tagged by machine.")
         raise ValueError("A handle uses lowercase letters, numbers, '-' or '_' (up to 64), starting with a letter or number.")
     names = [name for name, _d in _roster(root)]
     if handle in names:
@@ -313,15 +317,16 @@ def _remote_roster(root: Path) -> list[dict]:
 
 
 def local_taken_forms(home: Path) -> set[str]:
-    """Bare forms this install's own profiles answer to: folder ids, @handles and friendly-name
-    slugs. A remote row must not be offered under any of them, since local resolution wins
-    (``_resolve_local_name`` accepts the folder id ``default`` even while the default shows as
-    @hermes). Read from the install root, so a named profile's home sees its siblings too."""
+    """Bare forms this install answers itself: its profiles' folder ids, @handles and
+    friendly-name slugs, and its registered peers' names. A remote row must not be offered under
+    any of them, since local resolution wins (``_resolve_local_name`` accepts the folder id
+    ``default`` even while the default shows as @hermes; ``message_agent`` reads a bare peer name
+    as that peer first). Read from the install root, so a named profile's home sees its siblings too."""
     root = _hermes_root(home)
     names = [name for name, _d in _roster(root)]
     # @hermes stays the default's alias beside a custom handle (``_profile_for_handle``).
     return (set(names) | {_handle(name, names, root) for name in names} | {_handle("default", names)}
-            | set(local_alias_map(root)))
+            | set(local_alias_map(root)) | {peer.lower() for peer in _peers(root)})
 
 
 def _remote_paragraph(root: Path) -> str:

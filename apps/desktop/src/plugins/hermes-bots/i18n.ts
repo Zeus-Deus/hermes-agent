@@ -105,7 +105,7 @@ const en: BotsMessages = {
     handle: 'Handle',
     handleHint: 'How other bots and group chats tag this bot. @hermes keeps working. Leave empty for @hermes.',
     handleInvalid:
-      'A handle uses lowercase letters, numbers, - or _, and cannot be @hermes, @default, @all, @everyone or @user.',
+      'A handle uses lowercase letters, numbers, - or _, cannot start with default-, and cannot be @hermes, @default, @all, @everyone or @user.',
     handleTaken: handle => `@${handle} is already used by another bot.`,
     handleNotSaved: 'The handle was not saved: this bot’s machine did not take it. Try again once it is connected.',
     nameTaken: name => `An agent named "${name}" already exists.`,
@@ -419,7 +419,8 @@ const en: BotsMessages = {
     otherControls: 'Another viewer is in control',
     agentControls: 'Bot is in control',
     controlTaken: 'Another viewer took control. Watching only.',
-    needsHttps: 'Bot screens need a secure connection. Open the Webapp over HTTPS, or through an SSH tunnel to 127.0.0.1, to view this one.'
+    needsHttps:
+      'Bot screens need a secure connection. Open the Webapp over HTTPS, or through an SSH tunnel to 127.0.0.1, to view this one.'
   },
   cron: {
     untitled: 'Untitled job',
@@ -557,9 +558,10 @@ const ja: BotsMessages = {
     handleHint:
       '他のボットやグループチャットがこのボットをタグ付けする名前です。@hermes も引き続き使えます。空欄なら @hermes。',
     handleInvalid:
-      'ハンドルには小文字、数字、- と _ が使えます。@hermes、@default、@all、@everyone、@user は使えません。',
+      'ハンドルには小文字、数字、- と _ が使えます。default- で始まるもの、@hermes、@default、@all、@everyone、@user は使えません。',
     handleTaken: handle => `@${handle} は別のボットが使用しています。`,
-    handleNotSaved: 'ハンドルは保存されませんでした。このボットのマシンが受け付けませんでした。接続後にもう一度お試しください。',
+    handleNotSaved:
+      'ハンドルは保存されませんでした。このボットのマシンが受け付けませんでした。接続後にもう一度お試しください。',
     nameTaken: name => `「${name}」というエージェントはすでに存在します。`,
     nameTakenOn: (name, target) => `${target} には「${name}」というエージェントがすでに存在します。`,
     currentConnection: name => `${name}（現在）`,
@@ -873,7 +875,8 @@ const ja: BotsMessages = {
     otherControls: '別のビューアが操作中',
     agentControls: 'ボットが操作中',
     controlTaken: '別のビューアが操作を引き継ぎました。閲覧のみ。',
-    needsHttps: 'ボットの画面には安全な接続が必要です。表示するには、Webapp を HTTPS か 127.0.0.1 への SSH トンネル経由で開いてください。'
+    needsHttps:
+      'ボットの画面には安全な接続が必要です。表示するには、Webapp を HTTPS か 127.0.0.1 への SSH トンネル経由で開いてください。'
   },
   cron: {
     untitled: '無題のジョブ',
@@ -1004,7 +1007,8 @@ const zh: BotsMessages = {
     editDescription: (name, profile) => `${name}（${profile}）的外观和职责。`,
     handle: '标识',
     handleHint: '其他机器人和群聊用来标记此机器人的名称。@hermes 仍然有效。留空即为 @hermes。',
-    handleInvalid: '标识只能使用小写字母、数字、- 和 _，且不能是 @hermes、@default、@all、@everyone 或 @user。',
+    handleInvalid:
+      '标识只能使用小写字母、数字、- 和 _，不能以 default- 开头，且不能是 @hermes、@default、@all、@everyone 或 @user。',
     handleTaken: handle => `@${handle} 已被其他机器人使用。`,
     handleNotSaved: '标识未保存：此机器人所在的机器未接收。连接后请重试。',
     nameTaken: name => `名为“${name}”的智能体已存在。`,
@@ -1439,7 +1443,8 @@ const zhHant: BotsMessages = {
     editDescription: (name, profile) => `${name}（${profile}）的外觀和職責。`,
     handle: '標識',
     handleHint: '其他機器人和群組聊天用來標記此機器人的名稱。@hermes 仍然有效。留空即為 @hermes。',
-    handleInvalid: '標識只能使用小寫字母、數字、- 和 _，且不能是 @hermes、@default、@all、@everyone 或 @user。',
+    handleInvalid:
+      '標識只能使用小寫字母、數字、- 和 _，不能以 default- 開頭，且不能是 @hermes、@default、@all、@everyone 或 @user。',
     handleTaken: handle => `@${handle} 已被其他機器人使用。`,
     handleNotSaved: '標識未儲存：此機器人所在的機器未接收。連線後請再試一次。',
     nameTaken: name => `名為「${name}」的智慧代理已存在。`,

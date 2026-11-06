@@ -105,6 +105,7 @@ def test_an_unset_handle_leaves_the_capability_epoch_alone(tmp_path):
 @pytest.mark.parametrize("value, problem", [
     ("hermes", "reserved"), ("everyone", "reserved"), ("default", "reserved"),
     ("two words", "lowercase letters"), ("-lead", "lowercase letters"), ("x" * 65, "lowercase letters"),
+    ("default-server", "cannot start with 'default-'"),
     ("researcher", "name of a profile"), ("scribe", "tags another bot"), (7, "must be text"),
 ])
 def test_validation_refuses_handles_that_cannot_name_the_default(tmp_path, value, problem):
@@ -247,3 +248,27 @@ def test_a_registered_peer_name_is_refused_and_keeps_its_shorthand(tmp_path, mon
     _set_default_handle(root, "spark")
     assert bot_mode_probe._handle("default", ["default", "researcher"], root) == "hermes"
     assert "You are `@hermes`" in bot_mode_probe.get_bot_mode_protocol_section(root)
+
+
+def test_a_remote_custom_handle_naming_a_local_peer_is_offered_qualified(tmp_path):
+    """A bare peer name in ``message_agent`` reaches the peer first, so another machine's default
+    handled like it is offered and stamped connection-qualified, never as the bare name."""
+    root = _managed_home(tmp_path, peers=("spark",))
+    bot_relay.write_remote_roster(root, [
+        {"profile": "default", "handle": "spark", "connection_id": "laptop", "connection_label": "Laptop"},
+    ])
+    roster = bot_relay.read_remote_roster(root)
+    taken = bot_mode_probe.local_taken_forms(root)
+
+    assert "spark" in taken
+    assert bot_relay.remote_target_forms(roster, taken) == ["spark@laptop"]
+    stamped = bot_relay.qualify_sender_stamp("Message from 🤖 Lead (@spark): hi", "spark", "laptop", roster, taken)
+    assert stamped == "Message from 🤖 Lead (@spark@laptop): hi"
+    assert "@spark@laptop" in bot_mode_probe.get_bot_mode_protocol_section(root)
+
+
+def test_a_device_tag_is_not_a_custom_handle(tmp_path):
+    root = _managed_home(tmp_path)
+    _set_default_handle(root, "default-server")
+    assert bot_mode_probe.custom_default_handle(root) == ""
+    assert bot_mode_probe._handle("default", ["default", "researcher"], root) == "hermes"

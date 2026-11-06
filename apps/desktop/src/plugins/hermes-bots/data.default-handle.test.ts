@@ -72,6 +72,7 @@ describe('normalizeMentionHandle', () => {
     ['default', ''],
     ['everyone', ''],
     ['two words', ''],
+    ['default-server', ''],
     ['-lead', ''],
     ['x'.repeat(65), ''],
     [7, '']
@@ -167,11 +168,11 @@ describe('a default with a custom handle', () => {
 
 describe('the Bots editor collision check', () => {
   it('refuses a handle another row already answers to, on any machine', () => {
-    const rows = twoMachines('', '')
+    const rows = twoMachines('', 'atlas')
     const self = rows[0]
 
     expect(mentionHandleTaken('researcher', self, rows)).toBe(true)
-    expect(mentionHandleTaken('default-server', self, rows)).toBe(true)
+    expect(mentionHandleTaken('atlas', self, rows)).toBe(true)
     expect(mentionHandleTaken('maia', self, rows)).toBe(false)
 
     const titled = [...rows, { connectionId: 'server', name: 'scribe', remoteSource: true, title: 'Maia' } as RosterRow]
@@ -325,6 +326,42 @@ describe('room collisions through friendly names', () => {
 
       expect([...parseGroupChatMentions('@maia go', members).mentioned]).toEqual([])
     }
+  })
+})
+
+describe('a custom handle equal to a title’s first word', () => {
+  it('leaves that word with the titled bot, in either seat order', () => {
+    const [laptop] = twoMachines('alice', '')
+
+    const writer = {
+      connectionId: 'server',
+      handle: 'writer',
+      name: 'writer',
+      remoteSource: true,
+      title: 'Alice Smith'
+    } as RosterRow
+
+    for (const seated of [
+      [laptop, writer],
+      [writer, laptop]
+    ]) {
+      const members = durableGroupChatMembers(seated)
+
+      expect([...parseGroupChatMentions('@alice go', members).mentioned]).toEqual(['server::writer'])
+      expect([...parseGroupChatMentions('@default-laptop go', members).mentioned]).toEqual(['laptop::default'])
+    }
+  })
+})
+
+describe('a custom handle shaped like a device tag', () => {
+  it('is not a handle, so a default never loses its own device tag to @hermes', () => {
+    const [laptop, , server] = twoMachines('maia', 'default-server')
+    const members = durableGroupChatMembers([laptop, server])
+
+    expect(customDefaultHandle(server.name, server)).toBe('')
+    expect(members.map(member => member.handle)).toEqual(['default-laptop', 'default-server'])
+    expect([...parseGroupChatMentions('@hermes go', members).mentioned]).toEqual([])
+    expect([...parseGroupChatMentions('@default-server go', members).mentioned]).toEqual(['server::default'])
   })
 })
 
