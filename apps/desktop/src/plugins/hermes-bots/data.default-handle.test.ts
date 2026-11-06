@@ -394,6 +394,12 @@ describe('a custom handle equal to another default’s collapsed custom handle',
           // A sentence's closing period is prose, not part of the handle.
           expect(tagged(`Thanks @${laptopHandle}.`)).toEqual(['laptop::default'])
           expect(tagged(`Thanks @${serverHandle}.`)).toEqual(['server::default'])
+
+          // Markdown emphasis and trailing prose punctuation are not part of the handle either.
+          for (const wrap of ['_', '__', '-', '_.', '__.', '...']) {
+            expect(tagged(`Thanks _@${laptopHandle}${wrap}`)).toEqual(['laptop::default'])
+            expect(tagged(`Thanks _@${serverHandle}${wrap}`)).toEqual(['server::default'])
+          }
         }
       }
     }
