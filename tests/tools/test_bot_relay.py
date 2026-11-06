@@ -257,6 +257,25 @@ def test_one_name_for_two_machines_across_desktops_stays_two_rows(root, tmp_path
     assert bot_relay.claim_pending_envelopes(home) == []
 
 
+def test_envelope_names_who_may_deliver_it(root):
+    """Several Desktops drain one gateway and a connection name is one Desktop's: the envelope
+    carries the target machine's install and the publishers that listed it, so a Desktop that does
+    not relay it (or whose same-named connection is another machine) leaves it to them — also when
+    a unique title slug, not the colliding qualified form, picked the row."""
+    x, y = "1" * 32, "2" * 32
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id=x, title="Red Bot")], "local-aaaaaaaaaaaa")
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id=y, title="Blue Bot"),
+                                         _row("ops", "nas")], "local-bbbbbbbbbbbb")
+    roster = bot_relay.read_remote_roster(root)
+    red = bot_relay.resolve_remote_target("red-bot", roster)
+    env = bot_relay.enqueue_envelope(root, target=red, message="hi", sender_profile="work", sender_handle="work")
+    assert (env["target_install"], env["target_publishers"]) == (x, ["local-aaaaaaaaaaaa"])
+    assert bot_relay._target_liveness(root, red) is None  # its own row, not Blue Bot's
+    nas = bot_relay.resolve_remote_target("ops", roster)
+    env = bot_relay.enqueue_envelope(root, target=nas, message="hi", sender_profile="work", sender_handle="work")
+    assert "target_install" not in env and env["target_publishers"] == ["local-bbbbbbbbbbbb"]
+
+
 def test_concurrent_pushes_never_lose_a_publisher(root, monkeypatch):
     """Pushes from several Desktops land concurrently (the gateway serves RPCs on a worker pool):
     the read-modify-write is serialised, so every publisher's slice survives."""

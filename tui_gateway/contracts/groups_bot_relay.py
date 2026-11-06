@@ -623,6 +623,10 @@ class RelayEnvelope(OpenModel):
     target_profile: str
     target_handle: str
     message: str
+    # Who may deliver it: the target machine's install id, and the Desktops whose roster listed it
+    # at send time (a Desktop not listed, or whose same-named connection is another install, leaves it).
+    target_install: str | None = None
+    target_publishers: list[str] | None = None
 
 
 class BotRelayOutboxDrainResult(Result):

@@ -1949,6 +1949,8 @@ export interface RelayEnvelope {
   target_profile: string
   target_handle: string
   message: string
+  target_install?: string | null
+  target_publishers?: string[] | null
   [key: string]: unknown
 }
 /** ``profile`` here is the TARGET profile on this gateway (also what the desktop route wrapper adds). */

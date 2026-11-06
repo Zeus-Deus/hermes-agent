@@ -33608,6 +33608,33 @@
           "message": {
             "title": "Message",
             "type": "string"
+          },
+          "target_install": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target Install"
+          },
+          "target_publishers": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target Publishers"
           }
         },
         "required": [

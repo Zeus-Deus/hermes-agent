@@ -1840,6 +1840,65 @@ describe('each Desktop pushes its roster as its own slice (#139219)', () => {
     }
   )
 
+  describe('an envelope only another Desktop relays is left to it', () => {
+    function drainOne(envelope: Record<string, unknown>) {
+      return respondWith(call => {
+        if (call.method === 'profiles.list') {
+          return call.connectionId === 'local'
+            ? { install_id: INSTALL, profiles: [{ name: 'ops' }] }
+            : { install_id: 'f'.repeat(32), profiles: [{ name: 'scout' }] }
+        }
+
+        if (call.method === 'bot_relay.outbox.drain') {
+          return { envelopes: call.connectionId === 'local' ? [envelope] : [] }
+        }
+
+        if (call.method === 'bot_relay.deliver') {
+          return { status: 'settled', delivery_id: call.params.id, admission_id: 'admission', reply: 'done' }
+        }
+
+        return {}
+      })
+    }
+
+    const base = { from_handle: 'ops', from_profile: 'ops', id: 'env-o', message: 'hi', target_profile: 'scout' }
+
+    async function run(envelope: Record<string, unknown>) {
+      const calls = drainOne(envelope)
+      const { startBotRelay, stopBotRelay } = await loadRelay()
+
+      startBotRelay()
+      await vi.advanceTimersByTimeAsync(0)
+      await pushAndSettle()
+      stopBotRelay()
+
+      return calls.filter(call => call.method === 'bot_relay.deliver' || call.method === 'bot_relay.reply')
+    }
+
+    it('a connection this Desktop lacks, listed only by another Desktop: no "not connected" reply', async () => {
+      expect(await run({ ...base, target_connection: 'nas', target_publishers: ['local-bbbbbbbbbbbb'] })).toEqual([])
+    })
+
+    it('a connection this Desktop lacks but its own roster listed: answers as before', async () => {
+      const out = await run({ ...base, target_connection: 'nas', target_publishers: ['local-0123456789ab'] })
+
+      expect(out).toEqual([
+        expect.objectContaining({ method: 'bot_relay.reply', params: expect.objectContaining({ error: expect.stringMatching(/'nas' is not connected/) }) })
+      ])
+    })
+
+    it('a same-named connection answering from another install is not the target', async () => {
+      expect(await run({ ...base, target_connection: 'srv', target_install: 'e'.repeat(32) })).toEqual([])
+
+      const ours = await run({ ...base, target_connection: 'srv', target_install: 'f'.repeat(32) })
+
+      expect(ours.map(call => [call.method, call.connectionId])).toEqual([
+        ['bot_relay.deliver', 'srv'],
+        ['bot_relay.reply', 'local']
+      ])
+    })
+  })
+
   it('stamps each row with the install its gateway reported', async () => {
     const calls = serve({ install: INSTALL })
     const { startBotRelay, stopBotRelay } = await loadRelay()

@@ -414,14 +414,33 @@ def _target_liveness(root: Path | str, target: dict) -> Optional[bool]:
         roster = _read_merged_roster(root, fresh_only=True)
         if not roster:
             return None
-        key = (str(target.get("connection_id") or ""), str(target.get("profile") or ""))
-        row = next((r for r in roster if (r["connection_id"], r["profile"]) == key), None)
+        row = next((r for r in roster if _lists_target(r, target)), None)
         if row is None:
             return False  # fresh roster no longer lists the target — offline
         return row["online"] if isinstance(row.get("online"), bool) else None
     except Exception:
         logger.debug("bot_relay liveness check failed", exc_info=True)
         return None
+
+
+def _lists_target(row: dict, target: dict) -> bool:
+    """``row`` is ``target``'s machine and profile: same connection id and profile, and no
+    conflicting install id (two Desktops can give two machines one connection name)."""
+    install = target.get("install_id")
+    return ((row["connection_id"], row["profile"]) == (str(target.get("connection_id") or ""), str(target.get("profile") or ""))
+            and (not install or row.get("install_id") in (None, install)))
+
+
+def _target_publishers(root: Path | str, target: dict) -> list[str]:
+    """The publishers whose fresh slice lists ``target`` — the Desktops that relay its machine.
+    [] when unknown (no fresh slice, unreadable roster). Never raises."""
+    try:
+        now = time.time()
+        return sorted(key for key, (stamp, rows) in _roster_slices(root).items()
+                      if now - stamp <= ROSTER_FRESH_SECONDS and any(_lists_target(row, target) for row in rows))
+    except Exception:
+        logger.debug("bot_relay publisher lookup failed", exc_info=True)
+        return []
 
 
 def enqueue_envelope(root: Path | str, *, target: dict, message: str, sender_profile: str, sender_handle: str) -> dict:
@@ -440,6 +459,13 @@ def enqueue_envelope(root: Path | str, *, target: dict, message: str, sender_pro
         "target_connection": target["connection_id"], "target_profile": target["profile"],
         "target_handle": target["handle"], "message": message,
     }
+    # Who may deliver it (#139219): several Desktops drain this gateway, and a connection name is
+    # one Desktop's. A Desktop not listed leaves the envelope to those listed; one whose connection
+    # of that name answers from another install leaves it too.
+    if target.get("install_id"):
+        envelope["target_install"] = target["install_id"]
+    if publishers := _target_publishers(root, target):
+        envelope["target_publishers"] = publishers
     _atomic_write_json(base / OUTBOX_DIR / f"{envelope['id']}.json", envelope)
     return envelope
 

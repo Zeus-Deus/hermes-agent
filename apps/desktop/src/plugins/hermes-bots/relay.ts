@@ -220,6 +220,26 @@ function rosterPublisher(): string {
   return localRelayId !== null && LOCAL_RELAY_ID_RE.test(localRelayId) ? localRelayId : RUN_PUBLISHER_ID
 }
 
+/** Install id each relayed connection last reported (profiles.list), to tell this Desktop's
+ *  connection from another Desktop's connection of the same name. */
+const connectionInstalls = new Map<string, string>()
+
+/** The envelope is another Desktop's to deliver: the sender gateway named the Desktops whose
+ *  roster listed its target and this one is not among them, or the target's machine is not the
+ *  one this Desktop's connection of that name answers from. Unknown either way → ours. */
+function anotherDesktopsEnvelope(envelope: RelayEnvelope, target: RelayConnection | undefined): boolean {
+  if (target) {
+    const want = String(envelope?.target_install || '').toLowerCase()
+    const have = connectionInstalls.get(target.id)
+
+    return Boolean(want && have && want !== have)
+  }
+
+  const listed = Array.isArray(envelope?.target_publishers) ? envelope.target_publishers.map(String) : []
+
+  return listed.length > 0 && !listed.includes(RUN_PUBLISHER_ID) && !(localRelayId !== null && listed.includes(localRelayId))
+}
+
 /** A gateway from before the slices refusing the unknown `publisher` key: the canonical door
  *  answers a typed invalid_params, the tui_gateway door a 4000 naming the field. */
 function refusedPublisher(error: any): boolean {
@@ -310,6 +330,10 @@ interface RelayEnvelope {
   from_profile?: string
   from_handle?: string
   target_connection?: string
+  /** The target machine's install id when the sender gateway knew it (#139219). */
+  target_install?: string
+  /** The Desktops whose roster listed the target when it was sent (#139219). */
+  target_publishers?: unknown
   target_profile?: string
 }
 
@@ -454,6 +478,10 @@ async function relayAgentsOn(
     const install = String(res?.install_id || '')
       .trim()
       .toLowerCase()
+
+    if (INSTALL_ID_RE.test(install)) {
+      connectionInstalls.set(connection.id, install)
+    }
 
     const rows = profiles
       .map(profile => ({
@@ -613,6 +641,12 @@ async function syncRelayRosters() {
     for (const id of [...relayAgentsCache.keys()]) {
       if (!liveIds.has(id)) {
         relayAgentsCache.delete(id)
+      }
+    }
+
+    for (const id of [...connectionInstalls.keys()]) {
+      if (!liveIds.has(id)) {
+        connectionInstalls.delete(id)
       }
     }
 
@@ -900,8 +934,8 @@ function learnLocalRelayId(queued: RelayQueuedEnvelope[], byId: Map<string, Rela
 }
 
 /** The envelope's target on this Desktop (`relayTargetOf`), or null when this Desktop must not
- *  act on it (yet). 'foreign' — another Desktop's machine: that Desktop drains this gateway too
- *  and delivers it. No reply either — the first reply wins, so an error here would beat its real
+ *  act on it (yet). 'foreign' — another Desktop's machine, or a target only other Desktops relay
+ *  (`anotherDesktopsEnvelope`): that Desktop drains this gateway too and delivers it. No reply either — the first reply wins, so an error here would beat its real
  *  answer; the gateway re-offers the unanswered envelope on every drain until one lands or it
  *  times out. Unknown own id — the target may or may not be this machine, and a local sender has
  *  no name the recipient can reply to: stay pinned and mark the sender as having work, so a later
@@ -915,7 +949,7 @@ function actionableTarget(
 ): RelayConnection | null | undefined {
   const target = relayTargetOf(String(envelope?.target_connection || ''), byId)
 
-  if (target === 'foreign') {
+  if (target === 'foreign' || (target !== 'unresolved' && anotherDesktopsEnvelope(envelope, target))) {
     pending.delete(envelopeId)
 
     return null
