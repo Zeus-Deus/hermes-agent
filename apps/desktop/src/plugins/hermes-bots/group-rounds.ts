@@ -943,7 +943,7 @@ export function sendToGroupChat(
         ? {}
         : applyGroupHoldDirective(
             room.holds,
-            parseSendMentions(trimmed, members),
+            parseHoldMentions(trimmed, members),
             trimmed,
             {
               at: sent?.at,
@@ -991,6 +991,35 @@ export async function registeredConnectionIds(): Promise<null | ReadonlySet<stri
   } catch {
     return null
   }
+}
+
+/** The mentions a hold directive acts on. A Stop must hold every seat the
+ *  drive could route its text to, and the drive re-reads the registry this
+ *  synchronous path only has a cached view of (a connection added or removed
+ *  since flips which same-named seat wins a shared form last-wins). So a Stop
+ *  names each seat that answers to a form on its own; a seat marked
+ *  sourceMissing is never driven, so it is named only when no other seat
+ *  answers. Over-holding a same-named twin is the safe side: the user can
+ *  resume it by its device handle. Releases keep ordinary precedence. */
+function parseHoldMentions(text: string, members: GroupMember[]) {
+  if (stopWordPlacement(text) !== 'adjacent') {
+    return parseSendMentions(text, members)
+  }
+
+  const live = members.filter(member => !member?.sourceMissing)
+  const mentioned = new Set<string>()
+
+  for (const match of text.matchAll(/@([a-z0-9][a-z0-9._-]*)/gi)) {
+    const token = `@${match[1]}`
+    const answering = (seats: GroupMember[]) => seats.flatMap(seat => [...parseGroupChatMentions(token, [seat]).mentioned])
+    const hits = answering(live)
+
+    for (const key of hits.length ? hits : answering(members)) {
+      mentioned.add(key)
+    }
+  }
+
+  return { everyone: parseGroupChatMentions(text, members).everyone, mentioned }
 }
 
 /** The user's mentions for holds. A seat on a connection this Desktop does

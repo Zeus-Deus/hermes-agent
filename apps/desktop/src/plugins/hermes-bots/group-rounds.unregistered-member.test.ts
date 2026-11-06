@@ -253,6 +253,32 @@ describe('a member seated on a connection this Desktop does not have', () => {
     }
   })
 
+  it('holds every same-named seat the drive could route a stop to, whatever the registry did meanwhile', async () => {
+    const twin: GroupMember = { ...BOB, name: 'alice', handle: 'alice-server' }
+    const remote: GroupMember = { ...PHANTOM, handle: 'alice-laptop' }
+
+    // [cached view, registry the drive reads]
+    for (const [cached, fresh] of [
+      // `laptop` removed before its lifecycle event reached the cache.
+      [['local', 'laptop'], ['local']],
+      // `server` added; `laptop` never existed here.
+      [['local'], ['local', 'server']]
+    ]) {
+      const room = await loadRoom(cached, { turn: () => 'on it' })
+      const members = cached.includes('laptop') ? [ALICE, remote] : [ALICE, twin, remote]
+      room.chat.$groupChats.set({ g: { log: [], members, roomId: 'room', sessions: {}, watermarks: {} } })
+      await room.rounds.registeredConnectionIds()
+      host.connections = async () => fresh.map(id => ({ id }))
+
+      await send(room, 'stop @alice')
+
+      expect(Object.keys(room.chat.$groupChats.get().g.holds || {}).sort()).toEqual(
+        members.map(member => `${member.connectionId}::alice`).sort()
+      )
+      expect(room.routed).toEqual([])
+    }
+  })
+
   it('keeps a marked seat out of the drive when its connection returns before its live row', async () => {
     // A drive marked laptop::alice; the user then registers `laptop`, but the
     // live roster has not re-seated that bot yet (stored descriptor, marked).
