@@ -220,19 +220,33 @@ def _live_slices(slices: dict[str, _Slice], now: float, *, fresh_only: bool) -> 
     return [max(slices.values(), key=lambda item: item[0])[1]]
 
 
+def _same_bot(a: dict, b: dict) -> bool:
+    return all(a.get(k) == b.get(k) for k in ("handle", "title", "description"))
+
+
+def _same_machine(row: dict, other: dict, other_install: Optional[str]) -> bool:
+    """``row`` and ``other`` (whose machine reports ``other_install``) are one machine's profile.
+    Both install ids known: they must match. One unknown (an older Desktop pushed the row):
+    only a row that also reads the same is taken as the same bot — a missing id is never
+    equality by itself. Both unknown: one row, as before the install ids."""
+    install = row.get("install_id")
+    if install and other_install:
+        return install == other_install
+    return (not install and not other_install) or _same_bot(row, other)
+
+
 def _merge_slices(slices: list[list[dict]]) -> list[dict]:
     """Union of ``slices``: one row per (connection_id, profile) and machine. A non-local
     connection id is a label slug from ONE Desktop's registry, so two Desktops can each call a
-    different machine ``homelab``: rows whose machines report different install ids stay
-    separate rows (a name they share is ambiguous, never one of them); a row without an install
-    id joins the first. Per machine: the first publisher's row, online when ANY publisher sees it
-    online, unknown when any does not know, offline only when every publisher listing it says so."""
+    different machine ``homelab``: rows of different machines (``_same_machine``) stay separate
+    rows (a name they share is ambiguous, never one of them). Per machine: the first
+    publisher's row, online when ANY publisher sees it online, unknown when any does not know,
+    offline only when every publisher listing it says so."""
     groups: dict[tuple[str, str], list[list[dict]]] = {}
     for rows in slices:
         for row in rows:
             candidates = groups.setdefault((row["connection_id"], row["profile"]), [])
-            install = row.get("install_id")
-            group = next((g for g in candidates if install is None or _group_install(g) in (None, install)), None)
+            group = next((g for g in candidates if _same_machine(row, g[0], _group_install(g))), None)
             if group is None:
                 candidates.append([row])
             else:
@@ -431,9 +445,8 @@ def _target_liveness(root: Path | str, target: dict) -> Optional[bool]:
 def _lists_target(row: dict, target: dict) -> bool:
     """``row`` is ``target``'s machine and profile: same connection id and profile, and no
     conflicting install id (two Desktops can give two machines one connection name)."""
-    install = target.get("install_id")
     return ((row["connection_id"], row["profile"]) == (str(target.get("connection_id") or ""), str(target.get("profile") or ""))
-            and (not install or row.get("install_id") in (None, install)))
+            and _same_machine(row, target, target.get("install_id")))
 
 
 def _target_publishers(root: Path | str, target: dict) -> list[str]:

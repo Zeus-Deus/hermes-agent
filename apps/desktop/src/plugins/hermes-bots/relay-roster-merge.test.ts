@@ -448,6 +448,52 @@ describe('each Desktop pushes its roster as its own slice (#139219)', () => {
       stopBotRelay()
     })
 
+    it('a connection of the name, no install to check, listed only for another Desktop: left to it', async () => {
+      expect(await run({ ...base, target_connection: 'srv', target_publishers: ['desktop-bbbbbbbbbbbb'] })).toEqual([])
+      expect(
+        (await run({ ...base, target_connection: 'srv', target_publishers: [PUBLISHER, 'desktop-bbbbbbbbbbbb'] })).map(
+          call => call.method
+        )
+      ).toEqual(['bot_relay.deliver', 'bot_relay.reply'])
+    })
+
+    it('a deferred envelope the gateway stopped offering (answered or timed out) is never delivered later', async () => {
+      let srvInstall = 'e'.repeat(32)
+      let offered = true
+
+      const calls = respondWith(call => {
+        if (call.method === 'profiles.list') {
+          return call.connectionId === 'local'
+            ? { install_id: INSTALL, profiles: [{ name: 'ops' }] }
+            : { install_id: srvInstall, profiles: [{ name: 'scout' }] }
+        }
+
+        if (call.method === 'bot_relay.outbox.drain') {
+          return {
+            envelopes:
+              call.connectionId === 'local' && offered
+                ? [{ ...base, canonical_delivery_v1: true, target_connection: 'srv', target_install: 'f'.repeat(32) }]
+                : []
+          }
+        }
+
+        return {}
+      })
+
+      const { startBotRelay, stopBotRelay } = await loadRelay()
+
+      startBotRelay()
+      await vi.advanceTimersByTimeAsync(0)
+      await pushAndSettle() // deferred: 'srv' answers from another install
+      offered = false // the gateway timed it out
+      await vi.advanceTimersByTimeAsync(30_000)
+      srvInstall = 'f'.repeat(32)
+      await vi.advanceTimersByTimeAsync(60_000)
+      stopBotRelay()
+
+      expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
+    })
+
     it('a same-named connection answering from another install is not the target', async () => {
       expect(await run({ ...base, target_connection: 'srv', target_install: 'e'.repeat(32) })).toEqual([])
 

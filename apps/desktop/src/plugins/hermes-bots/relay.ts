@@ -250,9 +250,20 @@ function rosterPublisher(): string {
  *  not this one's alone: when this Desktop has no connection of that name, a listed Desktop
  *  that does delivers it, so a "not connected" reply here would beat that real answer. */
 function listedForOthers(envelope: RelayEnvelope): boolean {
-  const listed = Array.isArray(envelope?.target_publishers) ? envelope.target_publishers.map(String) : []
+  return listedPublishers(envelope).some(id => id !== RUN_PUBLISHER_ID)
+}
 
-  return listed.some(id => id !== RUN_PUBLISHER_ID)
+function listedPublishers(envelope: RelayEnvelope): string[] {
+  return Array.isArray(envelope?.target_publishers) ? envelope.target_publishers.map(String) : []
+}
+
+/** This Desktop has a connection of the target's name, but the envelope names no install to check
+ *  it against and lists only other Desktops: their machine of that name is the target, and this
+ *  one's may be a different machine under the same name. */
+function namedForOtherDesktops(envelope: RelayEnvelope): boolean {
+  const listed = listedPublishers(envelope)
+
+  return !envelope?.target_install && listed.length > 0 && !listed.includes(RUN_PUBLISHER_ID)
 }
 
 /** The install the target connection answers from right now ('' when it reports none), or
@@ -412,6 +423,7 @@ function relayEligibleRoutes(routes: ProfileRoute[]): ProfileRoute[] {
 
 /** A queued cross-connection message drained from a gateway's outbox. */
 interface RelayEnvelope {
+  canonical_delivery_v1?: boolean
   id?: string
   message?: string
   from_profile?: string
@@ -816,10 +828,13 @@ async function drainRelayOutboxes() {
         )
 
         const pending = pendingRelaysFor(sender)
+        const offered = Array.isArray(res?.envelopes) ? res.envelopes : []
 
-        for (const envelope of Array.isArray(res?.envelopes) ? res.envelopes : []) {
+        for (const envelope of offered) {
           if (envelope.id && !pending.has(envelope.id)) {pending.set(envelope.id, structuredClone(envelope))}
         }
+
+        forgetSettledPins(pending, offered)
 
         // Every claimed-but-unACKed envelope rides again: a delivery that
         // settled without an exact identity, or whose ACK was lost, retries
@@ -854,6 +869,20 @@ async function drainRelayOutboxes() {
       // instead of leaving them to the interval poll.
       relay.drainRerun = false
       scheduleRelayPushDrain()
+    }
+  }
+}
+
+/** The gateway re-offers a canonical envelope on every drain until its reply lands or it times
+ *  out (tools/bot_relay.py _replay_unanswered), so one it no longer offers is settled: a pin kept
+ *  for it (a deferred delivery) must not deliver it after that. Older envelopes keep their pin —
+ *  for them it is the only retry. */
+function forgetSettledPins(pending: Map<string, RelayEnvelope>, offered: RelayEnvelope[]) {
+  const ids = new Set(offered.map(envelope => envelope?.id))
+
+  for (const [id, pinned] of pending) {
+    if (pinned?.canonical_delivery_v1 === true && !ids.has(id)) {
+      pending.delete(id)
     }
   }
 }
@@ -1037,7 +1066,7 @@ function actionableTarget(
   // connection, or be the only one left relaying it.
   if (
     target === 'unresolved' ||
-    (target === undefined && listedForOthers(envelope)) ||
+    (target === undefined ? listedForOthers(envelope) : namedForOtherDesktops(envelope)) ||
     (sender.id === LOCAL_CONNECTION_ID && localRelayId === null)
   ) {
     noteRelayOutboxWork({ connectionId: sender.id })

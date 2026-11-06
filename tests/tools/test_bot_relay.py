@@ -276,6 +276,24 @@ def test_envelope_names_who_may_deliver_it(root):
     assert "target_install" not in env and env["target_publishers"] == ["local-bbbbbbbbbbbb"]
 
 
+def test_a_row_without_install_never_borrows_another_machines(root):
+    """An older Desktop pushes ``homelab/scout`` ("Red Bot") with no install id while another
+    Desktop's ``homelab/scout`` ("Blue Bot") reports one. A missing id is not equality: they stay
+    two rows, and ``red-bot`` goes out with no install and only its own publisher listed — never
+    stamped with Blue Bot's machine."""
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", title="Red Bot")], "desktop-aaaaaaaaaaaa")
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id="2" * 32, title="Blue Bot")], "desktop-bbbbbbbbbbbb")
+    roster = bot_relay.read_remote_roster(root)
+    assert sorted((r["title"], r.get("install_id")) for r in roster) == [("Blue Bot", "2" * 32), ("Red Bot", None)]
+    red = bot_relay.resolve_remote_target("red-bot", roster)
+    env = bot_relay.enqueue_envelope(root, target=red, message="hi", sender_profile="work", sender_handle="work")
+    assert "target_install" not in env and env["target_publishers"] == ["desktop-aaaaaaaaaaaa"]
+    # the same bot seen by both (an older Desktop and a newer one) is still one row
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id="2" * 32, title="Red Bot")], "desktop-bbbbbbbbbbbb")
+    [row] = bot_relay.read_remote_roster(root)
+    assert (row["title"], row["install_id"]) == ("Red Bot", "2" * 32)
+
+
 def test_sender_stamp_on_a_colliding_connection_name_names_no_single_machine(root):
     """A relayed DM from ``scout`` on ``homelab``, while two Desktops each call a different machine
     ``homelab``: the stamp must not be either row's title slug (a reply would reach that one
