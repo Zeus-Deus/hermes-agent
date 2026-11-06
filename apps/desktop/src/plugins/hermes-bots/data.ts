@@ -1380,6 +1380,16 @@ export function mentionTargetConnection(
   return bot?.remoteSource && botId ? botId : undefined
 }
 
+/** The bare form the sender's own gateway resolves `bot` by. A row reached
+ *  through another address of the sender's install had its 'hermes' claim
+ *  computed from that address's inventory alone, so name its folder id. */
+export function localMentionHandle(bot: Partial<RosterRow>, sender: RosterOwnerRef | null | undefined): string {
+  const botId = String(bot?.connectionId || '').trim()
+  const viaAlias = Boolean(sender?.exact && botId && botId !== String(sender.connectionId || '').trim())
+
+  return botHandle(String(bot?.name || ''), { hermesHandleTaken: Boolean(bot?.hermesHandleTaken) || viaAlias })
+}
+
 /** `rowId` is the ref's connection, or another registry address of the same
  *  install (a box registered twice; the union roster collapses its bots onto
  *  one of them). */

@@ -49,6 +49,7 @@ import {
   cachedUnionRoster,
   claimDefaultHandles,
   isActiveRosterBot,
+  localMentionHandle,
   mentionTargetConnection,
   migrateBotMeta,
   primeRoster,
@@ -873,9 +874,7 @@ export default {
             // the roster's remote flag says (#130260).
             const targetConnection = mentionTargetConnection(bot, sender)
 
-            const target = targetConnection
-              ? `${bot.name}@${targetConnection}`
-              : botHandle(bot.name, { hermesHandleTaken: bot.hermesHandleTaken })
+            const target = targetConnection ? `${bot.name}@${targetConnection}` : localMentionHandle(bot, sender)
 
             // Local rows get the same annotation whenever their UI alias
             // ('default-this-device') differs from the resolvable handle —

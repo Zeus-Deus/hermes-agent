@@ -434,8 +434,28 @@ describe('one server registered under two addresses', () => {
 
     const { text } = await handler({ text: 'send it to @default-server' })
 
-    expect(text).toContain('(message_agent target: "hermes")')
+    // Local to the sender, named by folder id: the row's hermes claim is the other address's.
+    expect(text).toContain('(message_agent target: "default")')
     expect(provide('').map(item => item.insert)).not.toContain('@ops')
+  })
+
+  it("names the default's folder id when only the other address lists a real hermes profile", async () => {
+    // The collapse kept `default` on server-a (its inventory has no hermes) and `hermes` on server-b.
+    live.owner = { connectionId: 'server-b', profile: 'ops' }
+
+    const { handler } = await contributions({
+      profiles: [
+        { connectionId: 'server-a', handle: 'default-server', name: 'default', remoteSource: true, sourceScoped: true },
+        { connectionId: 'server-b', name: 'hermes', remoteSource: true, sourceScoped: true },
+        { connectionId: 'server-b', name: 'ops', remoteSource: true, sourceScoped: true }
+      ],
+      sources: sources('b'.repeat(32))
+    })
+
+    const { text } = await handler({ text: 'send it to @default-server' })
+
+    // 'hermes' would reach the real hermes profile on that gateway.
+    expect(text).toContain('(message_agent target: "default")')
   })
 
   it('keeps addresses distinct while their install ids are unknown', async () => {
