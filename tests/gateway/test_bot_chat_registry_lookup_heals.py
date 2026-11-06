@@ -42,6 +42,7 @@ async def test_the_registry_lookup_moves_an_unownable_holder_aside_and_answers_t
     new = row['session_id']
     assert new != old and str(db.get_session(new)['chat_id']).startswith('local-'), row
     assert db.get_session_by_title('Bot Chat')['id'] == new
+    assert db.get_session(new)['hidden'], "born hidden, as the Desktop's own create asks: Bot Mode owns it"
     moved = db.get_session(old)
     assert moved['title'].startswith('Bot Chat (') and moved['message_count'] == 1, 'history is kept'
     # The next lookup and the next delivery both find that chat: nothing else is minted.

@@ -61,6 +61,32 @@ async def test_the_runner_settles_a_not_found_refusal_with_its_payload(held, cap
     assert _admissions(held) == [] and held.executed == []
 
 
+@pytest.mark.asyncio
+async def test_a_settle_whose_answer_was_lost_is_a_definite_no_send_on_replay(held, monkeypatch, capsys):
+    """The owner settled the refusal but its answer never reached the tool: the tool keeps the
+    intent (the outcome is unknown to it). Replaying that intent gets the id's terminal refused
+    receipt as an ordinary answer, which is the same definite no-send."""
+    from tools import bot_live_delivery
+    _foreign_login_bot_chat(held)
+    settle = bot_live_delivery.authority_settle
+
+    def settled_then_lost(home, params):
+        settle(home, params)
+        raise ConnectionError('connection closed before the answer')
+
+    monkeypatch.setattr(bot_live_delivery, 'authority_settle', settled_then_lost)
+    first = await _send(held, 'ping')
+    assert first.get('status') == 'ambiguous', first
+    [intent] = held.dm_dir.glob('*.live.json')
+    monkeypatch.setattr(bot_live_delivery, 'authority_settle', settle)
+    dm_file = str(intent)[:-len('.live.json')]
+    assert await asyncio.to_thread(_runner, held, dm_file) == 1
+    replayed = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert replayed.get('reason') == 'not_found' and 'NOT sent' in replayed['error'], replayed
+    assert sorted(path.name for path in held.dm_dir.iterdir()) == []
+    assert _admissions(held) == [] and held.executed == []
+
+
 @pytest.mark.parametrize('reason, settled', [
     ('queue_full', None),           # an owner-state refusal: the pin is withdrawn
     ('permission_denied', 'agent_blocked'),  # a refusal of the delivery: the pin is settled refused

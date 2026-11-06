@@ -619,24 +619,23 @@ def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dic
             pinned_now = True
     home = intent["owner"]["profile_home"]
     record = read_delivery_result(home, intent["delivery_id"])
+    refusal = None  # the owner's refusal this call settled, when it settled one
+    from_owner = False
     if record is None or intent["owner"].get("canonical"):
         from hermes_cli.gateway_client import GatewayRPCError
-        from tools.bot_failure_reasons import HELD_NOT_SENT
         from tools.bot_live_delivery import settle_held_delivery
 
         identity = dict(delivery_id=intent["delivery_id"], author=intent.get("author"))
         try:
             record = deliver_to_live_owner(home, intent["owner"], intent["message"], **identity)
+            from_owner = True
         except GatewayRPCError as exc:
             if exc.data.get("admitted") is not False:
                 raise
             # Nothing was admitted while that refusal held the owner's lock, but a same-id attempt
             # may have admitted since: only the owner's settle decides, under that same lock.
             record = settle_held_delivery(home, intent["owner"], intent["message"], **identity)
-            if (str(exc) != HELD_NOT_SENT and isinstance(record, dict) and record.get("refused") is True
-                    and not record.get("admission_id")):
-                # The callers remove the intent and payload (``_settled_no_send``).
-                raise LiveTargetRefusedError(str(exc), str(exc.data.get("detail") or "")) from exc
+            refusal, from_owner = exc, True
         except PreDialError as exc:
             if not pinned_now:
                 raise  # an earlier attempt under this intent may have admitted: outcome unknown
@@ -644,10 +643,22 @@ def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dic
             # was admitted anywhere, so it is a definite no-send the sender may retry (#139303).
             _unlink_dm_file(_live_intent_file(dm_file))
             raise LiveTargetUnavailableError(f"live authority dial failed before admission ({exc})") from exc
+    from tools.bot_failure_reasons import HELD_NOT_SENT
+    # The callers remove the intent and payload (``_settled_no_send``).
+    if refusal is not None and str(refusal) != HELD_NOT_SENT and _refused_receipt(record):
+        raise LiveTargetRefusedError(str(refusal), str(refusal.data.get("detail") or "")) from refusal
     if _held_disposition(record):
-        # The callers remove the intent and payload (``_settled_no_send``).
         raise LiveTargetHeldError("Bot Chat is held by another session writer")
+    if from_owner and _refused_receipt(record):
+        # The id's terminal never-admitted receipt, answered by the owner after its identity check:
+        # an earlier attempt settled it (its answer was lost) or the owner refused it for good.
+        raise LiveTargetRefusedError(str(record.get("reason") or ""))
     return record
+
+
+def _refused_receipt(record: dict | None) -> bool:
+    """A terminal receipt the owner wrote without any admission (``refuse_pin``, ``settle``)."""
+    return isinstance(record, dict) and record.get("refused") is True and not record.get("admission_id")
 
 
 def _wait_live_dm(home: str, delivery_id: str, *, dm_file: str | os.PathLike | None = None) -> int:

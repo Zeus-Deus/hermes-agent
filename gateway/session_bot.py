@@ -235,8 +235,17 @@ async def heal_bot_chat_lookup(authority, actor, title, exc):
             or actor.profile_id != authority.profile_id or not {'session:create', 'session:read'} <= actor.capabilities
             or (displaced := displaceable_bot_chat(authority, row, actor.subject)) is None):
         raise exc
+    from gateway.session_runtime_workers import tracked_write
+
+    async def heal():
+        ref = await _create_bot_chat(authority, actor, displace=displaced)
+        if ref is not None:
+            # Born hidden, as the Desktop's own create asks (``hidden: true``): Bot Mode owns it.
+            await tracked_write(authority, partial(authority.db.set_session_hidden, ref.session_id, True))
+        return ref
+
     authority._require_admission_open()
-    ref = await asyncio.shield(track_mutation(authority, _create_bot_chat(authority, actor, displace=displaced)))
+    ref = await asyncio.shield(track_mutation(authority, heal()))
     if ref is None:
         # A concurrent delivery or open moved it first: answer whatever holds the title now.
         from gateway.session_local_title import resolve_titled_session
