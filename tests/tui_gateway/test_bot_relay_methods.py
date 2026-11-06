@@ -378,16 +378,24 @@ def test_the_legacy_door_refuses_a_routed_profile_this_install_lacks(home):
     assert not bot_relay.relay_root(home).exists()
 
 
-def test_a_routed_drain_reads_the_case_folded_profile_and_its_own_envelope_ttl(home):
+@pytest.mark.parametrize("ttl", ["literal", "env_ref"])
+def test_a_routed_drain_reads_the_case_folded_profile_and_its_own_envelope_ttl(home, monkeypatch, ttl):
     """The mailbox's profile owns the drain policy: with expiry off for ``ops`` and a 1 s TTL at the
-    install root, ``ops``' five-second-old envelope is still handed out (the routed selector is
-    resolved like every other profile-routed RPC, case-insensitively)."""
+    install root (or in the launch environment, for a ``${VAR}`` ref ``ops`` sets in its own .env),
+    ``ops``' five-second-old envelope is still handed out. The routed selector is resolved like every
+    other profile-routed RPC, case-insensitively."""
     import os
     import time
 
     (home / "config.yaml").write_text("bot_mode:\n  envelope_ttl_seconds: 1\n", encoding="utf-8")
     ops = home / "profiles" / "ops"
-    (ops / "config.yaml").write_text("bot_mode:\n  envelope_ttl_seconds: 0\n", encoding="utf-8")
+    if ttl == "literal":
+        (ops / "config.yaml").write_text("bot_mode:\n  envelope_ttl_seconds: 0\n", encoding="utf-8")
+    else:
+        monkeypatch.setenv("RELAY_ENVELOPE_TTL", "1")
+        (ops / "config.yaml").write_text("bot_mode:\n  envelope_ttl_seconds: ${RELAY_ENVELOPE_TTL}\n",
+                                         encoding="utf-8")
+        (ops / ".env").write_text("RELAY_ENVELOPE_TTL=0\n", encoding="utf-8")
     target = {"profile": "scout", "handle": "scout", "connection_id": "cloud-1",
               "connection_label": "", "title": "", "description": ""}
     env = bot_relay.enqueue_envelope(ops, target=target, message="m", sender_profile="ops", sender_handle="ops")

@@ -26,14 +26,17 @@ def _relay_root() -> Path:
 def _mailbox(params: dict):
     """Yield the relay folder (roster/outbox/replies) of the profile this request is served for —
     the routed ``profile`` param, else the legacy socket's ticket profile, else this process's own
-    profile — with HERMES_HOME bound to it, so ITS ``bot_mode`` config (envelope TTL) applies.
+    profile.
     ``message_agent`` reads its roster from, queues in, and waits under the SENDER's own home
     (``tools/bot_mode_dm.py``), and the canonical session door serves that same folder
     (``gateway/session_bot.relay_operation``); the install root here split a named profile's relay
     across two folders and its DMs were never drained (#146035). A routed name resolves against
     the same install root the producer and ``deliver`` use (``_roster``), so a custom HERMES_HOME
-    is its own ``default``; one this install lacks raises ``LookupError``."""
-    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+    is its own ``default``; one this install lacks raises ``LookupError``. The folder's full runtime
+    scope is bound (HERMES_HOME + secrets, as ``_profile_scoped`` binds a routed profile), so ITS
+    ``bot_mode`` config, ``${VAR}`` refs included, applies — the envelope TTL a drain enforces."""
+    from hermes_constants import get_hermes_home
+    from tui_gateway import server
     profile = str(params.get("profile") or "").strip().lower()
     if profile:
         from tools.bot_mode_probe import _profile_for_handle, _roster
@@ -44,11 +47,15 @@ def _mailbox(params: dict):
     else:
         from tui_gateway.ws_legacy_fallback import connection_profile_home
         home = connection_profile_home() or get_hermes_home()
-    token = set_hermes_home_override(str(home))
-    try:
-        yield Path(home)
-    finally:
-        reset_hermes_home_override(token)
+    home = Path(home)
+    foreign = home.resolve() != Path(server._launch_home()).resolve()
+    if foreign and home not in server._served_profile_homes:
+        # Same activation ``server._profile_home`` runs before this process serves a second home.
+        from tui_gateway.launch_profile_policy import activate_multi_profile_hosting
+        activate_multi_profile_hosting()
+        server._served_profile_homes.add(home)
+    with server._session_profile_runtime_scope({"profile_home": str(home) if foreign else None}):
+        yield home
 
 
 # Desktop deadline mirror; no retry runs here. The owner gateway retries a transiently failed
