@@ -2,7 +2,7 @@
 alternation repair puts on a stale unanswered user turn it merges into a new one.
 
 Split out of ``agent/agent_runtime_helpers.py`` (code-health size ratchet); a leaf module with no
-imports so every reader (runtime helpers, turn prep, the conversation loop) can import it directly.
+module-level imports so every reader (runtime helpers, turn prep, the conversation loop) can import it directly.
 """
 
 # Placeholder for an empty non-final message the provider would reject. This is the single source of
@@ -27,18 +27,42 @@ _LEGACY_INTERRUPTED_PLACEHOLDER = "[response interrupted]"
 STALE_UNANSWERED_TURN_SECS = 15 * 60
 
 
-def _epoch(value: object) -> float | None:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+# Role=user pivot rows written between turns (tui_gateway ``_is_pivot_marker``): notices, never a request.
+_PIVOT_MARKER_DISPLAY_KINDS = frozenset({"model_switch", "personality_switch"})
+
+
+def _request_time(msg: dict) -> float | None:
+    """When *msg*'s newest request part arrived: a merge survivor records it (its own ``timestamp`` stays
+    the first row's), a pivot marker is not a request, and a non-numeric time is unknown."""
+    from agent.message_metadata import MERGED_TURN_REQUEST_TS
+
+    if MERGED_TURN_REQUEST_TS in msg:
+        return msg[MERGED_TURN_REQUEST_TS]
+    ts = msg.get("timestamp")
+    if msg.get("display_kind") in _PIVOT_MARKER_DISPLAY_KINDS or isinstance(ts, bool):
+        return None
+    return float(ts) if isinstance(ts, (int, float)) else None
 
 
 def stale_unanswered_turn_prefix(prev: dict, new: dict, prev_text: str, new_text: str) -> str | None:
-    """Text to put before ``new_text`` when ``_merge_consecutive_users`` folds a stale unanswered turn
-    into a new one, else None (the plain ``"\\n\\n"`` join). Providers reject consecutive user turns,
-    so both stay in one turn; the labels stop the model answering the old prompt as the new request.
-    Only two plain prompts with known times qualify: a display/notice row is not an unanswered ask."""
-    old_ts, new_ts = _epoch(prev.get("timestamp")), _epoch(new.get("timestamp"))
-    if (not prev_text or not new_text or prev.get("display_kind") or new.get("display_kind")
-            or old_ts is None or new_ts is None or new_ts - old_ts <= STALE_UNANSWERED_TURN_SECS):
+    """Text to put before ``new_text`` when ``_merge_consecutive_users`` folds an unanswered turn into a
+    new one that is not its follow-up, else None (the plain ``"\\n\\n"`` join). Providers reject
+    consecutive user turns, so both stay in one turn; the labels stop the model answering the old prompt
+    as the new request. Not a follow-up: it arrived past the stale window, or from the other side of the
+    person/machinery line (a bot DM or background notice after a person's prompt, or the reverse).
+    Records on *prev* when its newest request part arrived, so a later merge measures from that.
+    Call before the merge rewrites *prev*."""
+    from agent.message_metadata import MERGED_TURN_REQUEST_TS
+    from gateway.response_filters import is_machinery_display_kind
+
+    old_ts, new_ts = _request_time(prev), _request_time(new)
+    known = [ts for ts in (old_ts, new_ts) if ts is not None]
+    prev[MERGED_TURN_REQUEST_TS] = max(known) if known else None
+    if not prev_text or not new_text or old_ts is None or new_ts is None:
+        return None
+    other_origin = is_machinery_display_kind(prev.get("display_kind")) != is_machinery_display_kind(
+        new.get("display_kind"))
+    if not other_origin and new_ts - old_ts <= STALE_UNANSWERED_TURN_SECS:
         return None
     from time import gmtime, strftime
 

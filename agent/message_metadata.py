@@ -28,6 +28,9 @@ REPAIR_BOOKKEEPING_FIELDS = frozenset({DB_ROW_SNAPSHOT, CANONICAL_ROW, RESTORED_
 # (agent_runtime_helpers._merge_consecutive_users); the persist override keeps it.
 # It repeats the row's own content, so pricing it would double the estimate.
 MERGED_TURN_PREFIX = "_merged_turn_prefix"
+# When a merged user row's newest request part arrived (its ``timestamp`` stays the first row's), so the next
+# merge tells a stale unanswered turn from a quick follow-up (agent_runtime_helpers_placeholders). Live only.
+MERGED_TURN_REQUEST_TS = "_merged_turn_request_ts"
 # The durable per-message id (``messages.message_uid``): minted once at the row's first insert and kept by
 # every host copy of that logical message (in-place compaction generation, rotation child, concurrent-tail
 # clone, replace re-issue, rewrite in place). Unlike ``_row_id`` (a physical id re-issued per copy, opt-in on
@@ -48,7 +51,7 @@ PERSISTENCE_ONLY_MESSAGE_FIELDS = frozenset(
     # to sweep underscore keys, but turn_context.py pops this set from every outgoing copy and a strict
     # backend 400s on any key it does not know.
     {"timestamp", "display_kind", "display_metadata", "_row_id", "_submit_row_session_id",
-     MERGED_TURN_PREFIX, MESSAGE_UID, ABSORBED_MESSAGE_UIDS, TOOL_CALL_UIDS, TOOL_CALL_UID,
+     MERGED_TURN_PREFIX, MERGED_TURN_REQUEST_TS, MESSAGE_UID, ABSORBED_MESSAGE_UIDS, TOOL_CALL_UIDS, TOOL_CALL_UID,
      # The alternation repair's row counts: an in-place compaction reads them off the live dict.
      MERGED_DURABLE_ROWS, UNNAMED_DURABLE_ROWS, RETIRED_DURABLE_ROWS}
 ) | REPAIR_BOOKKEEPING_FIELDS

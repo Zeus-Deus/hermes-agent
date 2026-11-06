@@ -4,8 +4,10 @@ A process death between a turn's start and its reply leaves that prompt in the s
 assistant row. Once the crash marker has aged out nothing re-sends it, so the next message (a
 person's, or a bot DM delivered days later) lands right behind it and the alternation repair folds
 both into one user turn. Providers reject consecutive user turns, so the merge stays; what changes
-is that an old unanswered part is labelled as such and the new part is marked as the current
-request. A quick double send keeps the plain ``"\\n\\n"`` join.
+is that an unanswered part that the new message does not follow up (older than the stale window, or
+from the other side of the person/machinery line, like a bot DM after a person's prompt) is labelled
+as such and the new part is marked as the current request. A quick double send keeps the plain
+``"\\n\\n"`` join.
 """
 
 import pytest
@@ -68,14 +70,82 @@ def test_unknown_timestamps_keep_the_plain_join(old_ts, new_ts):
     assert messages[2]["content"] == f"{STALE_ASK}\n\n{DM}"
 
 
-def test_display_marker_rows_are_not_labelled_as_unanswered_prompts():
-    messages = _history(OLD_TS, DAYS_LATER, display_kind="model_switch")
-    assert repair_message_sequence(None, messages) == 1
-    assert messages[2]["content"] == f"{STALE_ASK}\n\n{DM}"
+@pytest.mark.parametrize("side", [2, 3])
+@pytest.mark.parametrize("kind", ["model_switch", "personality_switch"])
+def test_pivot_marker_rows_are_not_labelled_as_requests(side, kind):
     messages = _history(OLD_TS, DAYS_LATER)
-    messages[3]["display_kind"] = "hidden"
+    messages[side]["display_kind"] = kind
     assert repair_message_sequence(None, messages) == 1
     assert messages[2]["content"] == f"{STALE_ASK}\n\n{DM}"
+
+
+@pytest.mark.parametrize("kind", ["internal_notification", "process_complete", "hidden"])
+def test_machinery_delivered_requests_are_labelled(kind):
+    """A gateway bot DM is an internal event: its row is ``internal_notification``, and still the request."""
+    messages = _history(OLD_TS, DAYS_LATER)
+    messages[3]["display_kind"] = kind
+    assert repair_message_sequence(None, messages) == 1
+    assert messages[2]["content"].startswith("[Earlier message from 2025-08-24 18:31 UTC")
+    assert messages[2]["content"].endswith(f"asks you to.]\n\n{DM}")
+
+
+@pytest.mark.parametrize("side", [2, 3])
+def test_fresh_merge_across_the_person_machinery_line_is_labelled(side):
+    """A bot DM a minute after a person's unanswered prompt (or the reverse) is not its follow-up."""
+    messages = _history(OLD_TS, OLD_TS + 60)
+    messages[side]["display_kind"] = "internal_notification"
+    assert repair_message_sequence(None, messages) == 1
+    merged = messages[2]["content"]
+    assert merged.startswith("[Earlier message from 2025-08-24 18:31 UTC, left without a reply:]")
+    assert "[New message from 2025-08-24 18:32 UTC. This is the current request;" in merged
+
+
+def test_fresh_machinery_rows_keep_the_plain_join():
+    messages = _history(OLD_TS, OLD_TS + 60)
+    messages[2]["display_kind"] = "process_complete"
+    messages[3]["display_kind"] = "internal_notification"
+    assert repair_message_sequence(None, messages) == 1
+    assert messages[2]["content"] == f"{STALE_ASK}\n\n{DM}"
+
+
+def test_fresh_prompt_after_an_absorbed_marker_keeps_the_plain_join():
+    """The survivor keeps the marker's old timestamp; staleness is measured from the newest request part."""
+    marker = {"role": "user", "content": "[System: model changed]", "display_kind": "model_switch", "timestamp": OLD_TS}
+    ask = {"role": "user", "content": "Investigate invoice drift.", "timestamp": OLD_TS + 3600}
+    follow = {"role": "user", "content": "The invoice number is 1234.", "timestamp": OLD_TS + 3610}
+    messages = [{"role": "assistant", "content": "hi"}, marker, ask, follow]
+    assert repair_message_sequence(None, messages) == 2
+    assert messages[1]["content"] == "[System: model changed]\n\nInvestigate invoice drift.\n\nThe invoice number is 1234."
+
+
+def test_quick_follow_up_after_a_labelled_merge_joins_the_new_request():
+    late = {"role": "user", "content": "also check Y", "timestamp": DAYS_LATER + 10}
+    messages = _history(OLD_TS, DAYS_LATER) + [late]
+    assert repair_message_sequence(None, messages) == 2
+    merged = messages[2]["content"]
+    assert merged.count("[Earlier message from") == 1 and merged.count("[New message from") == 1
+    assert merged.endswith(f"asks you to.]\n\n{DM}\n\nalso check Y")
+
+
+def test_stale_prompt_then_marker_then_new_request_is_labelled_once():
+    marker = {"role": "user", "content": "[System: model changed]", "display_kind": "model_switch",
+              "timestamp": DAYS_LATER - 5}
+    messages = _history(OLD_TS, DAYS_LATER)
+    messages.insert(3, marker)
+    assert repair_message_sequence(None, messages) == 2
+    merged = messages[2]["content"]
+    assert merged.startswith("[Earlier message from 2025-08-24 18:31 UTC")
+    assert f"{STALE_ASK}\n\n[System: model changed]\n\n[New message from" in merged
+    assert merged.endswith(f"\n\n{DM}")
+
+
+def test_request_time_bookkeeping_never_reaches_the_wire():
+    from agent.message_metadata import MERGED_TURN_REQUEST_TS, PERSISTENCE_ONLY_MESSAGE_FIELDS
+
+    messages = _history(OLD_TS, DAYS_LATER)
+    repair_message_sequence(None, messages)
+    assert messages[2][MERGED_TURN_REQUEST_TS] == DAYS_LATER
+    assert MERGED_TURN_REQUEST_TS in PERSISTENCE_ONLY_MESSAGE_FIELDS
 
 
 def test_empty_side_keeps_existing_behaviour():
@@ -143,8 +213,11 @@ def test_full_turn_sends_the_new_message_as_the_current_request(session, surface
             from gateway.run import _build_gateway_agent_history
 
             history = _build_gateway_agent_history(db.get_messages_as_conversation("sid", repair_alternation=True))[0]
+            # A bot DM is admitted as an internal event (gateway.session_bot._admit), so its row is
+            # ``internal_notification`` and carries the sender as the turn author.
             agent.run_conversation(user_message=text, conversation_history=history, task_id="sid",
-                                   persist_user_message=text)
+                                   persist_user_message=text, persist_user_display_kind="internal_notification",
+                                   turn_author={"id": "bot:bob", "name": "bob", "is_bot": True})
         else:
             from hermes_cli.cli_chat_turn_mixin import CLIChatTurnMixin
 
