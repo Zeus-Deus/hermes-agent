@@ -288,6 +288,41 @@ describe('mention targets follow the focused chat owner, not the active connecti
     expect((await pending).text).toContain('(message_agent target: "writer@local")')
   })
 
+  it('keeps the sender the tag was typed for while a cold roster loads and focus moves', async () => {
+    let answer: (value: unknown) => void = () => undefined
+
+    live.owner = { connectionId: 'local', profile: 'writer' }
+    live.focused = 'writer'
+    hostMock.request.mockImplementation(async (...args: unknown[]) =>
+      args[0] === 'profiles.list' ? new Promise(resolve => (answer = resolve)) : {}
+    )
+    hostMock.agents.mockResolvedValue({
+      agents: [
+        { connectionId: 'local', connectionKind: 'local', connectionLabel: 'This device', profile: 'writer' },
+        {
+          connectionId: 'server',
+          connectionKind: 'remote',
+          connectionLabel: 'Server',
+          handle: 'default-server',
+          profile: 'default'
+        }
+      ],
+      sources: []
+    } as never)
+
+    const { handler } = await contributions({ profiles: null })
+    const pending = handler({ text: 'ask @default-server' })
+
+    await vi.waitFor(() => expect(hostMock.request).toHaveBeenCalledWith('profiles.list', expect.anything()))
+    // The user moves to a server bot's tile before this device's roster answers.
+    live.owner = { connectionId: 'server', profile: 'ops' }
+    live.focused = 'ops'
+    answer({ profiles: [{ name: 'writer' }] })
+
+    // This tile still submits to this device: 'hermes' would reach its own default.
+    expect((await pending).text).toContain('(message_agent target: "default@server")')
+  })
+
   it('places rows the union enumeration failed to scope on the gateway that served them', async () => {
     // profiles.list answers, host.agents fails: the cached rows carry no connectionId.
     hostMock.request.mockResolvedValue({ profiles: [{ name: 'default' }, { name: 'writer' }] })

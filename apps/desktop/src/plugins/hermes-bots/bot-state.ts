@@ -166,19 +166,14 @@ export function liveConnectionId(): string {
 /** The bot that reads a mention note: the focused chat's owner as its
  *  complete connection/profile pair (`exact`) — a Bot Chat opened on another
  *  connection leaves the Desktop's active connection elsewhere (#130260).
- *  `unscopedConnectionId` names the gateway that served the roster rows
- *  carrying no connection of their own. Without an authoritative owner, the
- *  previous guess: focused profile on the active connection, not exact. */
-export function mentionSender(unscopedConnectionId?: string): {
-  connectionId: string
-  exact?: boolean
-  name: string
-  unscopedConnectionId?: string
-} {
+ *  Without an authoritative owner, the previous guess: focused profile on
+ *  the active connection, not exact. Read it before any await — focus can
+ *  move to another tile while the roster loads. */
+export function mentionSender(): { connectionId: string; exact?: boolean; name: string } {
   const owner = focusedRosterOwner($focusedBotOwner.get?.() ?? null)
 
   return owner?.authoritative && owner.connectionId
-    ? { connectionId: owner.connectionId, exact: true, name: owner.name, unscopedConnectionId }
+    ? { connectionId: owner.connectionId, exact: true, name: owner.name }
     : { connectionId: liveConnectionId() || 'local', name: focusedMentionProfile() }
 }
 
