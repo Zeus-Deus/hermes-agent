@@ -38,7 +38,7 @@ const MEMBERS: GroupMember[] = [
 
 /** Render the composer the way a room does: value owned by the caller (the
  *  draft atom in production), popover scoped to the seated members. */
-async function mount(initial = '') {
+async function mount(initial = '', members: GroupMember[] = MEMBERS) {
   const { GroupMentionInput } = await import('./group-chat-parts')
   const onChange = vi.fn()
   const onSubmitDraft = vi.fn()
@@ -49,7 +49,7 @@ async function mount(initial = '') {
     return (
       <GroupMentionInput
         aria-label="Message Core"
-        members={MEMBERS}
+        members={members}
         onChange={next => {
           onChange(next)
           setValue(next)
@@ -244,5 +244,32 @@ describe('approval card (#91706)', () => {
 
     await vi.waitFor(() => expect(answer).toHaveBeenCalledTimes(1))
     expect(answer).toHaveBeenCalledWith(entry, MEMBERS[0], 'once')
+  })
+})
+
+describe('defaults with custom handles (#89720)', () => {
+  it('offer each default by a tag that reaches it alone when two chose the same handle', async () => {
+    const { input } = await mount('', [
+      { connectionId: 'laptop', handle: 'default-laptop', mentionHandle: 'maia', name: 'default', remoteSource: true },
+      { connectionId: 'server', handle: 'default-server', mentionHandle: 'maia', name: 'default', remoteSource: true }
+    ])
+
+    typeInto(input, '@')
+
+    expect(options().filter(label => label.startsWith('@default-'))).toEqual(
+      expect.arrayContaining([expect.stringMatching(/^@default-laptop/), expect.stringMatching(/^@default-server/)])
+    )
+    expect(options().some(label => label.startsWith('@maia'))).toBe(false)
+  })
+
+  it('offer a lone default by its custom handle', async () => {
+    const { input } = await mount('', [
+      { connectionId: 'laptop', handle: 'hermes', mentionHandle: 'maia', name: 'default', remoteSource: true },
+      ...MEMBERS
+    ])
+
+    typeInto(input, '@ma')
+
+    expect(options().some(label => label.startsWith('@maia'))).toBe(true)
   })
 })

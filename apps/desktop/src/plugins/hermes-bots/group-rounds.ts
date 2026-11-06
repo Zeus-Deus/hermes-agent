@@ -5,14 +5,6 @@
  */
 import { host } from '@hermes/plugin-sdk'
 
-import {
-  botFriendlyNames,
-  botHandle,
-  botMentionTag,
-  customDefaultHandle,
-  mentionNameForms,
-  precustomHandle
-} from './data'
 import { groupFailureReason, recordGroupActivity } from './group-activity'
 import {
   $groupChats,
@@ -34,12 +26,15 @@ import {
   groupSessionKey,
   hasThreadScopedGroupSession
 } from './group-membership'
+import { parseGroupChatMentions } from './group-mentions'
 import { type GroupRoundMemberContext, runGroupContinuationMembers, runGroupRoundMember } from './group-round-members'
 import { rejectGroupSlashCommand } from './group-slash'
 import { GROUP_TURN_HARD_CAP_MS, harvestStrandedGroupReply } from './group-turns'
 import { botsText } from './i18n'
 import { requestForBot } from './routing'
 import type { Attachment, GroupMember, GroupMessage } from './types'
+
+export { groupReplyMentionTag, parseGroupChatMentions } from './group-mentions'
 
 // ── group chats: bounded round-robin coordination over a shared room log ─────
 //
@@ -53,171 +48,6 @@ import type { Attachment, GroupMember, GroupMessage } from './types'
 // which everyone passed means the conversation settled. Each member runs its
 // turn in its OWN persistent per-group Hermes session and is fed only the
 // room messages that are NEW since it last saw the room.
-
-/** `parseGroupChatMentions`' gap-fill pass: every live identity's forms are claimed first, so a
- *  live name always wins. Renamed members answer to previous handles (#110200), and a default
- *  with a custom handle to the handle it had before (#89720). Durable members are all
- *  source-scoped, so a bare @hermes only goes to the room's one default — with two machines'
- *  defaults seated it would name either by seat order. */
-function gapFillMemberForms(members: GroupMember[], handles: Map<string, string>) {
-  const defaultSeats = members.filter(member => String(member?.name || '').toLowerCase() === 'default').length
-
-  for (const member of members) {
-    const key = groupMemberKey(member)
-    const legacy = precustomHandle(member.name, member)
-
-    if (legacy && (legacy !== 'hermes' || defaultSeats === 1) && !handles.has(legacy)) {
-      handles.set(legacy, key)
-    }
-
-    const previous = Array.isArray(member.previous_names) ? member.previous_names : []
-
-    for (const name of previous) {
-      for (const form of mentionNameForms(name)) {
-        if (form && !handles.has(form)) {
-          handles.set(form, key)
-        }
-      }
-    }
-  }
-}
-
-/** Two machines' defaults can pick the same custom handle on their own. A shared one names
- *  neither (the map would hand it to whichever sat last): the room falls back to each member's
- *  source-qualified earlier handle, which `groupReplyMentionTag` offers instead. */
-function dropSharedCustomHandles(members: GroupMember[], handles: Map<string, string>) {
-  const owners = new Map<string, Set<string>>()
-
-  for (const member of members) {
-    const custom = customDefaultHandle(member.name, member)
-
-    if (custom) {
-      owners.set(custom, (owners.get(custom) || new Set()).add(groupMemberKey(member)))
-    }
-  }
-
-  for (const [custom, keys] of owners) {
-    for (const form of keys.size > 1 ? [custom, custom.replace(/[._-]+/g, '')] : []) {
-      if (keys.has(handles.get(form) ?? '')) {
-        handles.delete(form)
-      }
-    }
-  }
-}
-
-/** Deterministic @mention parse. Handles @name, @"two words" via display
- *  titles, and @everyone/@all. Names match case-insensitively against member
- *  profile names, display titles, and collapsed no-space forms. */
-export function parseGroupChatMentions(text: unknown, members: GroupMember[]) {
-  const source = String(text || '')
-  const mentioned = new Set<string>()
-  let everyone = false
-  const handles = new Map<string, string>()
-
-  for (const member of members) {
-    const title = String(member.title || '').trim()
-    // Normalize legacy "default" handles without aliasing device-qualified
-    // defaults to @hermes: that would retarget the primary tag by roster order.
-    const handle = String(botHandle(member.name, member) || '').trim()
-
-    const forms = new Set([
-      member.name.toLowerCase(),
-      member.name.toLowerCase().replace(/[\s_-]+/g, ''),
-      ...(handle ? [handle.toLowerCase(), handle.toLowerCase().replace(/[\s_-]+/g, '')] : []),
-      ...(title
-        ? [title.toLowerCase(), title.toLowerCase().replace(/[\s_-]+/g, ''), title.split(/\s+/)[0].toLowerCase()]
-        : [])
-    ])
-
-    // Renamed members answer to their friendly names too (profile
-    // display_name and Bot Mode title), in slugged and collapsed forms —
-    // the same tags the roster autocomplete inserts.
-    for (const friendly of botFriendlyNames(member)) {
-      for (const form of mentionNameForms(friendly)) {
-        forms.add(form)
-      }
-    }
-
-    // A same-named Connections twin gets `@<name>-<device>` from the registry,
-    // but the room's own-source member keeps its bare name and so loses every
-    // shared form to the twin (Map last-wins). `@<name>-local` is its
-    // always-available unambiguous address.
-    if (!member.remoteSource) {
-      forms.add(`${member.name.toLowerCase()}-local`)
-    }
-
-    for (const form of forms) {
-      if (form) {
-        handles.set(form, groupMemberKey(member))
-      }
-    }
-
-    // Normalized slug/collapsed variants of a live identity, gap-filled only — an exact live name elsewhere always wins, so an old handle can never squat (#110200).
-    for (const raw of [member.name, handle, title, ...botFriendlyNames(member)]) {
-      for (const form of mentionNameForms(raw)) {
-        if (form && !handles.has(form)) {
-          handles.set(form, groupMemberKey(member))
-        }
-      }
-    }
-  }
-
-  gapFillMemberForms(members, handles)
-  dropSharedCustomHandles(members, handles)
-
-  for (const match of source.matchAll(/@([a-z0-9][a-z0-9._-]*)/gi)) {
-    const handle = match[1].toLowerCase()
-
-    if (handle === 'everyone' || handle === 'all') {
-      everyone = true
-
-      continue
-    }
-
-    if (handle === 'user') {
-      continue
-    }
-
-    const resolved = handles.get(handle) || handles.get(handle.replace(/[._-]+/g, ''))
-
-    if (resolved) {
-      mentioned.add(resolved)
-    }
-  }
-
-  return {
-    everyone,
-    mentioned
-  }
-}
-
-/** The `@tag` "Reply to" seeds for one member: its friendly tag when that
- *  routes to this member alone, else the first owner-qualified form that does
- *  (`@<name>-<device>` for a Connections twin, `@<name>-local` for the room's
- *  own-source twin — see #89883). A bare `{ name }` of a member who left the
- *  room resolves to nothing and keeps its friendly tag. */
-export function groupReplyMentionTag(member: GroupMember, members: GroupMember[]): string {
-  const key = groupMemberKey(member)
-
-  const candidates = [
-    botMentionTag(member),
-    botHandle(member.name, member),
-    precustomHandle(member.name, member),
-    `${member.name}-local`
-  ]
-    .map(tag => String(tag || '').trim())
-    .filter(Boolean)
-
-  return (
-    candidates.find(tag => {
-      const { mentioned } = parseGroupChatMentions(`@${tag}`, members)
-
-      return mentioned.size === 1 && mentioned.has(key)
-    }) ||
-    candidates[0] ||
-    ''
-  )
-}
 
 /** Members that should take a turn this round: everyone when no member is
  *  @-mentioned in messages since the last user entry (or @everyone appears),

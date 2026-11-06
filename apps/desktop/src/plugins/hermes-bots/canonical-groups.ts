@@ -1,6 +1,7 @@
 import { host, randomUuid } from '@hermes/plugin-sdk'
 
 import { canonicalApprovalPreview } from './canonical-group-approval'
+import { customDefaultHandle } from './mention-handle'
 import type { GroupMember } from './types'
 
 export interface CanonicalGroupRoute {
@@ -142,9 +143,9 @@ export function canonicalGroupRoster(
     }
 
     const profile = member.route?.targetProfile ?? member.targetProfile ?? member.name
-    // The default's custom handle is what the room addresses it by (#89720); `handle` keeps the
-    // earlier, source-qualified one.
-    const handle = member.mentionHandle || (member.handle ?? profile)
+    // The default's custom handle is what the room addresses it by (#89720) — from a live row's
+    // backend or a durable member; `handle` keeps the earlier, source-qualified one.
+    const handle = customDefaultHandle(member.name, member) || (member.handle ?? profile)
 
     if (!profile.trim() || !handle.trim() || profiles.has(profile.toLowerCase()) || handles.has(handle.toLowerCase())) {
       return { problem: 'duplicateMember' }

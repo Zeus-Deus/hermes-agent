@@ -225,11 +225,15 @@ def stored_default_handle(root: Path) -> str:
 def custom_default_handle(root: Path, names: Collection[str] | None = None) -> str:
     """The default profile's custom @handle on the install rooted at ``root``, or "" when unset.
     A live profile holding that name keeps it (the rule ``_handle`` applies to @hermes): the
-    default then falls back to @hermes instead of shadowing a real teammate. Never raises."""
+    default then falls back to @hermes instead of shadowing a real teammate. So does a registered
+    peer of that name: ``message_agent`` reads a bare peer name as that peer, before any local
+    name. Never raises."""
     def _read() -> str:
         handle = stored_default_handle(root)
+        if not handle:
+            return ""
         live = names if names is not None else [name for name, _d in _roster(root)]
-        return handle if handle and handle not in live else ""
+        return handle if handle not in live and handle not in {peer.lower() for peer in _peers(root)} else ""
 
     return _swallow(_read, "")
 
@@ -252,6 +256,8 @@ def validate_default_handle(root: Path, value: object) -> str:
     names = [name for name, _d in _roster(root)]
     if handle in names:
         raise ValueError(f"@{handle} is already the name of a profile on this machine.")
+    if handle in {peer.lower() for peer in _peers(root)}:
+        raise ValueError(f"@{handle} is already the name of a registered peer gateway.")
     if any(owner != "default" for owner in local_alias_map(root).get(handle, set())):
         raise ValueError(f"@{handle} already tags another bot on this machine.")
     return handle

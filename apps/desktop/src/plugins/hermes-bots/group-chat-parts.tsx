@@ -13,9 +13,10 @@ import type { ClipboardEvent } from 'react'
 import { useRef, useState } from 'react'
 
 import { $imagenAvailable, normalizeAvatarImage, pickImageFromDevice, probeImagen } from './avatar-image'
-import { $botMeta, botHandle, botMentionTag } from './data'
+import { $botMeta, botHandle } from './data'
 import { appendGroupChatEntry } from './group-chat'
 import { groupMemberKey } from './group-membership'
+import { groupReplyMentionTag } from './group-mentions'
 import { answerGroupClarify } from './group-turns'
 import { useBots } from './i18n'
 import { displayName } from './labels'
@@ -198,8 +199,9 @@ export function GroupMentionInput({ handleFor, members, onChange, onSubmitDraft,
     for (const member of members) {
       const handle = String(botHandle(member.name, member) || '').trim()
       const display = displayName(member, botRosterMeta(member, allMeta))
-      // Renamed members complete on their friendly tag; parser resolves both.
-      const tag = String(handleFor?.(member) ?? (botMentionTag(member) || handle)).trim()
+      // Renamed members complete on their friendly tag; parser resolves both. The room-aware
+      // tag reaches that member alone (a custom handle another seat shares yields, #89720).
+      const tag = String(handleFor?.(member) ?? (groupReplyMentionTag(member, members) || handle)).trim()
 
       if (!tag) {
         continue

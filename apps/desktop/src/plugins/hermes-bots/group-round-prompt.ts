@@ -1,4 +1,3 @@
-import { botMentionTag } from './data'
 import {
   compactGroupChatSyncText,
   GROUP_CHAT_HISTORY_CHARS,
@@ -8,6 +7,7 @@ import {
   groupThreadOf
 } from './group-chat'
 import { groupMemberKey } from './group-membership'
+import { groupReplyMentionTag } from './group-mentions'
 import type { GroupMember, GroupMessage, GroupMessageAuthor } from './types'
 
 // Openers of Hermes' own control frames (the mid-turn steer marker, the compaction
@@ -224,14 +224,17 @@ export function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLine
 
   const peerNames = peers
     .map(m => {
-      const handle = m.title ? `${m.title} (@${botMentionTag(m)})` : `@${botMentionTag(m)}`
+      // The room-aware tag: a custom handle another seat also answers to falls back to the
+      // member's source-qualified one, so the prompt never names a tag that routes elsewhere.
+      const tag = groupReplyMentionTag(m, members)
+      const handle = m.title ? `${m.title} (@${tag})` : `@${tag}`
 
       return m.remoteSource ? `${handle} [on ${m.connectionLabel || m.connectionId}]` : handle
     })
     .join(', ')
 
   return [
-    `${GROUP_PROMPT_HEADER_PREFIX}${groupName}"] You are @${botMentionTag(viewer)}, one participant in a group chat with ${peerNames || 'no one else yet'} and the user.`,
+    `${GROUP_PROMPT_HEADER_PREFIX}${groupName}"] You are @${groupReplyMentionTag(viewer, members)}, one participant in a group chat with ${peerNames || 'no one else yet'} and the user.`,
     '',
     GROUP_DELTA_HEADER,
     ...deltaLines.map(line => `  ${line}`),

@@ -10,6 +10,7 @@ import { atom, host, queryClient, useQuery, useValue } from '@hermes/plugin-sdk'
 
 import { botsText } from './i18n'
 import { displayName } from './labels'
+import { customDefaultHandle, normalizeMentionHandle, storedCustomHandle } from './mention-handle'
 import {
   aliasIdentityFor,
   beginAliasRouteIndex,
@@ -1263,44 +1264,7 @@ function legacyBotHandle(name: string, bot?: Partial<RosterRow> | null): string 
   return (name || '').trim().toLowerCase() === 'default' && !bot?.hermesHandleTaken ? 'hermes' : name
 }
 
-/** Tokens no bot @handle may take: the mention parsers reserve them. */
-const RESERVED_MENTION_FORMS = ['all', 'everyone', 'user', 'default', 'hermes']
-
-/** `value` as a custom @handle — lower-cased, leading `@` dropped — or '' when it is not one: the
- *  profile-id shape and no reserved token. Same rule as the backend's
- *  `tools/bot_mode_probe.normalize_mention_handle`, which gates the save. */
-export function normalizeMentionHandle(value: unknown): string {
-  if (typeof value !== 'string') {
-    return ''
-  }
-
-  const handle = value.trim().replace(/^@/, '').toLowerCase()
-
-  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(handle) && !RESERVED_MENTION_FORMS.includes(handle) ? handle : ''
-}
-
-/** The custom handle a default row's OWN backend answers to (`mention_handle`, which only a
- *  backend whose resolvers support it sends), else the copy a durable group member carries.
- *  Never the raw `ui_meta` value or this window's local meta: it is a routing identity, and only
- *  what that backend's `message_agent`, relay door and system prompt resolve may be advertised. */
-function storedCustomHandle(bot: Partial<RosterRow> | null | undefined): string {
-  return normalizeMentionHandle(typeof bot?.mention_handle === 'string' ? bot.mention_handle : bot?.mentionHandle)
-}
-
-/** The default profile's custom @handle (#89720), or '' when it has none — or when a real profile
- *  on the same source holds that name (`claimDefaultHandles`; the backend applies the same rule). */
-export function customDefaultHandle(name: null | string | undefined, bot?: Partial<RosterRow> | null): string {
-  if (
-    String(name || '')
-      .trim()
-      .toLowerCase() !== 'default' ||
-    bot?.customHandleTaken
-  ) {
-    return ''
-  }
-
-  return storedCustomHandle(bot)
-}
+export { customDefaultHandle, normalizeMentionHandle } from './mention-handle'
 
 /** What a default with a custom handle answered to before it had one (`hermes`, or a
  *  device-suffixed `default-laptop`), lowercased; '' when it has no custom handle. A durable
@@ -1624,16 +1588,11 @@ export function resolveRosterMentions(
         continue
       }
 
-      const existing = byForm.get(form)
-
-      if (existing && existing !== bot) {
-        byForm.set(form, null)
-
-        continue
-      }
-
-      if (!existing) {
+      // A collision tombstone (null) is permanent: a third bot sharing the form must not claim it.
+      if (!byForm.has(form)) {
         byForm.set(form, bot)
+      } else if (byForm.get(form) !== bot) {
+        byForm.set(form, null)
       }
     }
   }

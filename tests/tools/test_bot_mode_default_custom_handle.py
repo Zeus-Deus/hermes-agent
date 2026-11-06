@@ -236,3 +236,14 @@ def test_gateway_roster_rows_report_the_effective_handle_on_the_default_only(tmp
     _default_handle(named, root / "profiles" / "researcher")
     # A live profile named maia keeps the name: the default reports no custom handle.
     assert row == {"name": "default", "mention_handle": ""} and named == {"name": "researcher"}
+
+
+def test_a_registered_peer_name_is_refused_and_keeps_its_shorthand(tmp_path, monkeypatch):
+    """A bare peer name in ``message_agent`` means that peer, so the default cannot also answer it."""
+    root = _rig(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="registered peer"):
+        bot_mode_probe.validate_default_handle(_managed_home(tmp_path, peers=("spark",)), "spark")
+    # Stored before the peer was registered: the default falls back to @hermes and the peer keeps it.
+    _set_default_handle(root, "spark")
+    assert bot_mode_probe._handle("default", ["default", "researcher"], root) == "hermes"
+    assert "You are `@hermes`" in bot_mode_probe.get_bot_mode_protocol_section(root)

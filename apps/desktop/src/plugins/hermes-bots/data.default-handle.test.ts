@@ -20,8 +20,8 @@ import {
   resolveRosterMentions
 } from './data'
 import { durableGroupChatMembers } from './group-membership'
+import { groupReplyMentionTag, parseGroupChatMentions } from './group-mentions'
 import { buildGroupChatTurnPrompt } from './group-round-prompt'
-import { groupReplyMentionTag, parseGroupChatMentions } from './group-rounds'
 import type { GroupMember, RosterRow } from './types'
 
 vi.mock('@hermes/plugin-sdk', async () => {
@@ -191,6 +191,13 @@ describe('group rooms', () => {
     expect(botHandle(member.name, member)).toBe('maia')
   })
 
+  it('give a gateway-hosted room started from live rows the custom handle', () => {
+    const route = { connectionId: 'local', profile: 'default' }
+    const result = canonicalGroupRoster(route as never, [lead, researcher] as GroupMember[])
+
+    expect('roster' in result && result.roster.map(member => member.handle)).toEqual(['maia', 'researcher'])
+  })
+
   it('give a gateway-hosted room the custom handle', () => {
     const members = durableGroupChatMembers([lead, researcher])
     const route = { connectionId: 'local', profile: 'default' }
@@ -249,5 +256,50 @@ describe('group rooms', () => {
     expect(tagged('@default-laptop go')).toEqual(['laptop::default'])
     expect(tagged('@default-server go')).toEqual(['server::default'])
     expect(members.map(member => groupReplyMentionTag(member, members))).toEqual(['default-laptop', 'default-server'])
+  })
+
+  it('let a real bot of that name on another machine keep it, whatever the seat order', () => {
+    const [laptop] = twoMachines('maia', '')
+    const serverMaia = { connectionId: 'server', handle: 'maia', name: 'maia', remoteSource: true } as RosterRow
+
+    for (const seated of [
+      [laptop, serverMaia],
+      [serverMaia, laptop]
+    ]) {
+      const members = durableGroupChatMembers(seated)
+      const tagged = (text: string) => [...parseGroupChatMentions(text, members).mentioned]
+
+      expect(tagged('@maia go')).toEqual(['server::maia'])
+      expect(tagged('@default-laptop go')).toEqual(['laptop::default'])
+      expect(
+        groupReplyMentionTag(
+          members.find(member => member.name === 'default')!,
+          members
+        )
+      ).toBe('default-laptop')
+    }
+  })
+
+  it('introduce each colliding default by a tag that reaches it alone', () => {
+    const [laptop, , server] = twoMachines('maia', 'maia')
+    const members = durableGroupChatMembers([laptop, server])
+    const prompt = buildGroupChatTurnPrompt({ deltaLines: [], groupName: 'ops', members, viewer: members[0] })
+
+    expect(prompt).toContain('You are @default-laptop,')
+    expect(prompt).toContain('@default-server')
+    expect(prompt).not.toContain('@maia')
+  })
+})
+
+describe('the roster resolver', () => {
+  it('keeps a form three bots share unresolved', () => {
+    const rows = ['a', 'b', 'c'].map(
+      connectionId => ({ connectionId, name: 'default', remoteSource: true, ...withHandle('maia') }) as RosterRow
+    )
+
+    expect(resolveRosterMentions('@maia ping', rows, { name: 'researcher' })).toEqual([])
+    expect(resolveRosterMentions('@maia@b ping', rows, { name: 'researcher' }).map(row => row.connectionId)).toEqual([
+      'b'
+    ])
   })
 })
