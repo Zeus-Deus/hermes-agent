@@ -372,6 +372,31 @@ describe('a custom handle equal to a collapsed title', () => {
   )
 })
 
+describe('a custom handle equal to another default’s collapsed custom handle', () => {
+  it.each([
+    ['ma-ia', 'maia'],
+    ['maia', 'ma-ia']
+  ])(
+    'leaves each exact handle with its own default (laptop %j, server %j), in either seat order',
+    (laptopHandle, serverHandle) => {
+      const [laptop, , server] = twoMachines(laptopHandle, serverHandle)
+
+      for (const seated of [
+        [laptop, server],
+        [server, laptop]
+      ]) {
+        for (const members of [seated as GroupMember[], durableGroupChatMembers(seated)]) {
+          const tagged = (text: string) => [...parseGroupChatMentions(text, members).mentioned]
+
+          expect(tagged(`@${laptopHandle} go`)).toEqual(['laptop::default'])
+          expect(tagged(`@${serverHandle} go`)).toEqual(['server::default'])
+          expect(tagged(`@${laptopHandle} @${serverHandle} go`).sort()).toEqual(['laptop::default', 'server::default'])
+        }
+      }
+    }
+  )
+})
+
 describe('a custom handle equal to a sibling’s -local address', () => {
   it('leaves @<name>-local with that sibling, in either seat order', () => {
     const lead = { connectionId: 'local', mentionHandle: 'writer-local', name: 'default' } as GroupMember

@@ -41,14 +41,17 @@ function titleForms(title: string): string[] {
 /** Every lower-cased form a member answers to by its live identity: profile name, @handle,
  *  picker tag, the handle a custom-handle default had before (`default-server`), each also
  *  collapsed as the parser reads it, its title forms exactly as the parser seats them
- *  (`titleForms`), its title / friendly-name slugs, and an own-source member's `<name>-local`. */
+ *  (`titleForms`), its title / friendly-name slugs, and an own-source member's `<name>-local`.
+ *  A custom handle counts as written only: its collapsed spelling (`ma-ia` → `maia`) just fills
+ *  a gap (`claimUncontestedCustomHandles`), so it never contests another default's exact `maia`. */
 function memberIdentityForms(member: GroupMember): Set<string> {
   const title = String(member.title || '').trim()
+  const custom = customDefaultHandle(member.name, member)
 
   return new Set(
     [member.name, botHandle(member.name, member), botMentionTag(member), precustomHandle(member.name, member)]
       .map(form => String(form || '').toLowerCase())
-      .flatMap(form => [form, form.replace(/[\s_-]+/g, '')])
+      .flatMap(form => (custom && form === custom ? [form] : [form, form.replace(/[\s_-]+/g, '')]))
       .concat(titleForms(title))
       .concat([title, ...botFriendlyNames(member)].flatMap(name => mentionNameForms(name)))
       .concat(member.remoteSource ? [] : [`${member.name.toLowerCase()}-local`])
@@ -72,8 +75,12 @@ function claimUncontestedCustomHandles(members: GroupMember[], handles: Map<stri
 
     for (const form of custom ? [custom, custom.replace(/[._-]+/g, '')] : []) {
       if (!holders.length) {
-        // The collapsed spelling (`ma-ia` → `maia`) only fills a gap, like every other variant.
-        if (form === custom || !handles.has(form)) {
+        // The collapsed spelling (`ma-ia` → `maia`) only fills a gap, like every other variant,
+        // and never one another seat answers to — such as another default's exact `maia`.
+        if (
+          form === custom ||
+          (!handles.has(form) && !identities.some(([, other, forms]) => other !== key && forms.has(form)))
+        ) {
           handles.set(form, key)
         }
       } else if (handles.get(form) === key) {
