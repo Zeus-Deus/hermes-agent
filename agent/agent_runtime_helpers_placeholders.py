@@ -41,12 +41,15 @@ def _request_info(msg: dict) -> tuple[float | None, bool | None]:
     recorded = msg.get(MERGED_TURN_REQUEST)
     if isinstance(recorded, dict):
         return recorded.get("at"), recorded.get("machinery")
-    kind = msg.get("display_kind")
+    kind, metadata = msg.get("display_kind"), msg.get("display_metadata")
     if kind in _PIVOT_MARKER_DISPLAY_KINDS:
         return None, None
     ts = msg.get("timestamp")
+    # A muted diagnostic wake is stored ``hidden`` with this category (session_persistence); only a
+    # trusted wake carries it, never a person's message.
+    muted = isinstance(metadata, dict) and metadata.get("notification_category") == "diagnostic"
     return (float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else None,
-            is_machinery_display_kind(kind))
+            is_machinery_display_kind(kind) or muted)
 
 
 def replay_request_info(msg: dict) -> dict | None:
@@ -71,8 +74,10 @@ def stale_unanswered_turn_prefix(prev: dict, new: dict, prev_text: str, new_text
     from agent.message_metadata import MERGED_TURN_REQUEST
 
     (old_ts, old_machinery), (new_ts, new_machinery) = _request_info(prev), _request_info(new)
-    newest = (new_ts, new_machinery) if new_machinery is not None else (old_ts, old_machinery)
-    if newest != (old_ts, old_machinery):
+    # An empty row asks nothing: it leaves the newest request as it was.
+    newest = (new_ts, new_machinery) if new_machinery is not None and new_text else (old_ts, old_machinery)
+    # Recorded whenever anything is known: the merge may yet drop the survivor's own display_kind.
+    if newest != (None, False) or MERGED_TURN_REQUEST in prev:
         prev[MERGED_TURN_REQUEST] = {"at": newest[0], "machinery": newest[1]}
     if (not prev_text or not new_text or old_ts is None or new_ts is None
             or old_machinery is None or new_machinery is None):

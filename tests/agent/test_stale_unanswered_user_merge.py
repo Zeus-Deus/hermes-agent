@@ -202,6 +202,44 @@ def test_empty_side_keeps_existing_behaviour():
     assert messages[2]["content"] == STALE_ASK
 
 
+@pytest.mark.parametrize("kind", [None, "internal_notification", "model_switch"])
+def test_an_empty_row_between_does_not_hide_the_stale_prompt(kind):
+    """``R(days old) -> empty row(now) -> DM(now + 10 s)``: the empty row asks nothing, so R stays stale."""
+    empty = {"role": "user", "content": "", "timestamp": DAYS_LATER - 10, **({"display_kind": kind} if kind else {})}
+    dm = {"role": "user", "content": DM, "timestamp": DAYS_LATER, "display_kind": "internal_notification"}
+    messages = _history(OLD_TS, DAYS_LATER)[:3] + [empty, dm]
+    assert repair_message_sequence(None, messages) == 2
+    assert messages[2]["content"].startswith("[Earlier message from 2025-08-24 18:31 UTC, left without a reply:]")
+    assert messages[2]["content"].endswith(f"asks you to.]\n\n{DM}")
+
+
+def test_empty_marker_absorbing_survivor_keeps_its_no_request_record():
+    """A pivot marker absorbing an empty row loses its display_kind; it still holds no request."""
+    marker = {"role": "user", "content": "[System: model changed]", "display_kind": "model_switch", "timestamp": OLD_TS}
+    empty = {"role": "user", "content": "", "timestamp": OLD_TS + 5}
+    ask = {"role": "user", "content": "Investigate invoice drift.", "timestamp": DAYS_LATER}
+    messages = [{"role": "assistant", "content": "hi"}, marker, empty, ask]
+    assert repair_message_sequence(None, messages) == 2
+    assert messages[1]["content"] == "[System: model changed]\n\nInvestigate invoice drift."
+
+
+def test_muted_diagnostic_notice_is_machinery():
+    """A muted diagnostic wake is stored ``hidden`` with ``notification_category=diagnostic``: a person's
+    prompt a minute later is not its follow-up, also after the gateway replay projection."""
+    from gateway.run import _build_gateway_agent_history
+
+    notice = {"role": "user", "content": "[IMPORTANT: Background process 7 exited]", "timestamp": OLD_TS,
+              "display_kind": "hidden", "display_metadata": {"notification_category": "diagnostic"}}
+    person = {"role": "user", "content": "What is on my calendar?", "timestamp": OLD_TS + 60}
+    for replay in (False, True):
+        rows = [{"role": "assistant", "content": "hi"}, dict(notice)]
+        if replay:
+            rows = _build_gateway_agent_history(rows)[0]
+        messages = rows + [dict(person)]
+        assert repair_message_sequence(None, messages) == 1
+        assert messages[1]["content"].startswith("[Earlier message from 2025-08-24 18:31 UTC, left without a reply:]")
+
+
 def test_persist_override_keeps_labels_and_replaces_only_the_current_turn():
     wire = "[2025-08-29T20:31:19+0200] " + DM
     messages = _history(OLD_TS, DAYS_LATER)
