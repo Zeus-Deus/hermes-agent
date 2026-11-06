@@ -348,16 +348,20 @@ function refusedPublisher(error: any): boolean {
 }
 
 /** Push `agents` as this Desktop's roster slice; to a gateway from before the slices, the
- *  legacy way (it replaces its whole roster, as it always did). */
-async function pushRelayRoster(route: ProfileRoute, agents: RelayAgentRow[]) {
+ *  legacy way (it replaces its whole roster, as it always did). Answers which way landed. */
+async function pushRelayRoster(route: ProfileRoute, agents: RelayAgentRow[]): Promise<'legacy' | 'slice'> {
   try {
     await host.requestProfile(route, 'bot_relay.roster.sync', { agents, publisher: rosterPublisher() })
+
+    return 'slice'
   } catch (error: any) {
     if (!refusedPublisher(error)) {
       throw error
     }
 
     await host.requestProfile(route, 'bot_relay.roster.sync', { agents })
+
+    return 'legacy'
   }
 }
 
@@ -630,38 +634,56 @@ function rosterTrace(rows: RelayAgentRow[], installId: string, connectionId: str
 const RELAY_AGENTS_CACHE_MAX = 32
 const relayAgentsCache = new LruCache<string, RelayAgentRow[]>(RELAY_AGENTS_CACHE_MAX)
 
-// Per connection: the rows this relay run last pushed there, and whether it was drained since. A
-// gateway offers an envelope that names a machine only to the Desktops whose slice lists it
-// (#139219), so a drain that ran before this window's slice landed (a restarted window, or a
-// roster that just gained the machine) got nothing and spent its work signal: a push that changes
-// the slice of a gateway drained meanwhile drains it again. Never one that was not drained — a
-// route without outbox work is not dialled (#118856).
-const pushedRosters = new Map<string, string>()
+// Per route (each profile route is its own mailbox): the rows this relay run last landed there and
+// when, and whether it was drained since. A gateway offers an envelope that names a machine only
+// to the Desktops whose fresh slice lists it (#139219), so a drain that ran before this window's
+// slice landed (a restarted window, a roster that just gained the machine, a slice that expired
+// while pushes failed or the renderer slept) got nothing and spent its work signal: a push that
+// changes the slice of a route drained meanwhile drains it again. Never one that was not drained
+// — a route without outbox work is not dialled (#118856).
+const pushedRosters = new Map<string, { at: number; rows: string }>()
 const drainedSinceSlice = new Set<string>()
+// The gateway keeps a slice fresh for ROSTER_FRESH_SECONDS (600 s, tools/bot_relay.py); a gap
+// between two landed pushes longer than that less one roster tick may have let it expire.
+const RELAY_SLICE_EXPIRY_MS = 600_000 - RELAY_ROSTER_INTERVAL_MS
+
+function relayRouteKey(connection: RelayConnection): string {
+  return JSON.stringify(connection.route)
+}
 
 /** Push `rows` as this window's slice on `connection` and, when that changed the slice of a
- *  gateway drained since the last change, drain it again (a drain that ran before may have been
+ *  route drained since the last change, drain it again (a drain that ran before may have been
  *  refused mail this slice now makes this window's). Throws as `pushRelayRoster` does. */
 async function publishRelayRoster(connection: RelayConnection, rows: RelayAgentRow[], isCurrent: () => boolean) {
+  const key = relayRouteKey(connection)
+
+  let landed: 'legacy' | 'slice'
+
   try {
-    await pushRelayRoster(connection.route, rows)
+    landed = await pushRelayRoster(connection.route, rows)
   } catch (error) {
     // What the gateway holds is unknown now (or ages out unrefreshed): the next push that lands
     // counts as a change.
-    pushedRosters.delete(connection.id)
+    pushedRosters.delete(key)
 
     throw error
   }
 
-  const pushed = JSON.stringify(rows)
+  if (!isCurrent()) {
+    return
+  }
 
-  if (isCurrent() && pushedRosters.get(connection.id) !== pushed) {
-    pushedRosters.set(connection.id, pushed)
+  // A gateway upgraded under this window takes its first slice with the rows its legacy push had.
+  const pushed = `${landed}:${JSON.stringify(rows)}`
+  const now = Date.now()
+  const last = pushedRosters.get(key)
+  const changed = !last || last.rows !== pushed || now - last.at > RELAY_SLICE_EXPIRY_MS
 
-    if (drainedSinceSlice.delete(connection.id)) {
-      noteRelayOutboxWork({ connectionId: connection.id })
-      scheduleRelayPushDrain()
-    }
+  pushedRosters.set(key, { at: now, rows: pushed })
+
+  if (changed && drainedSinceSlice.delete(key)) {
+    noteRelayOutboxWork({ connectionId: connection.id })
+    scheduleRelayPushDrain()
   }
 }
 
@@ -859,7 +881,7 @@ async function drainRelayOutboxes() {
       // Recorded before the drain is sent: the gateway answers from the slices it holds when it
       // reads the outbox, so a slice that lands while this drain is out must drain again.
       if (relay.rosterGeneration === generation) {
-        drainedSinceSlice.add(sender.id)
+        drainedSinceSlice.add(relayRouteKey(sender))
       }
 
       try {

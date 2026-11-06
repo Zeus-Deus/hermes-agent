@@ -556,6 +556,189 @@ describe('each Desktop pushes its roster as its own slice (#139219)', () => {
     expect(calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.connectionId)).toEqual(['srv'])
   })
 
+  it('keeps each profile route’s slice apart: one landing late still drains its mailbox again', async () => {
+    // Two profile routes on one connection are two mailboxes with a slice each; the default
+    // route's push landed, the ops route's had not when a signal drained both.
+    let publishOps: () => void = () => {}
+    let opsPublished = false
+
+    const envelope = {
+      canonical_delivery_v1: true,
+      from_handle: 'ops',
+      from_profile: 'ops',
+      id: 'env-p',
+      message: 'hi',
+      target_connection: 'srv',
+      target_profile: 'scout',
+      target_publishers: ['desktop-aaaaaaaaaaaa', PUBLISHER]
+    }
+
+    hostMock.profileRoutes = vi.fn(async () => [
+      route('local', { mode: 'local' }),
+      route('local', { mode: 'local', profile: 'ops' }),
+      route('srv')
+    ])
+
+    const calls = respondWith(call => {
+      if (call.method === 'profiles.list') {
+        return call.connectionId === 'local'
+          ? { install_id: INSTALL, profiles: [{ name: 'default' }, { name: 'ops' }] }
+          : { install_id: 'f'.repeat(32), profiles: [{ name: 'scout' }] }
+      }
+
+      if (call.method === 'bot_relay.roster.sync' && call.connectionId === 'local' && call.route.profile === 'ops') {
+        return new Promise(resolve => {
+          publishOps = () => {
+            opsPublished = true
+            resolve({ count: 1 })
+          }
+        })
+      }
+
+      if (call.method === 'bot_relay.outbox.drain' && call.connectionId === 'local' && call.route.profile === 'ops') {
+        return { envelopes: opsPublished ? [envelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { status: 'settled', delivery_id: call.params.id, admission_id: 'admission', reply: 'done' }
+      }
+
+      return { envelopes: [] }
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    await pushAndSettle(1, { connectionId: 'local' })
+
+    expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
+
+    publishOps()
+    await vi.advanceTimersByTimeAsync(RELAY_PUSH_DEBOUNCE_MS + 10)
+    stopBotRelay()
+
+    expect(calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.connectionId)).toEqual(['srv'])
+  })
+
+  it('a slice that may have expired while the renderer slept counts as a change when refreshed', async () => {
+    // No push failed: the renderer was suspended past the gateway's freshness window, so its
+    // slice expired there; it drains on resume before the roster tick refreshes the same rows.
+    let landedAt = 0
+
+    const envelope = {
+      canonical_delivery_v1: true,
+      from_handle: 'ops',
+      from_profile: 'ops',
+      id: 'env-s',
+      message: 'hi',
+      target_connection: 'srv',
+      target_profile: 'scout',
+      target_publishers: ['desktop-aaaaaaaaaaaa']
+    }
+
+    const calls = respondWith(call => {
+      if (call.method === 'profiles.list') {
+        return call.connectionId === 'local'
+          ? { install_id: INSTALL, profiles: [{ name: 'ops' }] }
+          : { install_id: 'f'.repeat(32), profiles: [{ name: 'scout' }] }
+      }
+
+      if (call.method === 'bot_relay.roster.sync' && call.connectionId === 'local') {
+        landedAt = Date.now()
+
+        return { count: 1 }
+      }
+
+      if (call.method === 'bot_relay.outbox.drain' && call.connectionId === 'local') {
+        // offered (listing this window too) only while this window's slice is fresh
+        return { envelopes: Date.now() - landedAt <= 600_000 ? [{ ...envelope, target_publishers: [...envelope.target_publishers, PUBLISHER] }] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { status: 'settled', delivery_id: call.params.id, admission_id: 'admission', reply: 'done' }
+      }
+
+      return { envelopes: [] }
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    vi.setSystemTime(Date.now() + 700_000) // suspended: the clock moved, no timer ran
+    await pushAndSettle(1, { connectionId: 'local' })
+
+    expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(60_000) // the roster tick refreshes the same rows
+    await vi.advanceTimersByTimeAsync(RELAY_PUSH_DEBOUNCE_MS + 10)
+    stopBotRelay()
+
+    expect(calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.connectionId)).toEqual(['srv'])
+  })
+
+  it('a gateway upgraded under the window: its first slice counts as a change though the rows match', async () => {
+    // Before the upgrade the push fell back to the legacy way; the upgraded gateway offers mail
+    // naming this window's machine only once this window's own slice lists it.
+    let upgraded = false
+    let slicePushed = false
+
+    const envelope = {
+      canonical_delivery_v1: true,
+      from_handle: 'ops',
+      from_profile: 'ops',
+      id: 'env-u',
+      message: 'hi',
+      target_connection: 'srv',
+      target_profile: 'scout',
+      target_publishers: ['legacy', PUBLISHER]
+    }
+
+    const calls = respondWith(call => {
+      if (call.method === 'profiles.list') {
+        return call.connectionId === 'local'
+          ? { install_id: INSTALL, profiles: [{ name: 'ops' }] }
+          : { install_id: 'f'.repeat(32), profiles: [{ name: 'scout' }] }
+      }
+
+      if (call.method === 'bot_relay.roster.sync' && call.connectionId === 'local') {
+        if (!upgraded && 'publisher' in call.params) {
+          throw REFUSALS.tui()
+        }
+
+        slicePushed = upgraded && 'publisher' in call.params
+
+        return { count: 1 }
+      }
+
+      if (call.method === 'bot_relay.outbox.drain' && call.connectionId === 'local') {
+        return { envelopes: slicePushed ? [envelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { status: 'settled', delivery_id: call.params.id, admission_id: 'admission', reply: 'done' }
+      }
+
+      return { envelopes: [] }
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    upgraded = true
+    await pushAndSettle(1, { connectionId: 'local' }) // upgraded, but no slice of this window yet
+
+    expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    await vi.advanceTimersByTimeAsync(RELAY_PUSH_DEBOUNCE_MS + 10)
+    stopBotRelay()
+
+    expect(calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.connectionId)).toEqual(['srv'])
+  })
+
   describe('an envelope only another Desktop relays is left to it', () => {
     function drainOne(envelope: Record<string, unknown>) {
       return respondWith(call => {
