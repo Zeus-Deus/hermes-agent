@@ -38,16 +38,19 @@ class CanonicalHostedRoomService(HostedControls, HostedRoomService):
         return member_roster(self.authority)[0]
 
     def local_profiles(self):
-        return tuple(self.profile_homes())
+        """Name -> home: roster validation reads the seated default's install from its home, which
+        ``hosted_rooms.profiles.default`` can place outside this gateway's own install."""
+        return self.profile_homes()
 
     def room_profiles(self, room):
         """A saved room keeps every local member it seated: unserving one bot must not stop the
         others. That member's own turns still fail (``_resolve_member_transport`` and ``attest``
         need a live home), and a new group cannot seat it (``local_profiles``)."""
+        homes = self.local_profiles()
         seated = {m.get('profile') for m in room.get('members') or ()
                   if isinstance(m, dict) and isinstance(m.get('profile'), str)
                   and (m.get('target') or {}).get('kind', 'local') == 'local'}
-        return tuple(sorted(set(self.local_profiles()) | seated))
+        return {name: homes.get(name) for name in sorted(set(homes) | seated)}
 
     def attest(self, selector, operation, params):
         from dataclasses import asdict

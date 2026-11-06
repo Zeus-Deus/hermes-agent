@@ -297,7 +297,9 @@ def _validate_member(raw: Any, index: int, known_profiles: set[str]) -> Discussi
 
 
 def validate_roster(value: Any, *, local_profiles: Iterable[str]) -> tuple[DiscussionMember, ...]:
-    """Validate a frozen 2-6 member roster of profiles on this gateway."""
+    """Validate a frozen 2-6 member roster of profiles on this gateway. ``local_profiles`` may map
+    each name to its home (``CanonicalHostedRoomService.profile_homes``): the default's home then
+    decides its @hermes alias (``_with_hermes_alias``), not this process's own home."""
     if not isinstance(value, list):
         raise DiscussionValidationError("members must be a list")
     if not MIN_DISCUSSION_MEMBERS <= len(value) <= MAX_DISCUSSION_MEMBERS:
@@ -319,19 +321,26 @@ def validate_roster(value: Any, *, local_profiles: Iterable[str]) -> tuple[Discu
                 raise DiscussionValidationError(message)
             seen.add(key)
         members.append(member)
-    return _with_hermes_alias(tuple(members), known_profiles)
+    default_home = local_profiles.get("default") if isinstance(local_profiles, Mapping) else None
+    return _with_hermes_alias(tuple(members), known_profiles, default_home)
 
 
-def _install_holds_hermes() -> bool:
-    """Whether this install has a live named ``hermes`` profile, served here or not: the room-eligible
-    ``known_profiles`` can be narrower than the install (a gateway serving only some profiles)."""
+def _install_holds_hermes(default_home: Any = None) -> bool:
+    """Whether the default's install has a live named ``hermes`` profile, served here or not: the
+    room-eligible ``known_profiles`` can be narrower than the install (a gateway serving only some
+    profiles). That install is ``default_home``'s when the caller knows it — a gateway seats a
+    default from another install through ``hosted_rooms.profiles.default`` — else this process's."""
+    from pathlib import Path
+
     from hermes_constants import get_hermes_home
     from tools.bot_mode_probe import _hermes_root, _roster
 
-    return any(name == "hermes" for name, _dir in _roster(_hermes_root(get_hermes_home())))
+    home = Path(default_home) if default_home else get_hermes_home()
+    return any(name == "hermes" for name, _dir in _roster(_hermes_root(home)))
 
 
-def _with_hermes_alias(members: tuple[DiscussionMember, ...], known_profiles: set[str]) -> tuple[DiscussionMember, ...]:
+def _with_hermes_alias(members: tuple[DiscussionMember, ...], known_profiles: set[str],
+                       default_home: Any = None) -> tuple[DiscussionMember, ...]:
     """Give the local default seated under its custom Bot Mode @handle (#89720) the ``hermes``
     alias: @hermes keeps reaching the default everywhere else, so it does in the room too — but
     only while no profile on this install (seated, served or not) and no member holds that name,
@@ -341,7 +350,7 @@ def _with_hermes_alias(members: tuple[DiscussionMember, ...], known_profiles: se
         return members
     defaults = [index for index, m in enumerate(members)
                 if (m.target or {}).get("kind") == "local" and m.profile == "default"]
-    if len(defaults) != 1 or members[defaults[0]].handle.casefold() in ("hermes", "default") or _install_holds_hermes():
+    if len(defaults) != 1 or members[defaults[0]].handle.casefold() in ("hermes", "default") or _install_holds_hermes(default_home):
         return members
     index = defaults[0]
     return (*members[:index], replace(members[index], aliases=("hermes",)), *members[index + 1:])

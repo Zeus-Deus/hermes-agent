@@ -93,3 +93,46 @@ def test_an_installed_hermes_profile_this_gateway_does_not_serve_keeps_the_name(
 
     assert _addressed("@hermes @research check", members) == ["research"]
     assert _addressed("@maia check", members) == ["default"]
+
+
+def test_the_seated_defaults_own_install_decides_the_alias_not_the_gateways(tmp_path, monkeypatch):
+    """A named gateway (``/A/profiles/research``) seats a default from another install (``/B``)
+    through ``hosted_rooms.profiles.default``. ``/B`` has a real ``hermes`` profile this gateway does
+    not serve, so @hermes names that profile there and the default never answers it, even though
+    the gateway's own install ``/A`` has no ``hermes`` profile."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from gateway.session_hosted_service import CanonicalHostedRoomService
+    from hermes_state import SessionDB
+    from hermes_state_runtime import begin_runtime_epoch
+    from tests.tools.test_bot_mode_dm import _managed_home
+
+    (tmp_path / "A").mkdir()
+    (tmp_path / "B").mkdir()
+    gateway_home = _managed_home(tmp_path / "A", teammates=("research",)) / "profiles" / "research"
+    default_home = _managed_home(tmp_path / "B", teammates=("hermes",)).resolve()
+    (gateway_home / "config.yaml").write_text(
+        json.dumps({"hosted_rooms": {"profiles": {"default": str(default_home)}}}), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(gateway_home))
+    with SessionDB(gateway_home / "state.db") as db:
+        authority = SimpleNamespace(db=db, profile_id=str(gateway_home), epoch=begin_runtime_epoch(db, instance_id="t"))
+        service = CanonicalHostedRoomService(authority, asyncio.new_event_loop())
+        assert service.profile_homes() == {"research": gateway_home, "default": default_home}
+        room = service.create_room(room_id="room", name="Ops",
+                                   members=[_member("default", "maia"), _member("research", "research")])
+        gateway = hosted_rooms.local_authority_gateway_id()
+        hosted_rooms.append_event(
+            db.db_path, room_id="room", event_id="u1", kind="message.user", actor={"kind": "user", "id": "desktop"},
+            payload={"text": "@hermes @research check", "thread_id": "t1"}, authority_gateway_id=gateway,
+            authority_epoch=1)
+        room = hosted_rooms.room_state(db.db_path, room_id="room")
+        events = hosted_rooms.read_events(db.db_path, room_id="room", limit=hosted_rooms.MAX_LOG_LIMIT)["events"]
+
+        decision = discussion.plan_next_task(room, events, local_profiles=service.room_profiles(room))
+
+        assert (decision.reason, decision.task.member.profile) == ("member_turn", "research")
+        members = discussion.validate_room(room, local_profiles=service.room_profiles(room)).members
+        assert _addressed("@hermes @research check", members) == ["research"]
+        assert _addressed("@maia check", members) == ["default"]
