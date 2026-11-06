@@ -211,13 +211,39 @@ function relayWireId(connectionId: string): string {
 // ── who is pushing a roster (#139219) ──
 // Every Desktop relaying for a gateway pushes it a roster; the gateway keeps one slice per
 // publisher and resolves against their union, so two Desktops no longer overwrite each other
-// (the last push used to win and a bare name flapped between machines). The publisher is this
-// Desktop's own machine id (`local-<install>`); until that is known, a per-run random id, whose
-// slice the gateway expires once it goes unrefreshed.
-const RUN_PUBLISHER_ID = `desktop-${Array.from({ length: 12 }, () => Math.floor(Math.random() * 16).toString(16)).join('')}`
+// (the last push used to win and a bare name flapped between machines). Each renderer runs its
+// own relay with its own reads, so the publisher is per window, not per install: two windows of
+// one Desktop must not replace each other's slice either. Kept in sessionStorage, which a window
+// keeps across reloads, so a reload replaces its own slice instead of leaving one to expire.
+const PUBLISHER_STORAGE_KEY = 'hermes.botRelay.publisher'
+const PUBLISHER_RE = /^desktop-[0-9a-f]{12}$/
+
+function windowPublisherId(): string {
+  try {
+    const kept = window.sessionStorage.getItem(PUBLISHER_STORAGE_KEY) || ''
+
+    if (PUBLISHER_RE.test(kept)) {
+      return kept
+    }
+  } catch {
+    // No storage (tests, sandboxed renderer): a per-run id.
+  }
+
+  const id = `desktop-${Array.from({ length: 12 }, () => Math.floor(Math.random() * 16).toString(16)).join('')}`
+
+  try {
+    window.sessionStorage.setItem(PUBLISHER_STORAGE_KEY, id)
+  } catch {
+    // Per-run id only.
+  }
+
+  return id
+}
+
+const RUN_PUBLISHER_ID = windowPublisherId()
 
 function rosterPublisher(): string {
-  return localRelayId !== null && LOCAL_RELAY_ID_RE.test(localRelayId) ? localRelayId : RUN_PUBLISHER_ID
+  return RUN_PUBLISHER_ID
 }
 
 /** The sender gateway listed the Desktops whose roster carried the envelope's target and it is
@@ -226,14 +252,13 @@ function rosterPublisher(): string {
 function listedForOthers(envelope: RelayEnvelope): boolean {
   const listed = Array.isArray(envelope?.target_publishers) ? envelope.target_publishers.map(String) : []
 
-  return listed.some(id => id !== RUN_PUBLISHER_ID && id !== localRelayId)
+  return listed.some(id => id !== RUN_PUBLISHER_ID)
 }
 
-/** The install the target connection answers from right now; '' when it does not say (or the
- *  ask fails — the delivery then reports that connection's state itself). Asked per envelope
- *  that names a target install: a connection repointed since the last roster fetch would
- *  otherwise pass a cached check. */
-async function liveInstall(target: RelayConnection): Promise<string> {
+/** The install the target connection answers from right now ('' when it reports none), or
+ *  null when it could not be asked. Asked per envelope that names a target install: a
+ *  connection repointed since the last roster fetch would pass a cached check. */
+async function liveInstall(target: RelayConnection): Promise<null | string> {
   try {
     const res = await host.requestProfile<{ install_id?: string }>(target.route, 'profiles.list', {
       include_sessions: false
@@ -245,23 +270,24 @@ async function liveInstall(target: RelayConnection): Promise<string> {
 
     return INSTALL_ID_RE.test(install) ? install : ''
   } catch {
-    return ''
+    return null
   }
 }
 
-/** Two Desktops can give different machines one connection name (#139219): this Desktop's
- *  connection of that name is not the target when it answers from another install than the
- *  envelope names. */
-async function answersFromAnotherInstall(target: RelayConnection, envelope: RelayEnvelope): Promise<boolean> {
+/** Two Desktops can give different machines one connection name (#139219): whether this
+ *  Desktop's connection of that name is the machine the envelope names. 'other' — it answers
+ *  from another install, or reports none (the target's gateway did); 'unknown' — it could not
+ *  be asked, so the envelope waits for a later drain instead of being delivered on a guess. */
+async function targetInstallMatch(target: RelayConnection, envelope: RelayEnvelope): Promise<'other' | 'ok' | 'unknown'> {
   const want = String(envelope?.target_install || '').toLowerCase()
 
   if (!want) {
-    return false
+    return 'ok'
   }
 
   const have = await liveInstall(target)
 
-  return Boolean(have && have !== want)
+  return have === null ? 'unknown' : have === want ? 'ok' : 'other'
 }
 
 /** A gateway from before the slices refusing the unknown `publisher` key: the canonical door
@@ -1001,8 +1027,14 @@ async function deliverRelayEnvelope(
     return
   }
 
-  if (target && (await answersFromAnotherInstall(target, envelope))) {
-    pending.delete(envelopeId)
+  const match = target ? await targetInstallMatch(target, envelope) : 'ok'
+
+  if (match !== 'ok') {
+    if (match === 'other') {
+      pending.delete(envelopeId)
+    } else {
+      noteRelayOutboxWork({ connectionId: sender.id })
+    }
 
     return
   }

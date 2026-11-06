@@ -595,7 +595,7 @@ class RelayAgentRow(Params):
 
 class BotRelayRosterSyncParams(ProfileParams):
     agents: list[RelayAgentRow] | None = None
-    # The pushing Desktop (its own machine's relay id): the push replaces only that Desktop's
+    # The pushing Desktop window (a stable per-window id): the push replaces only that window's
     # slice of the roster. Absent = an older Desktop's push, which owns the legacy slice.
     publisher: str | None = None
 
