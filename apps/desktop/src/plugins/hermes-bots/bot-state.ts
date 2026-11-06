@@ -163,18 +163,54 @@ function liveConnectionId(): string {
   return String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || '').trim()
 }
 
-/** The bot that reads a mention note: the focused chat's owner as its
- *  complete connection/profile pair (`exact`) — a Bot Chat opened on another
- *  connection leaves the Desktop's active connection elsewhere (#130260).
- *  Without an authoritative owner, the previous guess: focused profile on
- *  the active connection, not exact. Read it before any await — focus can
- *  move to another tile while the roster loads. */
-export function mentionSender(): { connectionId: string; exact?: boolean; name: string } {
+type MentionSender = { connectionId: string; exact?: boolean; name: string }
+
+/** The chat a composer send goes to (`composer.middleware` context). */
+export interface MentionSubmitContext {
+  storedSessionId?: null | string
+}
+
+/** The previous guess, for an owner nobody knows: focused profile on the
+ *  active connection, never `exact` — rows keep their remote/local split. */
+function guessedMentionSender(): MentionSender {
+  return { connectionId: liveConnectionId() || 'local', name: focusedMentionProfile() }
+}
+
+/** The submitting chat's owner when the send names a chat other than the
+ *  focused one; undefined when focus already answers for it. */
+function submittingChatSender(context: MentionSubmitContext | null | undefined): MentionSender | undefined {
+  const lookup = host.sessionOwner
+  const stored = String(context?.storedSessionId || '').trim()
+  const focused = String(host.state.focusedStoredSessionId?.get?.() || '').trim()
+
+  if (!context || typeof lookup !== 'function' || stored === focused) {
+    return undefined
+  }
+
+  const owner = stored ? focusedRosterOwner(lookup(stored)) : null
+
+  return owner?.connectionId ? { connectionId: owner.connectionId, exact: true, name: owner.name } : guessedMentionSender()
+}
+
+/** The bot that reads a mention note: the owner of the chat the send goes
+ *  to, as its complete connection/profile pair (`exact`) — a Bot Chat opened
+ *  on another connection leaves the Desktop's active connection elsewhere
+ *  (#130260). That chat is the focused one unless `context` names another (a
+ *  queued prompt drains in its own tile). Without an authoritative owner, the
+ *  previous guess. Read it before any await — focus can move to another tile
+ *  while the roster loads. */
+export function mentionSender(context?: MentionSubmitContext | null): MentionSender {
+  const submitting = submittingChatSender(context)
+
+  if (submitting) {
+    return submitting
+  }
+
   const owner = focusedRosterOwner($focusedBotOwner.get?.() ?? null)
 
   return owner?.authoritative && owner.connectionId
     ? { connectionId: owner.connectionId, exact: true, name: owner.name }
-    : { connectionId: liveConnectionId() || 'local', name: focusedMentionProfile() }
+    : guessedMentionSender()
 }
 
 export function focusedRosterOwner(

@@ -169,7 +169,7 @@ export function ChatBar({
   })
 
   // Voice-stop interception + contributed middleware wrap every send.
-  const { onSubmit, voiceStopRef } = useMiddlewareSubmit(onSubmitProp)
+  const { onSubmit, voiceStopRef } = useMiddlewareSubmit(onSubmitProp, { sessionId, storedSessionId: queueSessionKey })
 
   // Which live composer this instance IS (main | tile) — its attachment set,
   // focus-bus key, and awaiting-input edge. Main scope = the legacy globals.

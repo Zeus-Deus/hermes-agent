@@ -51,4 +51,41 @@ describe('runComposerMiddleware', () => {
 
     expect(await runComposerMiddleware({ text: 'quiet' })).toEqual({ text: 'QUIET' })
   })
+
+  it('hands every handler the same destination chat, whatever an earlier one returns', async () => {
+    const seen: unknown[] = []
+
+    addMiddleware('a', (d, context) => {
+      seen.push(context)
+
+      return { text: `${d.text}a` }
+    }, 10)
+    addMiddleware('b', (d, context) => {
+      seen.push(context)
+
+      return d
+    }, 20)
+
+    await runComposerMiddleware({ text: 'x' }, { sessionId: 'rt-a', storedSessionId: 'stored-a' })
+
+    expect(seen).toEqual([
+      { sessionId: 'rt-a', storedSessionId: 'stored-a' },
+      { sessionId: 'rt-a', storedSessionId: 'stored-a' }
+    ])
+    expect(Object.isFrozen(seen[0])).toBe(true)
+  })
+
+  it('omits the context for callers that pass none', async () => {
+    let context: unknown = 'unset'
+
+    addMiddleware('a', (d, ctx) => {
+      context = ctx
+
+      return d
+    })
+
+    await runComposerMiddleware({ text: 'x' })
+
+    expect(context).toBeUndefined()
+  })
 })

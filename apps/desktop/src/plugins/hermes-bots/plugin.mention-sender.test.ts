@@ -23,7 +23,10 @@ interface MentionCompletionItem {
 
 interface Contribution {
   data: {
-    handler?: (draft: { text: string }) => Promise<{ text: string }>
+    handler?: (
+      draft: { text: string },
+      context?: { sessionId: null | string; storedSessionId: null | string }
+    ) => Promise<{ text: string }>
     provide?: (query: string) => MentionCompletionItem[]
   }
   id: string
@@ -36,7 +39,10 @@ const { cache, hostMock, live } = vi.hoisted(() => {
   const live = {
     active: 'local',
     focused: 'ops',
+    focusedStored: null as null | string,
     owner: null as Owner,
+    // Owners `host.sessionOwner` resolves, by stored session id.
+    owners: {} as Record<string, Owner>,
     profile: 'default',
     socket: null as null | string
   }
@@ -48,12 +54,13 @@ const { cache, hostMock, live } = vi.hoisted(() => {
       notify: vi.fn(),
       request: vi.fn(async (): Promise<unknown> => ({})),
       requestProfile: vi.fn(async () => ({})),
+      sessionOwner: (id: null | string | undefined) => (id && live.owners[id]) || null,
       agents: vi.fn(async () => ({ agents: [], sources: [] })),
       state: {
         connectionId: { get: () => live.active, listen: () => () => undefined },
         focusedSessionOwner: { get: () => live.owner, listen: () => () => undefined },
         focusedSessionProfile: { get: () => live.focused, listen: () => () => undefined },
-        focusedStoredSessionId: { get: () => null, listen: () => () => undefined },
+        focusedStoredSessionId: { get: () => live.focusedStored, listen: () => () => undefined },
         gateway: { get: () => null, listen: () => () => undefined },
         profile: { get: () => live.profile, listen: () => () => undefined }
       }
@@ -189,7 +196,9 @@ beforeEach(() => {
   hostMock.agents.mockReset().mockResolvedValue({ agents: [], sources: [] })
   live.active = 'local'
   live.focused = 'ops'
+  live.focusedStored = 'ops-chat'
   live.owner = { connectionId: 'server', profile: 'ops' }
+  live.owners = { 'ops-chat': { connectionId: 'server', profile: 'ops' } }
   live.profile = 'default'
   live.socket = null
 })
@@ -409,6 +418,52 @@ describe('mention targets follow the focused chat owner, not the active connecti
     live.focused = 'default'
 
     expect((await handler({ text: 'ask @hermes' })).text).toContain('(message_agent target: "default@local")')
+  })
+})
+
+describe('a queued send is written for the chat it drains into, not the focused one', () => {
+  // The server's ops chat has focus; this device's writer chat drains its queue in its own tile.
+  const WRITER_CHAT = { sessionId: 'rt-writer', storedSessionId: 'writer-chat' }
+
+  it("targets the submitting chat's own gateway while another connection's chat has focus", async () => {
+    live.owners['writer-chat'] = { connectionId: 'local', profile: 'writer' }
+
+    const { handler } = await contributions({ profiles: BUILT_ON_LOCAL })
+
+    const { text } = await handler({ text: 'ask @default-this-device and @ops' }, WRITER_CHAT)
+
+    // writer's own gateway resolves its default bare; the focused bot is not the sender, so it is offered.
+    expect(text).toContain('@default-this-device = agent profile "default" (message_agent target: "hermes")')
+    expect(text).toContain('@ops = agent profile "ops" — on Server (message_agent target: "ops@server")')
+    expect(text).not.toContain('default@local')
+  })
+
+  it('keeps the qualifier when the submitting chat has no known owner', async () => {
+    const { handler } = await contributions({ profiles: BUILT_ON_LOCAL })
+
+    const { text } = await handler({ text: 'send it to @default-server' }, WRITER_CHAT)
+
+    // The focused server owner would make this a bare 'hermes' — the writer's own default.
+    expect(text).toContain('(message_agent target: "default@server")')
+  })
+
+  it("keeps the qualifier for a fresh draft's send while a stored chat has focus", async () => {
+    const { handler } = await contributions({ profiles: BUILT_ON_LOCAL })
+
+    const { text } = await handler({ text: 'send it to @default-server' }, { sessionId: null, storedSessionId: null })
+
+    expect(text).toContain('(message_agent target: "default@server")')
+  })
+
+  it('reads the focused owner for a send from the focused chat itself', async () => {
+    const { handler } = await contributions({ profiles: BUILT_ON_LOCAL })
+
+    const { text } = await handler(
+      { text: 'send it to @default-server' },
+      { sessionId: 'rt-ops', storedSessionId: 'ops-chat' }
+    )
+
+    expect(text).toContain('@default-server = agent profile "default" (message_agent target: "hermes")')
   })
 })
 

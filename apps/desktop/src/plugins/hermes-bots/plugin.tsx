@@ -113,6 +113,12 @@ interface ComposerDraftPayload {
   text: string
 }
 
+/** The chat a send goes to; hosts before `ComposerSubmitContext` omit it. */
+interface ComposerSubmitContextPayload {
+  sessionId?: null | string
+  storedSessionId?: null | string
+}
+
 export default {
   id: ID,
   name: translateNow('common.bots'),
@@ -762,7 +768,10 @@ export default {
       id: 'mention-middleware',
       area: COMPOSER_AREAS.middleware,
       data: {
-        handler: async (draft: ComposerDraftPayload): Promise<ComposerDraftPayload> => {
+        handler: async (
+          draft: ComposerDraftPayload,
+          context?: ComposerSubmitContextPayload
+        ): Promise<ComposerDraftPayload> => {
           const text = draft.text || ''
 
           // /new inside a bot's canonical forever-chat would fork the
@@ -807,8 +816,9 @@ export default {
             return draft
           }
 
-          // The bot that reads the note, fixed before any await moves focus.
-          const owner = mentionSender()
+          // The bot that reads the note — the submitting chat's, which a queued
+          // send need not share with the focused tile — fixed before any await.
+          const owner = mentionSender(context)
           let cached = cachedUnionRoster()
 
           if (!Array.isArray(cached?.profiles)) {

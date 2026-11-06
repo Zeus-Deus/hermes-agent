@@ -228,6 +228,62 @@ describe('host.state.focusedSessionProfile', () => {
   })
 })
 
+describe('host.sessionOwner', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.resetModules()
+  })
+
+  it('resolves a chat that does not have focus exactly as the focused owner would', async () => {
+    const { host } = await import('@/sdk/index')
+    const session = await import('@/store/session')
+
+    session.setConnection({ connectionId: 'source-a', mode: 'remote' } as never)
+    session.$sessions.set([
+      { connection_id: 'source-a', id: 'focused-chat', profile: 'ops' } as never,
+      { connection_id: 'source-b', id: 'other-chat', profile: 'writer' } as never
+    ])
+    session.setSessionOwnerHint('hinted-chat', {
+      connectionId: 'source-c',
+      mode: 'remote',
+      profile: 'reviewer',
+      targetProfile: 'backend-reviewer'
+    })
+    session.$selectedStoredSessionId.set('focused-chat')
+
+    expect(host.sessionOwner('other-chat')).toEqual({ connectionId: 'source-b', profile: 'writer' })
+    expect(host.sessionOwner('hinted-chat')).toEqual({ connectionId: 'source-c', profile: 'reviewer' })
+    expect(host.sessionOwner('focused-chat')).toEqual(host.state.focusedSessionOwner.get())
+
+    session.$sessions.set([])
+    session.$selectedStoredSessionId.set(null)
+    session.setConnection(null)
+  })
+
+  it('never guesses: empty, unknown and ambiguous ids are null', async () => {
+    const { host } = await import('@/sdk/index')
+    const session = await import('@/store/session')
+
+    session.setConnection({ connectionId: 'source-a', mode: 'remote' } as never)
+    session.$sessions.set([
+      { connection_id: 'source-a', id: 'twice', profile: 'worker' } as never,
+      { connection_id: 'source-b', id: 'twice', profile: 'worker' } as never
+    ])
+
+    expect(host.sessionOwner(null)).toBeNull()
+    expect(host.sessionOwner('  ')).toBeNull()
+    expect(host.sessionOwner('missing')).toBeNull()
+    expect(host.sessionOwner('twice')).toBeNull()
+
+    session.$sessions.set([])
+    session.setConnection(null)
+  })
+})
+
 describe('host.state busy vs gateway', () => {
   afterEach(() => {
     $sessionStates.set({})

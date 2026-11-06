@@ -84,10 +84,25 @@ export interface ComposerDraft {
   attachments?: ComposerAttachment[]
 }
 
+/** The chat a send belongs to — the composer that submitted it, which is not
+ *  always the focused one: a queued prompt drains in its own tile while
+ *  another has focus. Resolve its owner with `host.sessionOwner`. Each id is
+ *  null when unknown (a fresh draft has no stored id yet). */
+export interface ComposerSubmitContext {
+  /** Runtime session id the send goes into. */
+  sessionId: string | null
+  /** Durable stored session id of the destination chat. */
+  storedSessionId: string | null
+}
+
 /** Payload of a `composer.middleware` data contribution. */
 export interface ComposerMiddleware {
-  /** Rewrite (return a draft), pass through (same draft), or cancel (null). */
-  handler: (draft: ComposerDraft) => ComposerDraft | null | Promise<ComposerDraft | null>
+  /** Rewrite (return a draft), pass through (same draft), or cancel (null).
+   *  `context` names the destination chat; hosts before it existed omit it. */
+  handler: (
+    draft: ComposerDraft,
+    context?: ComposerSubmitContext
+  ) => ComposerDraft | null | Promise<ComposerDraft | null>
 }
 
 /** One row a `composer.atCompletions` source offers for the current query. */
@@ -134,10 +149,18 @@ export interface ComposerAttachmentProvider {
  * Run the ordered middleware chain over a draft. Contributions execute in
  * registry order (`order`, then registration order); the first `null` wins
  * and cancels the send. A throwing handler is treated as pass-through so a
- * broken plugin can't eat messages.
+ * broken plugin can't eat messages. Every handler sees the same `context`.
  */
-export async function runComposerMiddleware(draft: ComposerDraft): Promise<ComposerDraft | null> {
+export async function runComposerMiddleware(
+  draft: ComposerDraft,
+  context?: ComposerSubmitContext
+): Promise<ComposerDraft | null> {
   let current = draft
+
+  // One frozen copy for the whole chain: a handler cannot re-address the send for the next.
+  const destination = context
+    ? Object.freeze({ sessionId: context.sessionId ?? null, storedSessionId: context.storedSessionId ?? null })
+    : undefined
 
   for (const contribution of registry.getArea(COMPOSER_AREAS.middleware)) {
     const middleware = contribution.data as ComposerMiddleware | undefined
@@ -147,7 +170,7 @@ export async function runComposerMiddleware(draft: ComposerDraft): Promise<Compo
     }
 
     try {
-      const next = await middleware.handler(current)
+      const next = await middleware.handler(current, destination)
 
       if (next === null) {
         return null

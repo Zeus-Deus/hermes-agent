@@ -85,10 +85,8 @@ import {
   $messages,
   $selectedStoredSessionId,
   $sessions,
-  getSessionOwnerHints,
   rememberedSessionProfile,
   requestSessionResume,
-  sessionMatchesStoredId,
   setResumeExhaustedSessionId,
   setSessionOwnerHint
 } from '@/store/session'
@@ -118,6 +116,7 @@ import {
   pluginRouteStillRegistered,
   requestPluginProfile
 } from './profile-request'
+import { type PluginFocusedSessionOwner, storedSessionOwner } from './session-owner'
 import { sessionsHost } from './sessions'
 import { desktopSettings } from './settings'
 import { spellcheckHost } from './spellcheck'
@@ -157,10 +156,7 @@ const $focusedAwaitingResponse = focusedTurnFlag(
   PRIMARY_SESSION_VIEW.$awaitingResponse
 )
 
-export interface PluginFocusedSessionOwner {
-  connectionId: string
-  profile: string
-}
+export type { PluginFocusedSessionOwner } from './session-owner'
 
 /**
  * Connection-qualified owner of the FOCUSED chat. The gateway-routing atom
@@ -183,35 +179,7 @@ const $focusedSessionOwner = computed(
       profile: normalizeProfileKey(activeProfile)
     }
 
-    if (!focused) {
-      return fallback
-    }
-
-    const hints = getSessionOwnerHints(focused)
-
-    if (hints.length === 1) {
-      return {
-        connectionId: hints[0].connectionId,
-        profile: normalizeProfileKey(hints[0].profile)
-      }
-    }
-
-    if (hints.length > 1) {
-      return null
-    }
-
-    const owners = new Map<string, PluginFocusedSessionOwner>()
-
-    for (const row of sessions.filter(session => sessionMatchesStoredId(session, focused))) {
-      const connectionId = String(row.connection_id || '').trim()
-      const profile = normalizeProfileKey(row.profile)
-
-      if (connectionId) {
-        owners.set(`${connectionId}::${profile}`, { connectionId, profile })
-      }
-    }
-
-    return owners.size === 1 ? [...owners.values()][0] : null
+    return focused ? storedSessionOwner(focused, sessions) : fallback
   }
 )
 
@@ -758,6 +726,17 @@ export const host = {
    *  active gateway is a registered remote. Re-read per use — it changes on
    *  profile/agent swaps. */
   activeConnectionId: (): null | string => activeGatewayConnectionId(),
+
+  /** Connection-qualified owner of ANY stored session, resolved exactly as
+   *  `state.focusedSessionOwner` resolves the focused one — for code acting on
+   *  a chat that need not have focus (a composer middleware's
+   *  `context.storedSessionId`: a queued prompt drains in its own tile). Null
+   *  for an empty, ambiguous or unresolved id; never a guess from focus. */
+  sessionOwner: (storedSessionId: null | string | undefined): PluginFocusedSessionOwner | null => {
+    const id = String(storedSessionId || '').trim()
+
+    return id ? storedSessionOwner(id, $sessions.get()) : null
+  },
 
   /** The registered connection list (labels, kinds, primary) — token bytes
    *  never included. Rejects on Desktop builds without the registry. */
@@ -1572,7 +1551,8 @@ export {
   type ComposerContextMenuProvider,
   type ComposerMiddleware,
   type ComposerModelPillContext,
-  type ComposerModelPillProvider
+  type ComposerModelPillProvider,
+  type ComposerSubmitContext
 } from '@/app/chat/composer/contrib'
 /** The main composer's surface pieces, so a plugin composer (Bot Mode rooms) reads as the
  *  same input: the ring, the fill layer behind the editor, and the ghost / primary icon buttons. */

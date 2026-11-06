@@ -1,8 +1,9 @@
 import { useCallback, useRef } from 'react'
 
 import { interceptsTypedVoiceStop } from '@/lib/voice-stop-word'
+import { isFreshDraftScope } from '@/store/composer'
 
-import { runComposerMiddleware } from '../contrib'
+import { type ComposerSubmitContext, runComposerMiddleware } from '../contrib'
 import type { ChatBarProps } from '../types'
 
 interface VoiceStopHandle {
@@ -10,12 +11,39 @@ interface VoiceStopHandle {
   end: () => void
 }
 
-export function useMiddlewareSubmit(onSubmitProp: ChatBarProps['onSubmit']) {
+/** The composer's own chat, for sends that do not name one. */
+interface ComposerSession {
+  sessionId?: string | null
+  storedSessionId?: string | null
+}
+
+const sessionIdOrNull = (id: null | string | undefined) => String(id || '').trim() || null
+
+/** The chat a send goes to: what the caller named (a queue drain names its
+ *  own session), else this composer's. A fresh-draft scope is no stored id. */
+function submitContext(
+  options: Parameters<ChatBarProps['onSubmit']>[1],
+  own: ComposerSession
+): ComposerSubmitContext {
+  const stored = sessionIdOrNull(
+    options?.storedSessionId !== undefined ? options.storedSessionId : own.storedSessionId
+  )
+
+  return {
+    sessionId: sessionIdOrNull(options?.sessionId !== undefined ? options.sessionId : own.sessionId),
+    storedSessionId: stored && !isFreshDraftScope(stored) ? stored : null
+  }
+}
+
+export function useMiddlewareSubmit(onSubmitProp: ChatBarProps['onSubmit'], session: ComposerSession = {}) {
   // Typed stop phrase during an active voice conversation ends it — same
   // semantics as SAYING "stop" (voice-stop-word.ts) or clicking the pill's
   // end control. The caller populates it after useComposerVoice (the submit
   // wrapper is created first); render-time assignment keeps the ref current.
   const voiceStopRef = useRef<VoiceStopHandle>({ active: false, end: () => {} })
+  // Read at send time: the composer can re-home (a fresh chat gets its id).
+  const sessionRef = useRef(session)
+  sessionRef.current = session
 
   // Every send (typed, queued, voice) passes through the contributed
   // middleware chain first — rewrite / pass-through / cancel. Empty chain =
@@ -37,7 +65,12 @@ export function useMiddlewareSubmit(onSubmitProp: ChatBarProps['onSubmit']) {
         return true
       }
 
-      const draft = await runComposerMiddleware({ text: value, attachments: options?.attachments })
+      // Middleware sees which chat this is — a queued send drains in its own
+      // tile, which need not be the focused one.
+      const draft = await runComposerMiddleware(
+        { text: value, attachments: options?.attachments },
+        submitContext(options, sessionRef.current)
+      )
 
       if (!draft) {
         return false

@@ -488,7 +488,13 @@ whole migration.
 `COMPOSER_AREAS` (`top`, `bottom`, `underside`, `leading`, `actions`,
 `attachments`, `middleware`, `contextMenu`) let a plugin add controls around the message
 composer, provide an attachment source, or transform a draft before it is sent
-(`ComposerMiddleware` with a `handler(draft) => draft | null`). `top` is a
+(`ComposerMiddleware` with a `handler(draft, context?) => draft | null`). `context`
+(`ComposerSubmitContext`: `{ sessionId, storedSessionId }`, either null when
+unknown) names the chat the send goes to — not always the focused one, since a
+queued prompt drains in its own tile. Resolve that chat's owner with
+`host.sessionOwner(context.storedSessionId)` (`{ connectionId, profile } | null`,
+the same lookup as `host.state.focusedSessionOwner`); older hosts omit
+`context`. `top` is a
 banner strip above the input and `bottom` a row below the input grid, both
 inside the composer chrome; `underside` is the floating strip BELOW the whole
 composer with no chrome of its own — the seat for a suggestion pill or a status
