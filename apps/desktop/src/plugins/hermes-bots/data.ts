@@ -1371,8 +1371,6 @@ export function mentionTargetConnection(
 ): string | undefined {
   const rowId = rowConnectionId(bot, sender)
 
-  // An exact sender with no connection is known to be elsewhere: every row
-  // with a connection is foreign to it.
   if (sender?.exact && rowId) {
     return ownsConnection(sender, rowId) ? undefined : rowId
   }
@@ -1382,15 +1380,36 @@ export function mentionTargetConnection(
   return bot?.remoteSource && botId ? botId : undefined
 }
 
-/** The bare form the sender's own gateway resolves `bot` by. For a known
- *  sender, the profile folder id: the gateway resolves it exactly ('default'
- *  is always a folder id there), while a row's 'hermes' claim is computed
- *  per registry address and misses a real hermes profile listed only under
- *  another address of the same install. Otherwise the handle rule. */
-export function localMentionHandle(bot: Partial<RosterRow>, sender: RosterOwnerRef | null | undefined): string {
-  const name = String(bot?.name || '')
+/** The bare handle the sender's own gateway resolves `bot` by. The default
+ *  answers 'hermes' unless a real 'hermes' profile holds it. A row's claim is
+ *  computed per registry address, so for a known sender a 'hermes' row on any
+ *  address of its install (`roster`) counts too. Not the folder id 'default':
+ *  a registered peer named 'default' would capture it before local lookup. */
+export function localMentionHandle(
+  bot: Partial<RosterRow>,
+  sender: RosterOwnerRef | null | undefined,
+  roster: readonly Partial<RosterRow>[] = []
+): string {
+  const ownHermes = (row: Partial<RosterRow>) => {
+    if (!sender?.exact || row?.name !== 'hermes') {
+      return false
+    }
 
-  return sender?.exact && name ? name : botHandle(name, { hermesHandleTaken: Boolean(bot?.hermesHandleTaken) })
+    const rowId = rowConnectionId(row, sender)
+
+    return Boolean(rowId) && ownsConnection(sender, rowId)
+  }
+
+  return botHandle(String(bot?.name || ''), {
+    hermesHandleTaken: Boolean(bot?.hermesHandleTaken) || roster.some(ownHermes)
+  })
+}
+
+/** The sender is known not to be the focused chat's bot but its owner is
+ *  not: no target is safe to hand out (a bare name or a qualifier resolves
+ *  differently on every gateway), so the note identifies bots only. */
+export function isUnknownMentionSender(sender: RosterOwnerRef | null | undefined): boolean {
+  return Boolean(sender?.exact && !String(sender.connectionId || '').trim())
 }
 
 /** `rowId` is the ref's connection, or another registry address of the same
@@ -1455,6 +1474,12 @@ export function isActiveRosterBot(
 
   const activeName = String(active.name || 'default').trim() || 'default'
   const activeId = String(active?.connectionId || '').trim()
+
+  // An unknown sender is nobody on the roster.
+  if (active.exact && !activeId) {
+    return false
+  }
+
   const botId = String(bot?.connectionId || '').trim()
   const botName = String(bot?.name || '').trim() || 'default'
 

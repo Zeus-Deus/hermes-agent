@@ -2,6 +2,8 @@ import { useCallback, useRef } from 'react'
 
 import { interceptsTypedVoiceStop } from '@/lib/voice-stop-word'
 import { isFreshDraftScope } from '@/store/composer'
+import { $sessions, sessionMatchesStoredId } from '@/store/session'
+import { storedSessionIdForRuntimeId } from '@/store/session-states'
 
 import { type ComposerSubmitContext, runComposerMiddleware } from '../contrib'
 import type { ChatBarProps } from '../types'
@@ -19,20 +21,35 @@ interface ComposerSession {
 
 const sessionIdOrNull = (id: null | string | undefined) => String(id || '').trim() || null
 
+/** `a` and `b` name one conversation: equal, or one session row (a lineage
+ *  tip and its root) answers to both. */
+const sameConversation = (a: string, b: string) =>
+  a === b || $sessions.get().some(row => sessionMatchesStoredId(row, a) && sessionMatchesStoredId(row, b))
+
+/** A runtime id bound to ANOTHER conversation than `stored` is stale — a
+ *  drain can pair the queue's stored id with the previous chat's runtime
+ *  mid-switch, which submit.ts drops before sending too. Unbound ids stay. */
+function destinationRuntime(runtime: null | string, stored: null | string): null | string {
+  if (!runtime || !stored) {
+    return runtime
+  }
+
+  const bound = storedSessionIdForRuntimeId(runtime)
+
+  return bound && !sameConversation(bound, stored) ? null : runtime
+}
+
 /** The chat a send goes to: what the caller named (a queue drain names its
  *  own session), else this composer's. A fresh-draft scope is no stored id. */
 function submitContext(
   options: Parameters<ChatBarProps['onSubmit']>[1],
   own: ComposerSession
 ): ComposerSubmitContext {
-  const stored = sessionIdOrNull(
-    options?.storedSessionId !== undefined ? options.storedSessionId : own.storedSessionId
-  )
+  const named = sessionIdOrNull(options?.storedSessionId !== undefined ? options.storedSessionId : own.storedSessionId)
+  const stored = named && !isFreshDraftScope(named) ? named : null
+  const runtime = sessionIdOrNull(options?.sessionId !== undefined ? options.sessionId : own.sessionId)
 
-  return {
-    sessionId: sessionIdOrNull(options?.sessionId !== undefined ? options.sessionId : own.sessionId),
-    storedSessionId: stored && !isFreshDraftScope(stored) ? stored : null
-  }
+  return { sessionId: destinationRuntime(runtime, stored), storedSessionId: stored }
 }
 
 export function useMiddlewareSubmit(onSubmitProp: ChatBarProps['onSubmit'], session: ComposerSession = {}) {

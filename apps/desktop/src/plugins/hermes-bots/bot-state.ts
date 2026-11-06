@@ -171,10 +171,10 @@ export interface MentionSubmitContext {
   storedSessionId?: null | string
 }
 
-/** A sender known NOT to be the focused chat's bot, whose owner is unknown:
- *  `exact` with no connection, so every row on a known connection is
- *  qualified and none is hidden as self. A target its gateway cannot resolve
- *  fails loudly; a bare name could reach that gateway's namesake. */
+/** A sender known NOT to be the focused chat's bot, whose owner is unknown
+ *  (`exact` with no connection; see isUnknownMentionSender): nobody is hidden
+ *  as self and no message_agent target is handed out — a bare name and a
+ *  qualifier both resolve differently on every gateway. */
 const UNKNOWN_SENDER: MentionSender = { connectionId: '', exact: true, name: '' }
 
 const trimmed = (value: unknown) => String(value || '').trim()

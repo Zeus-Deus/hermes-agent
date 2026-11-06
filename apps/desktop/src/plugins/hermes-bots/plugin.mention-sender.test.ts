@@ -212,7 +212,7 @@ describe('mention targets follow the focused chat owner, not the active connecti
 
     const { text } = await handler({ text: 'send it to @default-server' })
 
-    expect(text).toContain('@default-server = agent profile "default" (message_agent target: "default")')
+    expect(text).toContain('@default-server = agent profile "default" (message_agent target: "hermes")')
     expect(text).not.toContain('default@server')
   })
 
@@ -252,7 +252,7 @@ describe('mention targets follow the focused chat owner, not the active connecti
 
     // 'hermes' here would deliver to THIS device's default: the wrong bot.
     expect(text).toContain('(message_agent target: "default@server")')
-    expect(text).toContain('@default-this-device = agent profile "default" (message_agent target: "default")')
+    expect(text).toContain('@default-this-device = agent profile "default" (message_agent target: "hermes")')
     expect(text).not.toContain('default@local')
   })
 
@@ -436,21 +436,31 @@ describe('a queued send is written for the chat it drains into, not the focused 
     const { text } = await handler({ text: 'ask @default-this-device and @ops' }, WRITER_CHAT)
 
     // writer's own gateway resolves its default bare; the focused bot is not the sender, so it is offered.
-    expect(text).toContain('@default-this-device = agent profile "default" (message_agent target: "default")')
+    expect(text).toContain('@default-this-device = agent profile "default" (message_agent target: "hermes")')
     expect(text).toContain('@ops = agent profile "ops" — on Server (message_agent target: "ops@server")')
     expect(text).not.toContain('default@local')
   })
 
-  it('qualifies every row when the submitting chat has no known owner', async () => {
+  it('hands out no target while the submitting chat has no known owner', async () => {
     const { handler } = await contributions({ profiles: BUILT_ON_LOCAL })
 
     const { text } = await handler({ text: 'ask @default-server, @writer and @ops' }, WRITER_CHAT)
 
-    // Bare names would resolve on whichever gateway the sender is; a qualifier only fails.
-    expect(text).toContain('@default-server = agent profile "default" — on Server (message_agent target: "default@server")')
-    expect(text).toContain('(message_agent target: "writer@local")')
+    // A bare name or a qualifier resolves differently on every gateway (a qualifier
+    // the relay misses still falls through to local friendly names).
+    expect(text).toContain('@default-server = agent profile "default" (no message_agent target')
+    expect(text).toContain('@writer = agent profile "writer" (no message_agent target')
     // Not the focused bot, so not "self".
-    expect(text).toContain('(message_agent target: "ops@server")')
+    expect(text).toContain('@ops = agent profile "ops" (no message_agent target')
+    expect(text).not.toContain('message_agent target: "')
+  })
+
+  it('never takes an unknown sender for a roster row', async () => {
+    const { isActiveRosterBot } = await import('./data')
+    const unknown = { connectionId: '', exact: true, name: '' }
+
+    expect(isActiveRosterBot({ name: 'default' }, unknown)).toBe(false)
+    expect(isActiveRosterBot({ connectionId: 'local', name: 'default' }, unknown)).toBe(false)
   })
 
   it('resolves the destination by its runtime id when the queue scope is a lineage root', async () => {
@@ -464,7 +474,7 @@ describe('a queued send is written for the chat it drains into, not the focused 
       { sessionId: 'rt-writer', storedSessionId: 'writer-root' }
     )
 
-    expect(text).toContain('@default-this-device = agent profile "default" (message_agent target: "default")')
+    expect(text).toContain('@default-this-device = agent profile "default" (message_agent target: "hermes")')
   })
 
   it("keeps the focused owner for the focused chat's own send under its lineage root", async () => {
@@ -479,15 +489,17 @@ describe('a queued send is written for the chat it drains into, not the focused 
     )
 
     expect(text).toContain('— on This device (message_agent target: "default@local")')
-    expect(text).toContain('@default-server = agent profile "default" (message_agent target: "default")')
+    expect(text).toContain('@default-server = agent profile "default" (message_agent target: "hermes")')
   })
 
-  it("keeps the qualifier for a fresh draft's send while a stored chat has focus", async () => {
+  it("hands out no target for a fresh draft's send while a stored chat has focus", async () => {
     const { handler } = await contributions({ profiles: BUILT_ON_LOCAL })
 
     const { text } = await handler({ text: 'send it to @default-server' }, { sessionId: null, storedSessionId: null })
 
-    expect(text).toContain('(message_agent target: "default@server")')
+    // Not the focused chat, owner unknown: no target that could reach the wrong bot.
+    expect(text).toContain('(no message_agent target')
+    expect(text).not.toContain('"hermes"')
   })
 
   it('reads the focused owner for a send from the focused chat itself', async () => {
@@ -498,7 +510,7 @@ describe('a queued send is written for the chat it drains into, not the focused 
       { sessionId: 'rt-ops', storedSessionId: 'ops-chat' }
     )
 
-    expect(text).toContain('@default-server = agent profile "default" (message_agent target: "default")')
+    expect(text).toContain('@default-server = agent profile "default" (message_agent target: "hermes")')
   })
 })
 
@@ -524,12 +536,12 @@ describe('one server registered under two addresses', () => {
 
     const { text } = await handler({ text: 'send it to @default-server' })
 
-    // Local to the sender, named by folder id.
-    expect(text).toContain('(message_agent target: "default")')
+    // Local to the sender; no hermes profile on any address, so the default answers 'hermes'.
+    expect(text).toContain('(message_agent target: "hermes")')
     expect(provide('').map(item => item.insert)).not.toContain('@ops')
   })
 
-  it("names the default's folder id when only the other address lists a real hermes profile", async () => {
+  it("keeps 'default' when only the other address lists a real hermes profile", async () => {
     // The collapse kept `default` on server-a (its inventory has no hermes) and `hermes` on server-b.
     live.owner = { connectionId: 'server-b', profile: 'ops' }
 
@@ -548,7 +560,7 @@ describe('one server registered under two addresses', () => {
     expect(text).toContain('(message_agent target: "default")')
   })
 
-  it("names the default's folder id when the sender's own address lacks the real hermes profile", async () => {
+  it("keeps 'default' when the sender's own address lacks the real hermes profile", async () => {
     // Reversed: the sender sits on server-a, whose inventory (and so the default row's claim) has no hermes.
     const { handler } = await contributions({
       profiles: [

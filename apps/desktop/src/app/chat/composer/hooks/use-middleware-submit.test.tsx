@@ -2,6 +2,10 @@ import { renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { registry } from '@/contrib/registry'
+import { createClientSessionState } from '@/lib/chat-runtime'
+import { host } from '@/sdk'
+import { $sessions } from '@/store/session'
+import { $sessionStates } from '@/store/session-states'
 
 import { COMPOSER_AREAS, type ComposerMiddleware, type ComposerSubmitContext } from '../contrib'
 
@@ -31,6 +35,8 @@ function captureContexts() {
 
 afterEach(() => {
   disposers.splice(0).forEach(d => d())
+  $sessionStates.set({})
+  $sessions.set([])
 })
 
 // Middleware must know which chat a send goes to: a queued prompt drains in
@@ -76,5 +82,52 @@ describe('useMiddlewareSubmit hands middleware the destination chat', () => {
       { sessionId: null, storedSessionId: null },
       { sessionId: null, storedSessionId: null }
     ])
+  })
+
+  it("drops a queued runtime id bound to another chat — the destination's owner wins", async () => {
+    // Mid-switch: the drain pairs writer's queue with the focused ops chat's runtime.
+    $sessionStates.set({ 'rt-ops': createClientSessionState('ops-chat') })
+    $sessions.set([
+      { connection_id: 'server', id: 'ops-chat', profile: 'ops' } as never,
+      { connection_id: 'local', id: 'writer-chat', profile: 'writer' } as never
+    ])
+
+    const owners: unknown[] = []
+
+    disposers.push(
+      registry.register({
+        id: 'owner',
+        area: COMPOSER_AREAS.middleware,
+        data: {
+          handler: (draft, context) => {
+            owners.push(host.sessionOwner(context?.sessionId) ?? host.sessionOwner(context?.storedSessionId))
+
+            return draft
+          }
+        } satisfies ComposerMiddleware
+      })
+    )
+
+    const seen = captureContexts()
+
+    const { result } = renderHook(() => useMiddlewareSubmit(vi.fn(async () => true), {}))
+
+    await result.current.onSubmit('queued', { fromQueue: true, sessionId: 'rt-ops', storedSessionId: 'writer-chat' })
+
+    expect(seen).toEqual([{ sessionId: null, storedSessionId: 'writer-chat' }])
+    expect(owners).toEqual([{ connectionId: 'local', profile: 'writer' }])
+  })
+
+  it("keeps a runtime bound to the queue scope's own lineage tip", async () => {
+    $sessionStates.set({ 'rt-writer': createClientSessionState('writer-tip') })
+    $sessions.set([{ _lineage_root_id: 'writer-root', connection_id: 'local', id: 'writer-tip', profile: 'writer' } as never])
+
+    const seen = captureContexts()
+
+    const { result } = renderHook(() => useMiddlewareSubmit(vi.fn(async () => true), {}))
+
+    await result.current.onSubmit('queued', { fromQueue: true, sessionId: 'rt-writer', storedSessionId: 'writer-root' })
+
+    expect(seen).toEqual([{ sessionId: 'rt-writer', storedSessionId: 'writer-root' }])
   })
 })

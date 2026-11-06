@@ -49,6 +49,7 @@ import {
   cachedUnionRoster,
   claimDefaultHandles,
   isActiveRosterBot,
+  isUnknownMentionSender,
   localMentionHandle,
   mentionTargetConnection,
   migrateBotMeta,
@@ -831,6 +832,7 @@ export default {
 
           const roster = Array.isArray(cached?.profiles) ? cached.profiles : null
           let sender = scopeMentionSender(owner, cached)
+          let listed: RosterRow[] = roster ?? []
           let mentionedBots = roster ? resolveRosterMentions(text, roster, sender) : []
 
           if (!roster) {
@@ -846,12 +848,11 @@ export default {
               // / ui_meta title) stay taggable when the roster cache is cold.
               // The same handle claim the pane applies: a real 'hermes'
               // profile keeps @hermes, so the default must not answer it too.
-              mentionedBots = resolveRosterMentions(text, claimDefaultHandles(res?.profiles ?? []), sender).map(
-                bot => ({
-                  ...bot,
-                  remoteSource: false
-                })
-              )
+              listed = claimDefaultHandles(res?.profiles ?? [])
+              mentionedBots = resolveRosterMentions(text, listed, sender).map(bot => ({
+                ...bot,
+                remoteSource: false
+              }))
             } catch {
               return draft
             }
@@ -866,6 +867,8 @@ export default {
           // so the agent knows exactly who "@research-buddy" is. Cross-
           // connection targets carry the '@connection' suffix message_agent
           // resolves against the Desktop-synced relay roster.
+          const unknownSender = isUnknownMentionSender(sender)
+
           const lines = mentionedBots.map(bot => {
             const handle = botHandle(bot.name, bot)
 
@@ -884,17 +887,21 @@ export default {
             // the roster's remote flag says (#130260).
             const targetConnection = mentionTargetConnection(bot, sender)
 
-            const target = targetConnection ? `${bot.name}@${targetConnection}` : localMentionHandle(bot, sender)
+            const target = targetConnection
+              ? `${bot.name}@${targetConnection}`
+              : localMentionHandle(bot, sender, listed)
 
             // Local rows get the same annotation whenever their UI alias
             // ('default-this-device') differs from the resolvable handle —
             // otherwise the agent has only the alias to go on and the local
             // path rejects it the same way (#97678).
-            const where = targetConnection
-              ? ` — on ${bot.connectionLabel || targetConnection} (message_agent target: "${target}")`
-              : handle !== target
-                ? ` (message_agent target: "${target}")`
-                : ''
+            const where = unknownSender
+              ? ' (no message_agent target: the machine this chat runs on is unknown here)'
+              : targetConnection
+                ? ` — on ${bot.connectionLabel || targetConnection} (message_agent target: "${target}")`
+                : handle !== target
+                  ? ` (message_agent target: "${target}")`
+                  : ''
 
             return `@${handle} = agent profile "${bot.name}"${title ? ` ("${title}")` : ''}${where}`
           })
