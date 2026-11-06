@@ -16,11 +16,30 @@ method = _registry.method
 
 
 def _relay_root() -> Path:
-    """Install root shared by every profile (relay state is install-wide). Same formula as the
-    writers (``tools/bot_relay``, ``tools/bot_mode_dm``): both ends of the mailbox must agree for
-    every HERMES_HOME, including non-``profiles/`` subdirs of ``~/.hermes``."""
+    """Install root: where ``deliver`` looks up this install's profiles (``_roster``)."""
     from tools.bot_mode_probe import _default_home, _hermes_root
     return _hermes_root(Path(_default_home()))
+
+
+def _mailbox_home(params: dict) -> Path:
+    """The relay folder (roster/outbox/replies) of the profile this request is served for: the
+    routed ``profile`` param, else the legacy socket's ticket profile, else the profile this process
+    serves. ``message_agent`` reads its roster from, queues in, and waits under the SENDER's own home
+    (``tools/bot_mode_dm.py``), and the canonical session door serves that same folder
+    (``gateway/session_bot.relay_operation``); the install root here split a named profile's relay
+    across two folders and its DMs were never drained (#146035). Raises ``LookupError`` for a routed
+    profile this install does not have, so no request is served from another profile's mailbox."""
+    profile = str(params.get("profile") or "").strip()
+    if profile:
+        from tools.bot_mode_probe import _profile_for_handle, _roster
+        roster = dict(_roster(_relay_root()))
+        home = roster.get(_profile_for_handle("hermes", roster) if profile.lower() == "hermes" else profile)
+        if home is None:
+            raise LookupError(f"no profile '{profile}' on this gateway")
+        return Path(home)
+    from tools.bot_mode_probe import _default_home
+    from tui_gateway.ws_legacy_fallback import connection_profile_home
+    return Path(connection_profile_home() or _default_home())
 
 
 # Desktop deadline mirror; no retry runs here. The owner gateway retries a transiently failed
@@ -29,7 +48,7 @@ TURN_MAX_ATTEMPTS = 2  # first admission + the owner's one transient-failure ret
 
 
 @method("bot_relay.roster.sync")
-def _(rid, params: dict, _root=_relay_root) -> dict:
+def _(rid, params: dict, _root=_mailbox_home) -> dict:
     """Replace this gateway's view of agents on OTHER connections → ``{count}`` accepted rows
     (``agents`` rows ``{profile, handle, connection_id, ...}``; invalid rows are dropped).
     A roster that changes is logged with its rows: a peer connection listed with this machine's
@@ -38,13 +57,18 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
     try:
         from tools.bot_relay import read_remote_roster, write_remote_roster
 
+        try:
+            home = _root(params)
+        except LookupError as e:
+            return _err(rid, 4092, str(e), data={'reason': 'unknown_profile'})
+
         def trace() -> str:
-            rows = read_remote_roster(_root())
+            rows = read_remote_roster(home)
             return f"n={len(rows)} [" + " ".join(
                 f"{r.get('connection_id')}/{r.get('profile')}={r.get('title')!r}" for r in rows) + "]"
 
         before = trace()
-        count = write_remote_roster(_root(), params.get("agents"))
+        count = write_remote_roster(home, params.get("agents"))
         after = trace()
         if after != before:
             logging.getLogger(__name__).info("bot_relay roster changed: %s -> %s", before, after)
@@ -54,12 +78,14 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
 
 
 @method("bot_relay.outbox.drain")
-def _(rid, params: dict, _root=_relay_root) -> dict:
+def _(rid, params: dict, _root=_mailbox_home) -> dict:
     """Claim every pending cross-connection envelope queued here → ``{envelopes}``; claimed
     envelopes move to ``claimed/`` atomically so concurrent drains can't double-deliver."""
     try:
         from tools.bot_relay import claim_pending_envelopes
-        return _ok(rid, {"envelopes": claim_pending_envelopes(_root())})
+        return _ok(rid, {"envelopes": claim_pending_envelopes(_root(params))})
+    except LookupError as e:
+        return _err(rid, 4092, str(e), data={'reason': 'unknown_profile'})
     except Exception as e:
         return _err(rid, 5091, str(e))
 
@@ -123,7 +149,7 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
 
 
 @method("bot_relay.reply")
-def _(rid, params: dict, _root=_relay_root) -> dict:
+def _(rid, params: dict, _root=_mailbox_home) -> dict:
     """Write a relayed ``reply`` and/or ``error`` (+ optional typed ``reason``, see
     ``tools.bot_failure_reasons``) for envelope ``id`` so the sender-side waiter picks it up."""
     envelope_id = str(params.get("id") or "").strip()
@@ -131,9 +157,11 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
         return _err(rid, 4093, "id required")
     try:
         from tools.bot_relay import write_reply
-        write_reply(_root(), envelope_id, reply=str(params.get("reply") or ""),
+        write_reply(_root(params), envelope_id, reply=str(params.get("reply") or ""),
                     error=str(params.get("error") or ""), reason=str(params.get("reason") or ""))
         return _ok(rid, {"ok": True})
+    except LookupError as e:
+        return _err(rid, 4092, str(e), data={'reason': 'unknown_profile'})
     except ValueError as e:
         return _err(rid, 4094, str(e))
     except Exception as e:

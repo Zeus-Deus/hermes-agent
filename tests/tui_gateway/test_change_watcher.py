@@ -414,6 +414,20 @@ def test_enqueued_envelope_broadcasts_outbox_pending(watcher_home):
     assert ("bot_relay.outbox.pending", {}) in events
 
 
+def test_a_named_profile_envelope_broadcasts_outbox_pending(watcher_home):
+    """A named profile's ``message_agent`` queues in ITS OWN relay folder (#146035): the Desktop's
+    push-gated drain only visits a connection that signaled, so that envelope must signal too."""
+    home, events = watcher_home
+    outbox = home / "profiles" / "ops" / "bot_relay" / "outbox"
+    outbox.mkdir(parents=True)
+    server._broadcast_watched_changes(now=0.0)
+
+    (outbox / ("e" * 32 + ".json")).write_text('{"id": "' + "e" * 32 + '"}')
+    server._broadcast_watched_changes(now=10.0)
+
+    assert ("bot_relay.outbox.pending", {}) in events
+
+
 def test_drained_outbox_does_not_rebroadcast_pending(watcher_home):
     """Signature is monotone: a drain empties outbox/ (rename → claimed/), and
     that emptying must NOT look like a change — only new envelopes fire."""

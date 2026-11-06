@@ -281,11 +281,11 @@ def test_deliver_restamps_relayed_sender_with_a_reply_safe_handle(home, monkeypa
 
 @pytest.mark.parametrize("subdir", ["profiles/ops", "dev"])
 def test_gateway_drains_the_mailbox_the_tools_write_to(tmp_path, monkeypatch, subdir):
-    """Both ends of the relay mailbox derive the install root from HERMES_HOME with ONE formula.
-    The writer side (``message_agent``'s ``_hermes_root``) and the drain side
-    (``methods_bot_relay._relay_root``) must agree for a ``profiles/<name>`` home AND for an
-    arbitrary subdir of the native ``~/.hermes`` — a split here is silent non-delivery."""
-    from tools.bot_mode_probe import _default_home, _hermes_root
+    """Both ends of the relay mailbox name the same folder for every HERMES_HOME. The writer
+    (``message_agent``) queues in the sending profile's OWN home, so a gateway serving that home
+    drains there — for a ``profiles/<name>`` home AND for an arbitrary subdir of the native
+    ``~/.hermes`` — a split here is silent non-delivery (#146035)."""
+    from tools.bot_mode_probe import _default_home
     from tui_gateway import methods_bot_relay
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -293,12 +293,74 @@ def test_gateway_drains_the_mailbox_the_tools_write_to(tmp_path, monkeypatch, su
     home.mkdir(parents=True)
     monkeypatch.setenv("HERMES_HOME", str(home))
 
-    writer_root = _hermes_root(Path(_default_home()))
+    writer_home = Path(_default_home())
     target = {"profile": "scout", "handle": "scout", "connection_id": "cloud-1",
               "connection_label": "", "title": "", "description": ""}
     env = bot_relay.enqueue_envelope(
-        writer_root, target=target, message="m", sender_profile="default", sender_handle="hermes")
+        writer_home, target=target, message="m", sender_profile="default", sender_handle="hermes")
 
-    assert methods_bot_relay._relay_root() == writer_root
+    assert methods_bot_relay._mailbox_home({}) == writer_home
     drained = _result(srv._methods["bot_relay.outbox.drain"](1, {}))
     assert [e["id"] for e in drained["envelopes"]] == [env["id"]]
+
+
+def _named_sender(home: Path, name: str = "ops") -> Path:
+    sender_home = home / "profiles" / name
+    (sender_home / "profile.yaml").write_text(
+        "ui_meta:\n  hermes-bots:\n    shape: cloud\n", encoding="utf-8")
+    return sender_home
+
+
+class _BotChatAgent:
+    def __init__(self, home: Path):
+        class _DB:
+            db_path = home / "state.db"
+
+            def get_session_title(self, _sid):
+                return "Bot Chat"
+
+        self._session_db = _DB()
+        self.session_id = "sess-1"
+        self._session_title_hint = "Bot Chat"
+        self._bot_mode_protocol = True
+
+
+@pytest.mark.parametrize("scope", ["param", "process"])
+def test_a_named_profile_dm_round_trips_through_the_legacy_door(home, monkeypatch, scope):
+    """#146035: a named profile's ``message_agent`` reads its relay roster from, queues its envelope in, and waits
+    for the reply under ITS OWN home (``tools/bot_mode_dm.py`` passes the sender's home; the canonical session
+    door serves that same folder). The legacy door must serve the profile the request is for — the routed
+    ``profile`` param, else the profile this process serves — not the install root, or the roster never
+    reaches the sender, the envelope is never drained, and the reply never wakes the waiter."""
+    import tools.terminal_tool as terminal_tool_module
+    from tools import bot_mode_dm
+
+    monkeypatch.setattr(terminal_tool_module, "terminal_tool",
+                        lambda command, **kw: json.dumps({"output": "started", "session_id": "proc_1"}))
+    sender_home = _named_sender(home)
+    if scope == "param":
+        routed = {"profile": "ops"}
+    else:  # a dedicated per-profile backend: the process itself serves the named profile
+        monkeypatch.setenv("HERMES_HOME", str(sender_home))
+        routed = {}
+    row = {"profile": "scout", "handle": "scout", "connection_id": "cloud-1", "connection_label": "Cloud"}
+
+    _result(srv._methods["bot_relay.roster.sync"](1, {**routed, "agents": [row]}))
+    queued = json.loads(bot_mode_dm.message_agent_tool(target="scout", message="ping",
+                                                       agent=_BotChatAgent(sender_home)))
+    assert queued.get("status") == "queued", queued
+    drained = _result(srv._methods["bot_relay.outbox.drain"](2, dict(routed)))["envelopes"]
+    assert [e["id"] for e in drained] == [queued["delivery_id"]]
+    assert drained[0]["from_profile"] == "ops"
+    _result(srv._methods["bot_relay.reply"](3, {**routed, "id": queued["delivery_id"], "reply": "pong"}))
+
+    reply = bot_relay.relay_root(sender_home) / bot_relay.REPLIES_DIR / f"{queued['delivery_id']}.json"
+    assert json.loads(reply.read_text(encoding="utf-8"))["reply"] == "pong"
+    assert not (bot_relay.relay_root(home) / bot_relay.REPLIES_DIR).exists()
+
+
+def test_the_legacy_door_refuses_a_routed_profile_this_install_lacks(home):
+    """A routed profile with no home here is refused, never served from another profile's mailbox."""
+    err = srv._methods["bot_relay.outbox.drain"](1, {"profile": "ghost"})
+    assert err["error"]["data"]["reason"] == "unknown_profile"
+    assert not bot_relay.relay_root(home).exists()

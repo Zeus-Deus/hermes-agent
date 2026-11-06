@@ -354,10 +354,16 @@ def _bot_relay_outbox_sig():
     global _bot_relay_outbox_seen
     home = _watcher_home()
     root = home.parent.parent if home.parent.name == "profiles" else home
+    # A named profile queues in its own relay folder (``tools/bot_mode_dm.py``), and the Desktop's
+    # push-gated drain only visits a connection that signaled: watch every profile's outbox (#146035).
+    outboxes = [root / "bot_relay" / "outbox"]
     with contextlib.suppress(OSError):
-        for entry in (root / "bot_relay" / "outbox").iterdir():
-            if entry.name.endswith(".json"):
-                _bot_relay_outbox_seen = max(_bot_relay_outbox_seen, _watcher_mtime_ns(entry) or 0)
+        outboxes += [profile / "bot_relay" / "outbox" for profile in (root / "profiles").iterdir()]
+    for outbox in outboxes:
+        with contextlib.suppress(OSError):
+            for entry in outbox.iterdir():
+                if entry.name.endswith(".json"):
+                    _bot_relay_outbox_seen = max(_bot_relay_outbox_seen, _watcher_mtime_ns(entry) or 0)
     return _bot_relay_outbox_seen or None
 
 
