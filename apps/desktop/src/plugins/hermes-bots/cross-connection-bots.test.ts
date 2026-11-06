@@ -278,6 +278,18 @@ describe('a group room seats members from several machines', () => {
     const saved = [members[0], members[2]].map(({ installId: _installId, ...rest }) => rest) as GroupMember[]
     expect(formatGroupChatLine(stale, members[2], 'g', saved)).toBe('alice [the machine running the Desktop app]: old')
 
+    // Mixed seating (a remote gateway's live rows carry install_ids, the deferred local member is
+    // the saved descriptor without one): other members' ids cannot rule the line remote.
+    const mixed = [saved[0], members[1], members[2]] as GroupMember[]
+    expect(formatGroupChatLine(stale, members[2], 'g', mixed)).toBe('alice [the machine running the Desktop app]: old')
+    // Nor can an id-less remote that now carries the old label.
+    const idless = [saved[0], { ...saved[1], connectionId: 'server', connectionKind: 'remote', connectionLabel: 'This device', name: 'bob' }] as GroupMember[]
+    expect(formatGroupChatLine(stale, members[2], 'g', idless)).toBe('alice [the machine running the Desktop app]: old')
+    // With the Desktop's member carrying its id, an unmatched stamp is another machine.
+    expect(formatGroupChatLine({ ...stale, from: { ...stale.from, gateway: 'gw-elsewhere' } }, members[2], 'g', [members[0], members[2]])).toBe(
+      'alice [This device]: old'
+    )
+
     // Only with no roster at all is the registry's default label read as the Desktop's machine.
     expect(formatGroupChatLine(departed, members[2], 'g')).toBe('erin [the machine running the Desktop app]: bye')
 

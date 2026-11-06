@@ -51,17 +51,22 @@ function speakerOnDesktopMachine(from: GroupMessageAuthor, members?: readonly Gr
         m => groupMemberAuthor(m).source === from.source && !(from.gateway && m.installId && m.installId !== from.gateway)
       )
 
+  // A gateway-stamped line nobody's install_id matches may still be the Desktop's own from
+  // before a rename while its member is seated without one (the saved roster drops them, and
+  // a deferred local roster seats the saved descriptor next to live remote rows). Other
+  // members' ids, or an id-less remote that now carries the old label, cannot rule it out.
+  const localUnplaced =
+    Boolean(from.gateway) && !byGateway.length && members.some(m => isDesktopLocalConnection(m) && !m.installId)
+
   if (candidates.length) {
     const named = candidates.filter(m => m.name === from.name)
     const pool = named.length ? named : candidates
     const local = pool.filter(m => isDesktopLocalConnection(m)).length
 
-    return local === pool.length ? true : local === 0 ? false : undefined
+    return local === pool.length ? true : local === 0 && !localUnplaced ? false : undefined
   }
 
-  // A gateway-stamped line a roster without install_ids cannot place (the saved roster drops
-  // them) may be the Desktop's own from before a rename: unresolved, not "another machine".
-  if (from.gateway && !members.some(m => m.installId)) {
+  if (localUnplaced) {
     return undefined
   }
 
