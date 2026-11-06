@@ -770,8 +770,13 @@ interface RosterSnapshot {
   /** The connection whose profiles.list answered (the cache key). Its rows
    *  carry no connectionId when the union enumeration failed or skipped them. */
   servedConnectionId?: string
+  /** Connection → install ids from the last snapshot that had `sources`,
+   *  kept while the union enumeration fails (which leaves `sources` out). */
+  sourceIdentities?: SourceIdentity[]
   sources?: GatewaySource[]
 }
+
+type SourceIdentity = Pick<GatewaySource, 'connectionId' | 'installId'>
 
 /** One row of the desktop-wide union agent roster (`host.agents`). */
 interface UnionAgentRow {
@@ -849,6 +854,47 @@ function servedBy(
   return servedConnectionId ? { servedConnectionId } : {}
 }
 
+/** Which registry addresses are one install, from the newest cached snapshot
+ *  that knows — identity, not reachability, so a failed union keeps it. */
+function knownSourceIdentities(): SourceIdentity[] {
+  let best: RosterSnapshot | null = null
+
+  try {
+    for (const [, data] of queryClient.getQueriesData<RosterSnapshot>({ queryKey: ROSTER_KEY })) {
+      const known = data?.sources?.length || data?.sourceIdentities?.length
+
+      if (known && (!best || Number(data.fetchedAt || 0) > Number(best.fetchedAt || 0))) {
+        best = data
+      }
+    }
+  } catch {
+    return []
+  }
+
+  return snapshotIdentities(best).map(source => ({ connectionId: source.connectionId, installId: source.installId }))
+}
+
+function retainedSourceIdentities(): Pick<RosterSnapshot, 'sourceIdentities'> {
+  const sourceIdentities = knownSourceIdentities()
+
+  return sourceIdentities.length ? { sourceIdentities } : {}
+}
+
+/** The connection the rich rows are merged against: the one that answered
+ *  when it is proven to differ from the key (mid-apply, no keyed route). */
+function mergeConnection(
+  served: Pick<RosterSnapshot, 'servedConnectionId'>,
+  activeConnectionId: null | string | undefined
+): null | string | undefined {
+  const servedId = served.servedConnectionId
+
+  return servedId && activeConnectionId && servedId !== activeConnectionId ? servedId : activeConnectionId
+}
+
+function snapshotIdentities(snapshot: Pick<RosterSnapshot, 'sourceIdentities' | 'sources'> | null | undefined) {
+  return snapshot?.sources?.length ? snapshot.sources : (snapshot?.sourceIdentities ?? [])
+}
+
 async function fetchRosterSnapshot(activeConnectionId: null | string | undefined): Promise<RosterSnapshot> {
   // Stamp the ISSUE time on the snapshot: mergeServerMeta compares it
   // against each bot's last local meta write, and a fetch issued before
@@ -899,6 +945,7 @@ async function fetchRosterSnapshot(activeConnectionId: null | string | undefined
     : undefined
 
   const served = servedBy(route, activeBot)
+  const mergeAs = mergeConnection(served, activeConnectionId)
 
   const local = route
     ? await host.requestProfile<RosterSnapshot>(route, 'profiles.list', {})
@@ -918,9 +965,9 @@ async function fetchRosterSnapshot(activeConnectionId: null | string | undefined
     try {
       const union = await host.agents()
       const previous: RosterRow[] = $lastRoster.get().filter(row => !row?.ghost)
-      const merged = mergeMultiSourceRoster(local, union, activeConnectionId, previous)
+      const merged = mergeMultiSourceRoster(local, union, mergeAs, previous)
       const sources = Array.isArray(union?.sources) ? union.sources : []
-      traceRosterSnapshot(local, sources, activeConnectionId, merged?.profiles || [])
+      traceRosterSnapshot(local, sources, mergeAs, merged?.profiles || [])
       const profiles = (merged?.profiles || []).map(row => annotateBotSource(row, sources))
       await reconcileBotMeta(profiles, issuedAt)
 
@@ -938,18 +985,20 @@ async function fetchRosterSnapshot(activeConnectionId: null | string | undefined
        * stays absent so the pane falls back to its remembered source
        * snapshot rather than clearing it. */
       const previous: RosterRow[] = $lastRoster.get().filter(row => !row?.ghost)
-      const merged = mergeMultiSourceRoster(local, null, activeConnectionId, previous)
+      const merged = mergeMultiSourceRoster(local, null, mergeAs, previous)
 
       const profiles = (merged?.profiles || []).map(row =>
         row?.remoteSource ? { ...row, sourceReachable: false } : row
       )
 
+      const retained = retainedSourceIdentities()
       await reconcileBotMeta(profiles, issuedAt)
 
       return {
         ...merged,
         profiles,
         ...served,
+        ...retained,
         fetchedAt: issuedAt
       }
     }
@@ -1421,7 +1470,7 @@ function ownsConnection(ref: RosterOwnerRef, rowId: string): boolean {
 
 /** Registry ids naming the same install as `connectionId`, by the snapshot
  *  sources' install ids. Empty while that install id is unknown. */
-function sameInstallConnections(sources: GatewaySource[] | null | undefined, connectionId: string): string[] {
+function sameInstallConnections(sources: readonly SourceIdentity[] | null | undefined, connectionId: string): string[] {
   const list = Array.isArray(sources) ? sources : []
   const install = String(list.find(source => source?.connectionId === connectionId)?.installId || '').trim()
 
@@ -1434,11 +1483,11 @@ function sameInstallConnections(sources: GatewaySource[] | null | undefined, con
  *  which other addresses name the owner's own install. */
 export function scopeMentionSender<T extends RosterOwnerRef>(
   owner: T,
-  snapshot: Pick<RosterSnapshot, 'servedConnectionId' | 'sources'> | null | undefined
+  snapshot: Pick<RosterSnapshot, 'servedConnectionId' | 'sourceIdentities' | 'sources'> | null | undefined
 ): RosterOwnerRef & T {
   return {
     ...owner,
-    connectionAliases: sameInstallConnections(snapshot?.sources, String(owner.connectionId || '').trim()),
+    connectionAliases: sameInstallConnections(snapshotIdentities(snapshot), String(owner.connectionId || '').trim()),
     unscopedConnectionId: snapshot?.servedConnectionId
   }
 }

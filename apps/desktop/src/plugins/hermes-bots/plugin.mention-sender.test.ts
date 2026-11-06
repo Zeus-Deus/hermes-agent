@@ -407,6 +407,37 @@ describe('mention targets follow the focused chat owner, not the active connecti
     expect(text).toContain('(message_agent target: "default@server")')
   })
 
+  it('merges the rich rows against the gateway that answered, not the query key', async () => {
+    // Mid-apply: this device is published, the server's socket answers its profiles.list.
+    live.socket = 'server'
+    live.owner = { connectionId: 'server', profile: 'ops' }
+    hostMock.request.mockImplementation(async (...args: unknown[]) =>
+      args[0] === 'profiles.list'
+        ? { profiles: [{ name: 'default', ui_meta: { 'hermes-bots': { title: 'Server Helper' } } }, { name: 'ops' }] }
+        : {}
+    )
+    hostMock.agents.mockResolvedValue({
+      agents: [
+        { connectionId: 'local', connectionKind: 'local', connectionLabel: 'This device', profile: 'default' },
+        { connectionId: 'local', connectionKind: 'local', connectionLabel: 'This device', profile: 'writer' },
+        { connectionId: 'server', connectionKind: 'remote', connectionLabel: 'Server', profile: 'default' },
+        { connectionId: 'server', connectionKind: 'remote', connectionLabel: 'Server', profile: 'ops' }
+      ],
+      sources: [
+        { connectionId: 'local', kind: 'local' },
+        { connectionId: 'server', kind: 'remote' }
+      ]
+    } as never)
+
+    const { handler } = await contributions({ profiles: null })
+    const { text } = await handler({ text: 'ask @server-helper' })
+
+    // The server's own default, read by the server's ops: bare. 'default@local' is this device's.
+    // Its bare handle is the target itself, so no annotation is needed.
+    expect(text).toContain('@hermes = agent profile "default" ("Server Helper").')
+    expect(text).not.toContain('default@local')
+  })
+
   it('places rows the union enumeration failed to scope on the gateway that served them', async () => {
     // profiles.list answers, host.agents fails: the cached rows carry no connectionId.
     hostMock.request.mockResolvedValue({ profiles: [{ name: 'default' }, { name: 'writer' }] })
@@ -574,6 +605,24 @@ describe('one server registered under two addresses', () => {
     const { text } = await handler({ text: 'send it to @default-server' })
 
     expect(text).toContain('(message_agent target: "default")')
+  })
+
+  it('keeps the alias identity through a refresh whose union enumeration fails', async () => {
+    // This device answers profiles.list; host.agents fails, so the server rows are retained ones.
+    hostMock.request.mockResolvedValue({ profiles: [{ name: 'default' }, { name: 'writer' }] })
+    hostMock.agents.mockRejectedValue(new Error('offline'))
+
+    const { handler } = await contributions({ profiles: null })
+    const { $lastRoster } = await import('./data')
+
+    // The last good snapshot (since evicted from the roster query) knew both addresses are one install.
+    cache.set(JSON.stringify(['hermes-bots', 'roster', 'earlier']), {
+      key: ['hermes-bots', 'roster', 'earlier'],
+      value: { fetchedAt: 1, sources: sources('b'.repeat(32)) }
+    })
+    $lastRoster.set(COLLAPSED as never)
+
+    expect((await handler({ text: 'send it to @default-server' })).text).toContain('(message_agent target: "hermes")')
   })
 
   it('keeps addresses distinct while their install ids are unknown', async () => {
