@@ -31,13 +31,15 @@ function gapFillMemberForms(members: GroupMember[], handles: Map<string, string>
 }
 
 /** Every lower-cased form a member answers to by its live identity: profile name, @handle,
- *  picker tag, and its title / friendly-name forms. */
+ *  picker tag, the handle a custom-handle default had before (`default-server`), each also
+ *  collapsed as the parser reads it, and its title / friendly-name forms. */
 function memberIdentityForms(member: GroupMember): Set<string> {
   const title = String(member.title || '').trim()
 
   return new Set(
-    [member.name, botHandle(member.name, member), botMentionTag(member)]
+    [member.name, botHandle(member.name, member), botMentionTag(member), precustomHandle(member.name, member)]
       .map(form => String(form || '').toLowerCase())
+      .flatMap(form => [form, form.replace(/[\s_-]+/g, '')])
       .concat([title, ...botFriendlyNames(member)].flatMap(name => mentionNameForms(name)))
       .filter(Boolean)
   )

@@ -117,6 +117,23 @@ describe('the default bot’s handle field', () => {
     )
   })
 
+  it('keeps the dialog open with the edit when the backend never took the handle', async () => {
+    request.mockImplementation(async () => {
+      throw new Error('socket closed')
+    })
+    const onClose = vi.fn()
+    render(<EditProfileDialog bot={DEFAULT_BOT} onClose={onClose} open />)
+
+    fireEvent.change(handleInput(), { target: { value: 'maia' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: 'error' })))
+    expect(String(notify.mock.calls[0][0].message)).toContain('The handle was not saved')
+    expect(notify).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'success' }))
+    expect(onClose).not.toHaveBeenCalled()
+    expect(handleInput().value).toBe('maia')
+  })
+
   it('is not offered for a named bot', () => {
     render(<EditProfileDialog bot={{ name: 'researcher' }} onClose={() => undefined} open />)
 

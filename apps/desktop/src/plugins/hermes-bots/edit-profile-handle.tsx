@@ -53,9 +53,25 @@ export function mergedPatch(look: BotMeta | null, handle: { patch?: Pick<BotMeta
   return handle.patch ? { ...look, ...handle.patch } : look
 }
 
-/** What a refused server write tells the user: the backend's reason when it gave one. */
-export function saveFailureMessage(persistence: { serverError?: string } | null, fallback: string) {
-  return persistence?.serverError || fallback
+/** How the metadata half of a save went, for the dialog: whether it failed, what to tell the
+ *  user, and whether to stay open. A changed handle counts only when its backend persisted it:
+ *  an unreachable or older backend leaves nothing that could answer to it, so the dialog keeps
+ *  the edit for a retry instead of reporting success. */
+export function metaSaveOutcome(
+  persistence: { serverError?: string; serverOutcome: string } | null,
+  handle: { patch?: Pick<BotMeta, 'mentionHandle'> },
+  messages: { handleNotSaved: string; savedLocally: string }
+): { failed: false; keepOpen: false } | { failed: true; keepOpen: boolean; message: string } {
+  const handleFailed = Boolean(handle.patch) && persistence?.serverOutcome !== 'persisted'
+
+  if (persistence?.serverOutcome !== 'failed' && !handleFailed) {
+    return { failed: false, keepOpen: false }
+  }
+
+  // The backend names why it refused (a handle another profile holds).
+  const fallback = handleFailed ? messages.handleNotSaved : messages.savedLocally
+
+  return { failed: true, keepOpen: handleFailed, message: persistence?.serverError || fallback }
 }
 
 interface HandleFieldProps {

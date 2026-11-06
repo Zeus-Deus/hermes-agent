@@ -328,6 +328,22 @@ describe('room collisions through friendly names', () => {
   })
 })
 
+describe('a custom handle equal to another default’s earlier handle', () => {
+  it('never takes that machine’s device tag, in either seat order', () => {
+    const [laptop, , server] = twoMachines('default-server', 'atlas')
+
+    for (const seated of [
+      [laptop, server],
+      [server, laptop]
+    ]) {
+      const members = durableGroupChatMembers(seated)
+
+      expect([...parseGroupChatMentions('@default-server go', members).mentioned]).toEqual(['server::default'])
+      expect([...parseGroupChatMentions('@atlas go', members).mentioned]).toEqual(['server::default'])
+    }
+  })
+})
+
 describe('the roster resolver', () => {
   it('keeps a form three bots share unresolved', () => {
     const rows = ['a', 'b', 'c'].map(

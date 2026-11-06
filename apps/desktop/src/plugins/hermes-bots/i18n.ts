@@ -107,6 +107,7 @@ const en: BotsMessages = {
     handleInvalid:
       'A handle uses lowercase letters, numbers, - or _, and cannot be @hermes, @default, @all, @everyone or @user.',
     handleTaken: handle => `@${handle} is already used by another bot.`,
+    handleNotSaved: 'The handle was not saved: this bot’s machine did not take it. Try again once it is connected.',
     nameTaken: name => `An agent named "${name}" already exists.`,
     nameTakenOn: (name, target) => `An agent named "${name}" already exists on ${target}.`,
     currentConnection: name => `${name} (current)`,
@@ -558,6 +559,7 @@ const ja: BotsMessages = {
     handleInvalid:
       'ハンドルには小文字、数字、- と _ が使えます。@hermes、@default、@all、@everyone、@user は使えません。',
     handleTaken: handle => `@${handle} は別のボットが使用しています。`,
+    handleNotSaved: 'ハンドルは保存されませんでした。このボットのマシンが受け付けませんでした。接続後にもう一度お試しください。',
     nameTaken: name => `「${name}」というエージェントはすでに存在します。`,
     nameTakenOn: (name, target) => `${target} には「${name}」というエージェントがすでに存在します。`,
     currentConnection: name => `${name}（現在）`,
@@ -1004,6 +1006,7 @@ const zh: BotsMessages = {
     handleHint: '其他机器人和群聊用来标记此机器人的名称。@hermes 仍然有效。留空即为 @hermes。',
     handleInvalid: '标识只能使用小写字母、数字、- 和 _，且不能是 @hermes、@default、@all、@everyone 或 @user。',
     handleTaken: handle => `@${handle} 已被其他机器人使用。`,
+    handleNotSaved: '标识未保存：此机器人所在的机器未接收。连接后请重试。',
     nameTaken: name => `名为“${name}”的智能体已存在。`,
     nameTakenOn: (name, target) => `${target} 上已存在名为“${name}”的智能体。`,
     currentConnection: name => `${name}（当前）`,
@@ -1438,6 +1441,7 @@ const zhHant: BotsMessages = {
     handleHint: '其他機器人和群組聊天用來標記此機器人的名稱。@hermes 仍然有效。留空即為 @hermes。',
     handleInvalid: '標識只能使用小寫字母、數字、- 和 _，且不能是 @hermes、@default、@all、@everyone 或 @user。',
     handleTaken: handle => `@${handle} 已被其他機器人使用。`,
+    handleNotSaved: '標識未儲存：此機器人所在的機器未接收。連線後請再試一次。',
     nameTaken: name => `名為「${name}」的智慧代理已存在。`,
     nameTakenOn: (name, target) => `${target} 上已存在名為「${name}」的智慧代理。`,
     currentConnection: name => `${name}（目前）`,

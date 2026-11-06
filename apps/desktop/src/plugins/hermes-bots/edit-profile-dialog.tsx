@@ -25,7 +25,7 @@ import { avatarColor, botAppearance, BotFace } from './avatar'
 import { AvatarPicker } from './avatar-picker'
 import { $botMeta, $lastRoster, botSelectionKey, ROSTER_KEY, saveBotMeta } from './data'
 import { labeled } from './dialog-parts'
-import { DefaultHandleField, editedHandle, mergedPatch, openingHandle, saveFailureMessage } from './edit-profile-handle'
+import { DefaultHandleField, editedHandle, mergedPatch, metaSaveOutcome, openingHandle } from './edit-profile-handle'
 import { editedLook, type EditProfileLook } from './edit-profile-look'
 import { useBots } from './i18n'
 import { displayName } from './labels'
@@ -116,6 +116,35 @@ export function EditProfileDialog({ bot, open, onClose }: EditProfileDialogProps
     return null
   }
 
+  // Only an explicit remote failure is an error — 'unsupported' is the
+  // documented older-gateway fallback (local wins, silently), and toasting
+  // it would flag every save on every legacy setup forever. A changed handle
+  // is the exception: it must reach its backend (`metaSaveOutcome`).
+  const reportMetaSave = (
+    persistence: Awaited<ReturnType<typeof saveBotMeta>> | null,
+    handleEdit: ReturnType<typeof editedHandle>
+  ) => {
+    const outcome = metaSaveOutcome(persistence, handleEdit, {
+      handleNotSaved: b.editor.handleNotSaved,
+      savedLocally: b.avatar.savedLocally
+    })
+
+    if (outcome.failed) {
+      host.notify({
+        kind: 'error',
+        message: outcome.message
+      })
+    }
+
+    if (persistence?.serverOutcome === 'persisted') {
+      queryClient.invalidateQueries({
+        queryKey: ROSTER_KEY
+      })
+    }
+
+    return outcome
+  }
+
   const submit = async () => {
     if (busy) {
       return
@@ -135,25 +164,8 @@ export function EditProfileDialog({ bot, open, onClose }: EditProfileDialogProps
     const look = editedLook(opened, { shape, color, image, title })
     const patch = mergedPatch(look, handleEdit)
     const persistence = patch ? await saveBotMeta(bot, patch) : null
-
-    // Only an explicit remote failure is an error — 'unsupported' is the
-    // documented older-gateway fallback (local wins, silently), and toasting
-    // it would flag every save on every legacy setup forever.
-    const lookFailed = persistence?.serverOutcome === 'failed'
-
-    if (lookFailed) {
-      host.notify({
-        kind: 'error',
-        // The backend names why it refused (a handle another profile holds).
-        message: saveFailureMessage(persistence, b.avatar.savedLocally)
-      })
-    }
-
-    if (persistence?.serverOutcome === 'persisted') {
-      queryClient.invalidateQueries({
-        queryKey: ROSTER_KEY
-      })
-    }
+    const metaOutcome = reportMetaSave(persistence, handleEdit)
+    const lookFailed = metaOutcome.failed
 
     const desc = description.trim()
 
@@ -196,7 +208,11 @@ export function EditProfileDialog({ bot, open, onClose }: EditProfileDialogProps
     }
 
     setBusy(false)
-    onClose()
+
+    // An unsaved handle keeps the dialog open with the edit, for a retry.
+    if (!metaOutcome.keepOpen) {
+      onClose()
+    }
   }
 
   return (

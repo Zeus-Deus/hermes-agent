@@ -70,6 +70,7 @@ export type BotsMessages = {
     handleHint: string
     handleInvalid: string
     handleTaken: (handle: string) => string
+    handleNotSaved: string
     nameTaken: (name: string) => string
     nameTakenOn: (name: string, target: string) => string
     currentConnection: (name: string) => string

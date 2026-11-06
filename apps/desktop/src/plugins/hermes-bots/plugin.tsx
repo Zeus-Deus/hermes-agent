@@ -205,7 +205,13 @@ export default {
             const qualified =
               ((tagCounts.get(tag.toLowerCase()) || 0) > 1 || !resolvesTo(`@${tag}`, profile)) && profile.connectionId
 
-            const insert = qualified ? `@${tag}@${profile.connectionId}` : `@${tag}`
+            // A qualified tag can still be shared on that connection (a sibling titled like the
+            // default's handle); the profile name pins it then.
+            const forms = qualified
+              ? [`@${tag}@${profile.connectionId}`, `@${profile.name}@${profile.connectionId}`]
+              : [`@${tag}`]
+
+            const insert = forms.find(form => resolvesTo(form, profile)) || forms[0]
             const source = profile.connectionLabel ? ` · ${profile.connectionLabel}` : ''
             items.push({
               insert,

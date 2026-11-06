@@ -651,4 +651,22 @@ describe('a default with a custom handle (#89720)', () => {
     expect(text).toMatch(/@maia = agent profile "default"/)
     expect(text).not.toMatch(/on Server/)
   })
+
+  it('falls back to the profile name when the qualified tag is still shared on that connection', async () => {
+    const writer = {
+      connectionId: 'local',
+      connectionKind: 'local',
+      connectionLabel: 'This device',
+      name: 'writer',
+      title: 'Maia'
+    }
+
+    const { handler, provide } = await contributions({
+      focused: 'researcher',
+      profiles: [PROFILES[0], PROFILES[1], writer]
+    })
+
+    expect(provide('').map(item => item.insert)).toEqual(['@maia@local', '@writer@local'])
+    expect((await handler({ text: 'ask @writer@local' })).text).toMatch(/@writer = agent profile "writer"/)
+  })
 })
