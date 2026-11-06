@@ -264,7 +264,8 @@ def test_deliver_restamps_relayed_sender_with_a_reply_safe_handle(home, monkeypa
     seen = []
     monkeypatch.setattr(live, "authority_delivery",
                         lambda home, params: seen.append(params["message"]) or {"status": "queued"})
-    bot_relay.write_remote_roster(home, [
+    # The target profile's own relay roster (roster.sync keeps one per profile, #146035).
+    bot_relay.write_remote_roster(home / "profiles" / "ops", [
         {"profile": "default", "handle": "hermes", "connection_id": "vps-1", "title": "CoS Bot"},
     ])
     stamp = "Message from 🤖 CoS Bot (@hermes): are we done?"
@@ -299,7 +300,7 @@ def test_gateway_drains_the_mailbox_the_tools_write_to(tmp_path, monkeypatch, su
     env = bot_relay.enqueue_envelope(
         writer_home, target=target, message="m", sender_profile="default", sender_handle="hermes")
 
-    assert methods_bot_relay._mailbox_home({}) == writer_home
+    assert methods_bot_relay._mailbox_home() == writer_home
     drained = _result(srv._methods["bot_relay.outbox.drain"](1, {}))
     assert [e["id"] for e in drained["envelopes"]] == [env["id"]]
 
@@ -361,6 +362,48 @@ def test_a_named_profile_dm_round_trips_through_the_legacy_door(home, monkeypatc
 
 def test_the_legacy_door_refuses_a_routed_profile_this_install_lacks(home):
     """A routed profile with no home here is refused, never served from another profile's mailbox."""
-    err = srv._methods["bot_relay.outbox.drain"](1, {"profile": "ghost"})
-    assert err["error"]["data"]["reason"] == "unknown_profile"
+    err = srv.handle_request({"id": 1, "method": "bot_relay.outbox.drain", "params": {"profile": "ghost"}})
+    assert err["error"]["code"] == 4064
     assert not bot_relay.relay_root(home).exists()
+
+
+def test_a_routed_drain_reads_the_case_folded_profile_and_its_own_envelope_ttl(home):
+    """The mailbox's profile owns the drain policy: with expiry off for ``ops`` and a 1 s TTL at the
+    install root, ``ops``' five-second-old envelope is still handed out (the routed selector is
+    resolved like every other profile-routed RPC, case-insensitively)."""
+    import os
+    import time
+
+    (home / "config.yaml").write_text("bot_mode:\n  envelope_ttl_seconds: 1\n", encoding="utf-8")
+    ops = home / "profiles" / "ops"
+    (ops / "config.yaml").write_text("bot_mode:\n  envelope_ttl_seconds: 0\n", encoding="utf-8")
+    target = {"profile": "scout", "handle": "scout", "connection_id": "cloud-1",
+              "connection_label": "", "title": "", "description": ""}
+    env = bot_relay.enqueue_envelope(ops, target=target, message="m", sender_profile="ops", sender_handle="ops")
+    path = bot_relay.relay_root(ops) / bot_relay.OUTBOX_DIR / f"{env['id']}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["created_at"] = time.time() - 5
+    path.write_text(json.dumps(record), encoding="utf-8")
+    os.utime(path, (time.time() - 5, time.time() - 5))
+
+    drained = _result(srv._methods["bot_relay.outbox.drain"](1, {"profile": "OPS"}))["envelopes"]
+
+    assert [e["id"] for e in drained] == [env["id"]]
+
+
+def test_deliver_qualifies_the_sender_from_the_target_profiles_roster(home, monkeypatch):
+    """roster.sync keeps one roster per profile, so the sender stamp is resolved against the TARGET
+    profile's current roster — not the install root's, which only the default's route refreshes."""
+    from tools import bot_live_delivery as live
+    seen = []
+    monkeypatch.setattr(live, "authority_delivery",
+                        lambda home, params: seen.append(params["message"]) or {"status": "queued"})
+    row = {"profile": "default", "handle": "hermes", "connection_id": "vps-1"}
+    bot_relay.write_remote_roster(home, [{**row, "title": "Old Role"}])
+    bot_relay.write_remote_roster(home / "profiles" / "ops", [{**row, "title": "CoS Bot"}])
+    sender = {"from_profile": "default", "from_handle": "hermes", "from_connection": "vps-1"}
+
+    _result(srv._methods["bot_relay.deliver"](1, {"id": "a" * 32, "profile": "ops",
+                                                 "message": "Message from 🤖 CoS Bot (@hermes): hi", **sender}))
+
+    assert seen == ["Message from 🤖 CoS Bot (@cos-bot): hi"]
