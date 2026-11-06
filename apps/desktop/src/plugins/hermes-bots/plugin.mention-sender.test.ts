@@ -142,10 +142,12 @@ const BUILT_ON_SERVER = [
 
 async function contributions({
   cacheKey = 'local',
-  profiles
+  profiles,
+  sources
 }: {
   cacheKey?: string
   profiles: Array<Record<string, unknown>> | null
+  sources?: Array<Record<string, unknown>>
 }) {
   vi.resetModules()
   cache.clear()
@@ -153,7 +155,7 @@ async function contributions({
   if (profiles) {
     cache.set(JSON.stringify(['hermes-bots', 'roster', cacheKey]), {
       key: ['hermes-bots', 'roster', cacheKey],
-      value: { profiles }
+      value: { profiles, ...(sources ? { sources } : {}) }
     })
   }
 
@@ -407,6 +409,41 @@ describe('mention targets follow the focused chat owner, not the active connecti
     live.focused = 'default'
 
     expect((await handler({ text: 'ask @hermes' })).text).toContain('(message_agent target: "default@local")')
+  })
+})
+
+describe('one server registered under two addresses', () => {
+  // The union roster collapses the install's bots onto one address; the chat keeps the other.
+  const COLLAPSED = [
+    { connectionId: 'server-b', handle: 'default-server', name: 'default', remoteSource: true, sourceScoped: true },
+    { connectionId: 'server-b', name: 'ops', remoteSource: true, sourceScoped: true }
+  ]
+
+  const sources = (install?: string) => [
+    { connectionId: 'local', installId: 'a'.repeat(32), kind: 'local' },
+    { connectionId: 'server-a', kind: 'remote', ...(install ? { installId: install } : {}) },
+    { connectionId: 'server-b', kind: 'remote', ...(install ? { installId: install } : {}) }
+  ]
+
+  beforeEach(() => {
+    live.owner = { connectionId: 'server-a', profile: 'ops' }
+  })
+
+  it("treats the install's other address as the sender's own gateway", async () => {
+    const { handler, provide } = await contributions({ profiles: COLLAPSED, sources: sources('b'.repeat(32)) })
+
+    const { text } = await handler({ text: 'send it to @default-server' })
+
+    expect(text).toContain('(message_agent target: "hermes")')
+    expect(provide('').map(item => item.insert)).not.toContain('@ops')
+  })
+
+  it('keeps addresses distinct while their install ids are unknown', async () => {
+    const { handler } = await contributions({ profiles: COLLAPSED, sources: sources() })
+
+    expect((await handler({ text: 'send it to @default-server' })).text).toContain(
+      '(message_agent target: "default@server-b")'
+    )
   })
 })
 

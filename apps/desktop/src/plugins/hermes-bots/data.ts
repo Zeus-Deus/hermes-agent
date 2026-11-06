@@ -1372,12 +1372,43 @@ export function mentionTargetConnection(
   const rowId = rowConnectionId(bot, sender)
 
   if (sender?.exact && sender.connectionId && rowId) {
-    return rowId === sender.connectionId ? undefined : rowId
+    return ownsConnection(sender, rowId) ? undefined : rowId
   }
 
   const botId = String(bot?.connectionId || '').trim()
 
   return bot?.remoteSource && botId ? botId : undefined
+}
+
+/** `rowId` is the ref's connection, or another registry address of the same
+ *  install (a box registered twice; the union roster collapses its bots onto
+ *  one of them). */
+function ownsConnection(ref: RosterOwnerRef, rowId: string): boolean {
+  return rowId === String(ref.connectionId || '').trim() || Boolean(ref.connectionAliases?.includes(rowId))
+}
+
+/** Registry ids naming the same install as `connectionId`, by the snapshot
+ *  sources' install ids. Empty while that install id is unknown. */
+function sameInstallConnections(sources: GatewaySource[] | null | undefined, connectionId: string): string[] {
+  const list = Array.isArray(sources) ? sources : []
+  const install = String(list.find(source => source?.connectionId === connectionId)?.installId || '').trim()
+
+  return install
+    ? list.filter(source => String(source?.installId || '').trim() === install).map(source => source.connectionId)
+    : []
+}
+
+/** `owner` read against a roster snapshot: where its unscoped rows live, and
+ *  which other addresses name the owner's own install. */
+export function scopeMentionSender<T extends RosterOwnerRef>(
+  owner: T,
+  snapshot: Pick<RosterSnapshot, 'servedConnectionId' | 'sources'> | null | undefined
+): RosterOwnerRef & T {
+  return {
+    ...owner,
+    connectionAliases: sameInstallConnections(snapshot?.sources, String(owner.connectionId || '').trim()),
+    unscopedConnectionId: snapshot?.servedConnectionId
+  }
 }
 
 /** The connection a row lives on: its own, else — for a rich (non-remote)
@@ -1390,6 +1421,8 @@ function rowConnectionId(bot: Partial<RosterRow> | null | undefined, ref: Roster
  *  registry connection it lives on. Covers the focused chat's owner, the live
  *  gateway pair, and the bare `{ name }` the mention provider builds. */
 export interface RosterOwnerRef {
+  /** Other registry addresses of the owner's install (exact refs only). */
+  connectionAliases?: string[]
   connectionId?: null | string
   /** The pair is a known chat owner, not a guess: a row carrying a
    *  connection is the owner only when both halves match, 'local' included. */
@@ -1415,7 +1448,7 @@ export function isActiveRosterBot(
   const rowId = rowConnectionId(bot, active)
 
   if (active.exact && rowId) {
-    return activeId === rowId && botName === activeName
+    return ownsConnection(active, rowId) && botName === activeName
   }
 
   if (bot?.remoteSource) {

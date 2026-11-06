@@ -53,6 +53,7 @@ import {
   migrateBotMeta,
   primeRoster,
   resolveRosterMentions,
+  scopeMentionSender,
   socketConnectionId
 } from './data'
 import {
@@ -160,8 +161,7 @@ export default {
           const q = (query || '').toLowerCase()
           const items: MentionCompletionItem[] = []
 
-          // Rows without a connection of their own live on the gateway that served the roster.
-          const live = { ...mentionSender(), unscopedConnectionId: roster?.servedConnectionId }
+          const live = scopeMentionSender(mentionSender(), roster)
 
           const offered = profiles.filter(profile => profile?.name && !isActiveRosterBot(profile, live))
           // Two rows tagging alike (two remote defaults both titled "CoS Bot")
@@ -819,12 +819,12 @@ export default {
           }
 
           const roster = Array.isArray(cached?.profiles) ? cached.profiles : null
-          let sender = { ...owner, unscopedConnectionId: cached?.servedConnectionId }
+          let sender = scopeMentionSender(owner, cached)
           let mentionedBots = roster ? resolveRosterMentions(text, roster, sender) : []
 
           if (!roster) {
             // host.request answers on the live socket: note which one before asking.
-            sender = { ...owner, unscopedConnectionId: socketConnectionId() }
+            sender = scopeMentionSender(owner, { servedConnectionId: socketConnectionId() })
 
             try {
               const res = await host.request<{ profiles?: RosterRow[] }>('profiles.list', {
