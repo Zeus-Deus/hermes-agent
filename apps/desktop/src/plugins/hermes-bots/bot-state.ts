@@ -167,37 +167,51 @@ type MentionSender = { connectionId: string; exact?: boolean; name: string }
 
 /** The chat a composer send goes to (`composer.middleware` context). */
 export interface MentionSubmitContext {
+  sessionId?: null | string
   storedSessionId?: null | string
 }
 
-/** The previous guess, for an owner nobody knows: focused profile on the
- *  active connection, never `exact` — rows keep their remote/local split. */
-function guessedMentionSender(): MentionSender {
-  return { connectionId: liveConnectionId() || 'local', name: focusedMentionProfile() }
+/** A sender known NOT to be the focused chat's bot, whose owner is unknown:
+ *  `exact` with no connection, so every row on a known connection is
+ *  qualified and none is hidden as self. A target its gateway cannot resolve
+ *  fails loudly; a bare name could reach that gateway's namesake. */
+const UNKNOWN_SENDER: MentionSender = { connectionId: '', exact: true, name: '' }
+
+const trimmed = (value: unknown) => String(value || '').trim()
+
+/** The send goes to the focused chat. The runtime id names the destination
+ *  itself; the stored id may be a lineage root standing for the focused tip. */
+function sendsToFocusedChat(runtime: string, stored: string): boolean {
+  const focusedRuntime = trimmed(host.state.focusedSessionId?.get?.())
+  const focusedStored = trimmed(host.state.focusedStoredSessionId?.get?.())
+
+  return runtime ? runtime === focusedRuntime || (Boolean(stored) && stored === focusedStored) : stored === focusedStored
 }
 
-/** The submitting chat's owner when the send names a chat other than the
+/** The submitting chat's owner when the send goes to a chat other than the
  *  focused one; undefined when focus already answers for it. */
 function submittingChatSender(context: MentionSubmitContext | null | undefined): MentionSender | undefined {
   const lookup = host.sessionOwner
-  const stored = String(context?.storedSessionId || '').trim()
-  const focused = String(host.state.focusedStoredSessionId?.get?.() || '').trim()
+  const runtime = trimmed(context?.sessionId)
+  const stored = trimmed(context?.storedSessionId)
 
-  if (!context || typeof lookup !== 'function' || stored === focused) {
+  if (!context || typeof lookup !== 'function' || sendsToFocusedChat(runtime, stored)) {
     return undefined
   }
 
-  const owner = stored ? focusedRosterOwner(lookup(stored)) : null
+  // The runtime id first: it maps to the destination's own stored id.
+  const owner = focusedRosterOwner((runtime && lookup(runtime)) || (stored && lookup(stored)) || null)
 
-  return owner?.connectionId ? { connectionId: owner.connectionId, exact: true, name: owner.name } : guessedMentionSender()
+  return owner?.connectionId ? { connectionId: owner.connectionId, exact: true, name: owner.name } : UNKNOWN_SENDER
 }
 
 /** The bot that reads a mention note: the owner of the chat the send goes
  *  to, as its complete connection/profile pair (`exact`) — a Bot Chat opened
  *  on another connection leaves the Desktop's active connection elsewhere
  *  (#130260). That chat is the focused one unless `context` names another (a
- *  queued prompt drains in its own tile). Without an authoritative owner, the
- *  previous guess. Read it before any await — focus can move to another tile
+ *  queued prompt drains in its own tile); another chat whose owner is unknown
+ *  is UNKNOWN_SENDER. Without an authoritative focused owner, the previous
+ *  guess: focused profile on the active connection, not exact. Read it before any await — focus can move to another tile
  *  while the roster loads. */
 export function mentionSender(context?: MentionSubmitContext | null): MentionSender {
   const submitting = submittingChatSender(context)
@@ -210,7 +224,7 @@ export function mentionSender(context?: MentionSubmitContext | null): MentionSen
 
   return owner?.authoritative && owner.connectionId
     ? { connectionId: owner.connectionId, exact: true, name: owner.name }
-    : guessedMentionSender()
+    : { connectionId: liveConnectionId() || 'local', name: focusedMentionProfile() }
 }
 
 export function focusedRosterOwner(

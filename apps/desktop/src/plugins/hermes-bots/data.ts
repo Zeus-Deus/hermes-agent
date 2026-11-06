@@ -1371,7 +1371,9 @@ export function mentionTargetConnection(
 ): string | undefined {
   const rowId = rowConnectionId(bot, sender)
 
-  if (sender?.exact && sender.connectionId && rowId) {
+  // An exact sender with no connection is known to be elsewhere: every row
+  // with a connection is foreign to it.
+  if (sender?.exact && rowId) {
     return ownsConnection(sender, rowId) ? undefined : rowId
   }
 
@@ -1380,14 +1382,15 @@ export function mentionTargetConnection(
   return bot?.remoteSource && botId ? botId : undefined
 }
 
-/** The bare form the sender's own gateway resolves `bot` by. A row reached
- *  through another address of the sender's install had its 'hermes' claim
- *  computed from that address's inventory alone, so name its folder id. */
+/** The bare form the sender's own gateway resolves `bot` by. For a known
+ *  sender, the profile folder id: the gateway resolves it exactly ('default'
+ *  is always a folder id there), while a row's 'hermes' claim is computed
+ *  per registry address and misses a real hermes profile listed only under
+ *  another address of the same install. Otherwise the handle rule. */
 export function localMentionHandle(bot: Partial<RosterRow>, sender: RosterOwnerRef | null | undefined): string {
-  const botId = String(bot?.connectionId || '').trim()
-  const viaAlias = Boolean(sender?.exact && botId && botId !== String(sender.connectionId || '').trim())
+  const name = String(bot?.name || '')
 
-  return botHandle(String(bot?.name || ''), { hermesHandleTaken: Boolean(bot?.hermesHandleTaken) || viaAlias })
+  return sender?.exact && name ? name : botHandle(name, { hermesHandleTaken: Boolean(bot?.hermesHandleTaken) })
 }
 
 /** `rowId` is the ref's connection, or another registry address of the same

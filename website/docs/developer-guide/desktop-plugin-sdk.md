@@ -492,9 +492,10 @@ composer, provide an attachment source, or transform a draft before it is sent
 (`ComposerSubmitContext`: `{ sessionId, storedSessionId }`, either null when
 unknown) names the chat the send goes to — not always the focused one, since a
 queued prompt drains in its own tile. Resolve that chat's owner with
-`host.sessionOwner(context.storedSessionId)` (`{ connectionId, profile } | null`,
-the same lookup as `host.state.focusedSessionOwner`); older hosts omit
-`context`. `top` is a
+`host.sessionOwner(id)` (`{ connectionId, profile } | null`, the same lookup as
+`host.state.focusedSessionOwner`). Prefer `context.sessionId`: a runtime id
+maps to the chat's own stored id, while `storedSessionId` can be the lineage
+root of a compressed chat. Older hosts omit `context`. `top` is a
 banner strip above the input and `bottom` a row below the input grid, both
 inside the composer chrome; `underside` is the floating strip BELOW the whole
 composer with no chrome of its own — the seat for a suggestion pill or a status

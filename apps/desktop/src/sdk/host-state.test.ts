@@ -264,6 +264,26 @@ describe('host.sessionOwner', () => {
     session.setConnection(null)
   })
 
+  it("maps a runtime id to the stored id its session state binds, not a lineage root's owner", async () => {
+    const { host } = await import('@/sdk/index')
+    const session = await import('@/store/session')
+    const states = await import('@/store/session-states')
+    const { createClientSessionState } = await import('@/lib/chat-runtime')
+
+    // The root id is shared by two connections' sessions; the runtime is bound to one tip.
+    session.$sessions.set([
+      { connection_id: 'source-a', id: 'tip-a', _lineage_root_id: 'root', profile: 'ops' } as never,
+      { connection_id: 'source-b', id: 'root', profile: 'ops' } as never
+    ])
+    states.$sessionStates.set({ 'rt-a': createClientSessionState('tip-a') })
+
+    expect(host.sessionOwner('root')).toBeNull()
+    expect(host.sessionOwner('rt-a')).toEqual({ connectionId: 'source-a', profile: 'ops' })
+
+    states.$sessionStates.set({})
+    session.$sessions.set([])
+  })
+
   it('never guesses: empty, unknown and ambiguous ids are null', async () => {
     const { host } = await import('@/sdk/index')
     const session = await import('@/store/session')

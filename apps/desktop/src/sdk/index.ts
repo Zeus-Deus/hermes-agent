@@ -98,7 +98,8 @@ import {
   $sessionTiles,
   dropTilesForProfile,
   focusWorkspaceOwnerSessionTile,
-  sessionTileDelegate
+  sessionTileDelegate,
+  storedSessionIdForRuntimeId
 } from '@/store/session-states'
 import { runGatewayRestart } from '@/store/system-actions'
 import type { PaginatedSessions, UsageStats } from '@/types/hermes'
@@ -727,15 +728,17 @@ export const host = {
    *  profile/agent swaps. */
   activeConnectionId: (): null | string => activeGatewayConnectionId(),
 
-  /** Connection-qualified owner of ANY stored session, resolved exactly as
+  /** Connection-qualified owner of ANY session, resolved exactly as
    *  `state.focusedSessionOwner` resolves the focused one — for code acting on
-   *  a chat that need not have focus (a composer middleware's
-   *  `context.storedSessionId`: a queued prompt drains in its own tile). Null
-   *  for an empty, ambiguous or unresolved id; never a guess from focus. */
-  sessionOwner: (storedSessionId: null | string | undefined): PluginFocusedSessionOwner | null => {
-    const id = String(storedSessionId || '').trim()
+   *  a chat that need not have focus (a composer middleware's `context`: a
+   *  queued prompt drains in its own tile). Takes a stored id or a runtime id;
+   *  a runtime id is first mapped to the stored id its tile / session state
+   *  binds (the destination itself, not a lineage root standing in for it).
+   *  Null for an empty, ambiguous or unresolved id; never a guess from focus. */
+  sessionOwner: (sessionId: null | string | undefined): PluginFocusedSessionOwner | null => {
+    const id = String(sessionId || '').trim()
 
-    return id ? storedSessionOwner(id, $sessions.get()) : null
+    return id ? storedSessionOwner(storedSessionIdForRuntimeId(id) ?? id, $sessions.get()) : null
   },
 
   /** The registered connection list (labels, kinds, primary) — token bytes
