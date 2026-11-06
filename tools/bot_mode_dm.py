@@ -404,9 +404,10 @@ def _try_relay_delivery(root: Path, raw_target: str, content: str, me: str, *,
             # Two Desktops can each give a DIFFERENT machine the same connection name (#139219):
             # then even the qualified form names both, and only renaming one connection helps.
             shared = sorted({form for form in forms if forms.count(form) > 1})
-            note = (f" {', '.join(shared)} names a different machine on each Desktop relaying it (they gave "
-                    "those machines the same connection name) — rename one of those connections in its "
-                    "Desktop so the names differ.") if shared else ""
+            note = (f" {', '.join(shared)} can name a different machine on each Desktop relaying it (two "
+                    "machines given the same connection name, or a Desktop too old to tell them apart) — "
+                    "rename one of those connections in its Desktop so the names differ, or update that "
+                    "Desktop.") if shared else ""
             return _err(f"'{raw_target}' exists on several connected machines — disambiguate with one of: "
                         f"{', '.join(dict.fromkeys(forms))}.{note}")
         try:

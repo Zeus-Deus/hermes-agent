@@ -220,19 +220,13 @@ def _live_slices(slices: dict[str, _Slice], now: float, *, fresh_only: bool) -> 
     return [max(slices.values(), key=lambda item: item[0])[1]]
 
 
-def _same_bot(a: dict, b: dict) -> bool:
-    return all(a.get(k) == b.get(k) for k in ("handle", "title", "description"))
-
-
-def _same_machine(row: dict, other: dict, other_install: Optional[str]) -> bool:
-    """``row`` and ``other`` (whose machine reports ``other_install``) are one machine's profile.
-    Both install ids known: they must match. One unknown (an older Desktop pushed the row):
-    only a row that also reads the same is taken as the same bot — a missing id is never
-    equality by itself. Both unknown: one row, as before the install ids."""
+def _same_machine(row: dict, other_install: Optional[str]) -> bool:
+    """``row`` belongs to the machine of a group whose rows report ``other_install``. Both known:
+    they must match. Exactly one known (an older Desktop pushed the other row) proves nothing —
+    a missing id is never equality, even for identical rows, so they stay apart and a name they
+    share is ambiguous. Both unknown: one row, as before the install ids."""
     install = row.get("install_id")
-    if install and other_install:
-        return install == other_install
-    return (not install and not other_install) or _same_bot(row, other)
+    return install == other_install if install and other_install else not install and not other_install
 
 
 def _merge_slices(slices: list[list[dict]]) -> list[dict]:
@@ -246,7 +240,7 @@ def _merge_slices(slices: list[list[dict]]) -> list[dict]:
     for rows in slices:
         for row in rows:
             candidates = groups.setdefault((row["connection_id"], row["profile"]), [])
-            group = next((g for g in candidates if _same_machine(row, g[0], _group_install(g))), None)
+            group = next((g for g in candidates if _same_machine(row, _group_install(g))), None)
             if group is None:
                 candidates.append([row])
             else:
@@ -446,7 +440,7 @@ def _lists_target(row: dict, target: dict) -> bool:
     """``row`` is ``target``'s machine and profile: same connection id and profile, and no
     conflicting install id (two Desktops can give two machines one connection name)."""
     return ((row["connection_id"], row["profile"]) == (str(target.get("connection_id") or ""), str(target.get("profile") or ""))
-            and _same_machine(row, target, target.get("install_id")))
+            and _same_machine(row, target.get("install_id")))
 
 
 def _target_publishers(root: Path | str, target: dict) -> list[str]:

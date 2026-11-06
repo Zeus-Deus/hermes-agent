@@ -1109,7 +1109,11 @@ async function deliverRelayEnvelope(
   }
 
   try {
-    await deliverOrAnswer(sender, envelope, envelopeId, target, pending)
+    // The check can outlast a drain that no longer offers the envelope (answered or timed out
+    // meanwhile, forgetSettledPins): only a still-pinned envelope goes out.
+    if (pending.has(envelopeId)) {
+      await deliverOrAnswer(sender, envelope, envelopeId, target, pending)
+    }
   } finally {
     release()
   }

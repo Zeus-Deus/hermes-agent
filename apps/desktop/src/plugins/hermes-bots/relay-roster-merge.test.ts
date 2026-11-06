@@ -494,6 +494,50 @@ describe('each Desktop pushes its roster as its own slice (#139219)', () => {
       expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
     })
 
+    it('an envelope the gateway stops offering while its install check runs is not delivered', async () => {
+      let offered = true
+
+      let answerCheck: (value: unknown) => void = () => {}
+
+      const calls = respondWith(call => {
+        if (call.method === 'profiles.list') {
+          if (call.connectionId === 'srv' && call.route.profile === 'scout') {
+            return new Promise(resolve => {
+              answerCheck = resolve
+            })
+          }
+
+          return call.connectionId === 'local'
+            ? { install_id: INSTALL, profiles: [{ name: 'ops' }] }
+            : { install_id: 'f'.repeat(32), profiles: [{ name: 'scout' }] }
+        }
+
+        if (call.method === 'bot_relay.outbox.drain') {
+          return {
+            envelopes:
+              call.connectionId === 'local' && offered
+                ? [{ ...base, canonical_delivery_v1: true, target_connection: 'srv', target_install: 'f'.repeat(32) }]
+                : []
+          }
+        }
+
+        return {}
+      })
+
+      const { startBotRelay, stopBotRelay } = await loadRelay()
+
+      startBotRelay()
+      await vi.advanceTimersByTimeAsync(0)
+      await pushAndSettle() // the install check is now waiting on 'srv'
+      offered = false // answered elsewhere / timed out meanwhile
+      await pushAndSettle()
+      answerCheck({ install_id: 'f'.repeat(32), profiles: [{ name: 'scout' }] })
+      await vi.advanceTimersByTimeAsync(0)
+      stopBotRelay()
+
+      expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
+    })
+
     it('a same-named connection answering from another install is not the target', async () => {
       expect(await run({ ...base, target_connection: 'srv', target_install: 'e'.repeat(32) })).toEqual([])
 

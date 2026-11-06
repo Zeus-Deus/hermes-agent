@@ -243,9 +243,11 @@ def test_one_name_for_two_machines_across_desktops_stays_two_rows(root, tmp_path
     assert bot_relay.resolve_remote_target("scout", roster) == "ambiguous"
     assert bot_relay.resolve_remote_target("scout@homelab", roster) == "ambiguous"
     bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id=x)], "local-bbbbbbbbbbbb")
-    bot_relay.write_remote_roster(root, [_row("scout", "homelab")], "legacy")
     [row] = bot_relay.read_remote_roster(root)
     assert row["install_id"] == x
+    # an older Desktop's row reports no install: it may be another machine, so it stays apart
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab")], "legacy")
+    assert sorted(str(r.get("install_id")) for r in bot_relay.read_remote_roster(root)) == [x, "None"]
 
     (tmp_path / "gw").mkdir()
     home = _managed_home(tmp_path / "gw")
@@ -288,10 +290,12 @@ def test_a_row_without_install_never_borrows_another_machines(root):
     red = bot_relay.resolve_remote_target("red-bot", roster)
     env = bot_relay.enqueue_envelope(root, target=red, message="hi", sender_profile="work", sender_handle="work")
     assert "target_install" not in env and env["target_publishers"] == ["desktop-aaaaaaaaaaaa"]
-    # the same bot seen by both (an older Desktop and a newer one) is still one row
+    # identical rows prove nothing either: still two rows, so the shared name stays ambiguous
     bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id="2" * 32, title="Red Bot")], "desktop-bbbbbbbbbbbb")
-    [row] = bot_relay.read_remote_roster(root)
-    assert (row["title"], row["install_id"]) == ("Red Bot", "2" * 32)
+    roster = bot_relay.read_remote_roster(root)
+    assert sorted(str(r.get("install_id")) for r in roster) == ["2" * 32, "None"]
+    assert bot_relay.resolve_remote_target("red-bot", roster) == "ambiguous"
+    assert bot_relay.resolve_remote_target("scout@homelab", roster) == "ambiguous"
 
 
 def test_sender_stamp_on_a_colliding_connection_name_names_no_single_machine(root):
