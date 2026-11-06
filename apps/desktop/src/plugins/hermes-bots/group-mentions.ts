@@ -98,6 +98,9 @@ function claimUncontestedCustomHandles(members: GroupMember[], handles: Map<stri
     }
 
     if (custom && holders.length && !handles.has(custom)) {
+      // Both the exact spelling and its collapsed form stay unresolved: the parser stops peeling
+      // closing punctuation at the exact one, so `@maia_` never trims onto a bot named `maia`.
+      unresolved.add(custom)
       unresolved.add(custom.replace(/[._-]+/g, ''))
     }
   }
@@ -179,7 +182,7 @@ export function parseGroupChatMentions(text: unknown, members: GroupMember[]) {
     // does the fully trimmed token go on to the collapsed fallback.
     let handle = written
 
-    while (!handles.has(handle) && /[._-]$/.test(handle)) {
+    while (!handles.has(handle) && !unresolved.has(handle) && /[._-]$/.test(handle)) {
       handle = handle.slice(0, -1)
     }
 
