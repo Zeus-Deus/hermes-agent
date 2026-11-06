@@ -5,7 +5,14 @@
  */
 import { host } from '@hermes/plugin-sdk'
 
-import { botFriendlyNames, botHandle, botMentionTag, mentionNameForms, precustomHandle } from './data'
+import {
+  botFriendlyNames,
+  botHandle,
+  botMentionTag,
+  customDefaultHandle,
+  mentionNameForms,
+  precustomHandle
+} from './data'
 import { groupFailureReason, recordGroupActivity } from './group-activity'
 import {
   $groupChats,
@@ -75,6 +82,29 @@ function gapFillMemberForms(members: GroupMember[], handles: Map<string, string>
   }
 }
 
+/** Two machines' defaults can pick the same custom handle on their own. A shared one names
+ *  neither (the map would hand it to whichever sat last): the room falls back to each member's
+ *  source-qualified earlier handle, which `groupReplyMentionTag` offers instead. */
+function dropSharedCustomHandles(members: GroupMember[], handles: Map<string, string>) {
+  const owners = new Map<string, Set<string>>()
+
+  for (const member of members) {
+    const custom = customDefaultHandle(member.name, member)
+
+    if (custom) {
+      owners.set(custom, (owners.get(custom) || new Set()).add(groupMemberKey(member)))
+    }
+  }
+
+  for (const [custom, keys] of owners) {
+    for (const form of keys.size > 1 ? [custom, custom.replace(/[._-]+/g, '')] : []) {
+      if (keys.has(handles.get(form) ?? '')) {
+        handles.delete(form)
+      }
+    }
+  }
+}
+
 /** Deterministic @mention parse. Handles @name, @"two words" via display
  *  titles, and @everyone/@all. Names match case-insensitively against member
  *  profile names, display titles, and collapsed no-space forms. */
@@ -133,6 +163,7 @@ export function parseGroupChatMentions(text: unknown, members: GroupMember[]) {
   }
 
   gapFillMemberForms(members, handles)
+  dropSharedCustomHandles(members, handles)
 
   for (const match of source.matchAll(/@([a-z0-9][a-z0-9._-]*)/gi)) {
     const handle = match[1].toLowerCase()
@@ -168,7 +199,12 @@ export function parseGroupChatMentions(text: unknown, members: GroupMember[]) {
 export function groupReplyMentionTag(member: GroupMember, members: GroupMember[]): string {
   const key = groupMemberKey(member)
 
-  const candidates = [botMentionTag(member), botHandle(member.name, member), `${member.name}-local`]
+  const candidates = [
+    botMentionTag(member),
+    botHandle(member.name, member),
+    precustomHandle(member.name, member),
+    `${member.name}-local`
+  ]
     .map(tag => String(tag || '').trim())
     .filter(Boolean)
 

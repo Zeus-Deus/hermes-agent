@@ -114,8 +114,12 @@ export interface RosterRow {
   /** A default row whose source also has a real profile named like its custom handle: that
    *  profile keeps the name and this row falls back to @hermes. Set by `claimDefaultHandles`. */
   customHandleTaken?: boolean
+  /** Default row only: its backend's effective custom @handle ('' when unset or yielded to a
+   *  profile of that name). Its presence means that backend resolves one (#89720); an older
+   *  backend never sends it, so a handle it merely stores is never advertised. */
+  mention_handle?: string
   /** The default's custom @handle as a durable group member carries it, for when the live row
-   *  (and its `ui_meta`) is gone. */
+   *  is gone. */
   mentionHandle?: string
   has_avatar?: boolean
   /** The connection's backend identity (/api/status `install_id`) when the

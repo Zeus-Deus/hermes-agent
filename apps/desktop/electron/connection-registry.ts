@@ -648,6 +648,8 @@ export interface RosterProfileMetadata {
   title?: string
   ui_meta?: Record<string, unknown>
   has_avatar?: boolean
+  /** Default row only: the backend's effective custom Bot Mode @handle (#89720). */
+  mention_handle?: string
 }
 
 /** Project credential-free `/api/profiles` fields into the metadata carried by
@@ -686,6 +688,11 @@ export function profileMetadataFromApiProfiles(profiles: unknown[]): Record<stri
 
         if (typeof record.has_avatar === 'boolean') {
           metadata.has_avatar = record.has_avatar
+        }
+
+        // Carried even when empty: its presence says the backend resolves a custom handle.
+        if (typeof record.mention_handle === 'string') {
+          metadata.mention_handle = record.mention_handle.trim()
         }
 
         return [name, metadata] as const

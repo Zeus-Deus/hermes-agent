@@ -38,7 +38,7 @@ from hermes_cli.web_server_config import (
 from hermes_cli.web_server_gateway import _strip_session_list_rows
 from hermes_cli.web_routers._common import _CONFIG_MUTATION_LOCK
 from hermes_cli.web_server_profiles import (
-    _fallback_profile_dicts, _hub_action_name, _write_profile_mcp_servers,
+    _default_handle_entry, _fallback_profile_dicts, _hub_action_name, _write_profile_mcp_servers,
 )
 from hermes_cli.web_server_sessions import _open_session_db_at_path
 from hermes_state_health import STORAGE_CORRUPT, note_storage_error, storage_state
@@ -94,6 +94,7 @@ def _profile_to_dict(info) -> dict[str, Any]:
         "description_auto": bool(attr("description_auto", False)),
         "display_name": attr("display_name", "") or "",
         "bot_title": attr("bot_title", "") or "",
+        **_default_handle_entry(bool(attr("is_default", False)), Path(str(attr("path", "") or "."))),
         "distribution_name": attr("distribution_name", None),
         "distribution_version": attr("distribution_version", None),
         "distribution_source": attr("distribution_source", None),

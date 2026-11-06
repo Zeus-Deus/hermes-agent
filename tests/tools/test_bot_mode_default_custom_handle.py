@@ -192,3 +192,47 @@ def test_profile_yaml_fixture_parses(tmp_path):
             mentionHandle: Not Valid
         """), encoding="utf-8")
     assert bot_mode_probe.stored_default_handle(root) == ""
+
+
+def test_renaming_another_machines_default_refreshes_the_prompt_that_names_it(tmp_path):
+    root = _managed_home(tmp_path)
+    (root / "profile.yaml").write_text("ui_meta:\n  hermes-bots:\n    shape: cloud\n", encoding="utf-8")
+
+    def epoch_with(handle):
+        bot_relay.write_remote_roster(root, [{"profile": "default", "handle": handle, "connection_id": "laptop"}])
+        return bot_mode_probe.capability_fingerprint(root)
+
+    legacy = epoch_with("hermes")
+    assert epoch_with("maia") not in (legacy, epoch_with("atlas"))
+    # A row keeping its usual handle hashes exactly as before this change.
+    assert bot_mode_probe._remote_surface_row(bot_relay.read_remote_roster(root)[0] | {"handle": "hermes"}) == "laptop:default:"
+
+
+# ── the capability every roster source reports ──────────────────────────────
+
+
+def test_web_profile_rows_report_the_effective_handle_on_the_default_only(tmp_path):
+    from types import SimpleNamespace
+
+    from hermes_cli.web_routers.profiles import _profile_to_dict
+    from hermes_cli.web_server_profiles import _default_handle_entry
+
+    root = _managed_home(tmp_path)
+    assert _default_handle_entry(True, root) == {"mention_handle": ""}
+    _set_default_handle(root, "maia")
+    assert _default_handle_entry(True, root) == {"mention_handle": "maia"}
+    assert _default_handle_entry(False, root / "profiles" / "researcher") == {}
+    assert _profile_to_dict(SimpleNamespace(name="default", path=root, is_default=True))["mention_handle"] == "maia"
+    assert "mention_handle" not in _profile_to_dict(SimpleNamespace(name="researcher", path=root / "profiles" / "researcher"))
+
+
+def test_gateway_roster_rows_report_the_effective_handle_on_the_default_only(tmp_path):
+    from gateway.session_group_controls import _default_handle
+
+    root = _managed_home(tmp_path, teammates=("researcher", "maia"))
+    _set_default_handle(root, "maia")
+    row, named = {"name": "default"}, {"name": "researcher"}
+    _default_handle(row, root)
+    _default_handle(named, root / "profiles" / "researcher")
+    # A live profile named maia keeps the name: the default reports no custom handle.
+    assert row == {"name": "default", "mention_handle": ""} and named == {"name": "researcher"}

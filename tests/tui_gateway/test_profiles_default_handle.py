@@ -66,3 +66,12 @@ def test_clearing_the_handle_is_always_allowed(home):
 def test_named_profiles_pass_through_untouched(home):
     applied = _configure("researcher", {"shape": "cloud", "mentionHandle": "hermes"})
     assert applied["ui_meta"] is True and "ui_meta_error" not in applied
+
+
+def test_profiles_list_reports_the_effective_handle_on_the_default_row(home):
+    rows = lambda: {row["name"]: row for row in srv._methods["profiles.list"](
+        "list", {"include_sessions": False})["result"]["profiles"]}
+    assert rows()["default"]["mention_handle"] == ""
+    assert "mention_handle" not in rows()["researcher"]
+    _configure("default", {"shape": "cloud", "mentionHandle": "maia"})
+    assert rows()["default"]["mention_handle"] == "maia"

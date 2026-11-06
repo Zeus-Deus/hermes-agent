@@ -4,7 +4,15 @@
  * the roster UI both read.
  */
 
-import { $botMeta, botFriendlyNames, botHandle, botMetaKey, botRosterKey, customDefaultHandle } from './data'
+import {
+  $botMeta,
+  botFriendlyNames,
+  botHandle,
+  botMetaKey,
+  botRosterKey,
+  customDefaultHandle,
+  precustomHandle
+} from './data'
 import { $groupChats, groupChatRoomKey } from './group-chat'
 import { botConnectionRoute, botRosterMeta, resolveBotConnectionRoute } from './routing'
 import type { BotMeta, GroupChat, GroupMember, GroupMessageAuthor, RosterRow } from './types'
@@ -423,7 +431,9 @@ export function durableGroupChatMembers(bots: RosterRow[]): GroupMember[] {
 
     return {
       name: bot.name,
-      handle: botHandle(bot.name, bot) || bot.handle || bot.name,
+      // The handle the bot had before any custom one (`default-laptop`, `hermes`): the source-
+      // qualified form a room falls back to when two machines' defaults chose the same handle.
+      handle: precustomHandle(bot.name, bot) || botHandle(bot.name, bot) || bot.handle || bot.name,
       // The stored handle alone cannot say why a default is not @hermes, and
       // botHandle re-derives 'hermes' for it: keep the claim, or a room whose
       // live row is gone tells two bots they are both @hermes. A live row

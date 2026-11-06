@@ -2108,6 +2108,7 @@ export interface ProfileRow {
   ui_meta_revisions?: Record<string, number>
   ui_meta?: Record<string, unknown> | null
   has_avatar?: boolean
+  mention_handle?: string | null
 }
 /** Newest human-facing session of a profile (``_latest_profile_session_rows``). */
 export interface ProfileSessionPreview {
@@ -5387,6 +5388,7 @@ export interface CanonicalProfileRow {
   ui_meta_revisions?: Record<string, number>
   ui_meta?: Record<string, unknown> | null
   has_avatar?: boolean
+  mention_handle?: string | null
 }
 export interface CanonicalAttachedImageResult {
   name?: string | null

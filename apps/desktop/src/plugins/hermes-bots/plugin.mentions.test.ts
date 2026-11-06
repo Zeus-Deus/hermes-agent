@@ -590,7 +590,7 @@ describe('a default with a custom handle (#89720)', () => {
       connectionKind: 'local',
       connectionLabel: 'This device',
       name: 'default',
-      ui_meta: { 'hermes-bots': { mentionHandle: 'maia' } }
+      mention_handle: 'maia'
     },
     { connectionId: 'local', connectionKind: 'local', connectionLabel: 'This device', name: 'researcher' },
     {
@@ -601,7 +601,7 @@ describe('a default with a custom handle (#89720)', () => {
       name: 'default',
       remoteSource: true,
       sourceScoped: true,
-      ui_meta: { 'hermes-bots': { mentionHandle: 'atlas' } }
+      mention_handle: 'atlas'
     }
   ]
 

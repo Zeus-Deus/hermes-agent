@@ -434,6 +434,7 @@ def _profiles(authority, actor, home, params, siblings=()):
     if isinstance(meta.get('ui_meta'), dict):
         row['ui_meta'] = meta['ui_meta']
     row['has_avatar'] = _has_avatar(home)
+    _default_handle(row, home)
     if include_sessions:
         row.update(_bot_sessions(authority, actor))
     profiles = [row]
@@ -459,6 +460,7 @@ def _profiles(authority, actor, home, params, siblings=()):
             entry['ui_meta_revisions'] = _ui_meta_revisions(meta)
             if isinstance(meta.get('ui_meta'), dict):
                 entry['ui_meta'] = meta['ui_meta']
+        _default_handle(entry, target)
         profiles.append(entry)
 
     # Sibling profiles this process multiplexes: the roster lists them with the same
@@ -552,6 +554,14 @@ _ASSET_EXTS = ('png', 'jpg', 'webp')
 def _has_avatar(home):
     """Cheap existence flag so a roster paint skips a ``get_asset`` probe per profile."""
     return any((home / 'assets' / f'avatar.{ext}').is_file() for ext in _ASSET_EXTS)
+
+
+def _default_handle(row, home):
+    """``mention_handle`` on the default row (the ``profiles.list`` twin in tui_gateway): its
+    effective custom Bot Mode @handle, "" when unset; the key marks a backend that resolves one."""
+    if row.get('name') == 'default':
+        from tools.bot_mode_probe import custom_default_handle
+        row['mention_handle'] = custom_default_handle(home)
 
 
 def _ui_meta_revisions(meta):

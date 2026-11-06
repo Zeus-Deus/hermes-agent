@@ -712,7 +712,7 @@ describe('the roster loop pushes the OTHER connections’ agents', () => {
   it('publishes a default by its custom handle, unless that machine has a profile of that name (#89720)', async () => {
     const calls = respondWith(call => {
       if (call.method === 'profiles.list') {
-        const ownDefault = { name: 'default', ui_meta: { 'hermes-bots': { mentionHandle: 'maia' } } }
+        const ownDefault = { mention_handle: 'maia', name: 'default' }
 
         return { profiles: call.connectionId === 'a' ? [ownDefault] : [ownDefault, { name: 'maia' }] }
       }

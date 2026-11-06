@@ -788,7 +788,10 @@ interface UnionAgentRow {
   /** Credential-free metadata Electron enumerates alongside the name — the
    *  only source of a REMOTE row's title, since profiles.list is asked of the
    *  active gateway alone. */
-  profileMetadata?: Pick<RosterRow, 'description' | 'display_name' | 'has_avatar' | 'title' | 'ui_meta'>
+  profileMetadata?: Pick<
+    RosterRow,
+    'description' | 'display_name' | 'has_avatar' | 'mention_handle' | 'title' | 'ui_meta'
+  >
   /** False when the source lists the profile but does not serve it. */
   reachable?: boolean
   targetProfile?: string
@@ -1276,15 +1279,12 @@ export function normalizeMentionHandle(value: unknown): string {
   return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(handle) && !RESERVED_MENTION_FORMS.includes(handle) ? handle : ''
 }
 
-/** The custom handle a default row's OWN backend stores (`ui_meta['hermes-bots'].mentionHandle`,
- *  or the copy a durable group member carries), ignoring whether it is claimed. Never read from
- *  this window's local meta: it is a routing identity, and only the backend's copy is the one its
- *  `message_agent`, relay door and system prompt answer to. */
+/** The custom handle a default row's OWN backend answers to (`mention_handle`, which only a
+ *  backend whose resolvers support it sends), else the copy a durable group member carries.
+ *  Never the raw `ui_meta` value or this window's local meta: it is a routing identity, and only
+ *  what that backend's `message_agent`, relay door and system prompt resolve may be advertised. */
 function storedCustomHandle(bot: Partial<RosterRow> | null | undefined): string {
-  const meta = bot?.ui_meta?.['hermes-bots']
-  const stored = meta && typeof meta === 'object' && 'mentionHandle' in meta ? meta.mentionHandle : bot?.mentionHandle
-
-  return normalizeMentionHandle(stored)
+  return normalizeMentionHandle(typeof bot?.mention_handle === 'string' ? bot.mention_handle : bot?.mentionHandle)
 }
 
 /** The default profile's custom @handle (#89720), or '' when it has none — or when a real profile

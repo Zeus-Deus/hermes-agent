@@ -295,6 +295,8 @@ def _(rid, params: dict) -> dict:
         if include_sessions:
             _profile_session_fields(row, p.path)
         _profile_ui_meta_fields(row, Path(str(p.path)))
+        if p.is_default:
+            _default_handle_field(row, Path(str(p.path)))
         out.append(row)
     # bot_mode_protocol: this backend injects the Bot Mode teammate-messaging protocol into every
     # session, so clients must not append it to SOUL.md. install_id (same value as /api/status)
@@ -595,6 +597,14 @@ def _describe_toolsets(cfg):
                              "tool_count": _try(lambda: len(set(resolve_toolset(ts_name))), 0),
                              "enabled": enabled})
     return toolsets_out, pinned_set
+
+
+def _default_handle_field(row: dict, root) -> None:
+    """``mention_handle``: the default's effective custom @handle ("" when unset or yielded to a
+    profile of that name). Its presence is the capability: a client only offers and advertises a
+    custom handle on a backend whose resolvers answer to it (#89720)."""
+    from tools.bot_mode_probe import custom_default_handle
+    row["mention_handle"] = custom_default_handle(root)
 
 
 def _bots_title(ui_meta: dict):

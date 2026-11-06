@@ -142,7 +142,9 @@ export function canonicalGroupRoster(
     }
 
     const profile = member.route?.targetProfile ?? member.targetProfile ?? member.name
-    const handle = member.handle ?? profile
+    // The default's custom handle is what the room addresses it by (#89720); `handle` keeps the
+    // earlier, source-qualified one.
+    const handle = member.mentionHandle || (member.handle ?? profile)
 
     if (!profile.trim() || !handle.trim() || profiles.has(profile.toLowerCase()) || handles.has(handle.toLowerCase())) {
       return { problem: 'duplicateMember' }

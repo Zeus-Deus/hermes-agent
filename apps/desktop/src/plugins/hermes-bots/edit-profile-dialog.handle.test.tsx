@@ -36,7 +36,9 @@ vi.mock('@hermes/plugin-sdk', async importOriginal => {
 const { $lastRoster } = await import('./data')
 const { EditProfileDialog } = await import('./edit-profile-dialog')
 
+/** A default on a backend that resolves custom handles: it reports `mention_handle`. */
 const DEFAULT_BOT: RosterRow = {
+  mention_handle: '',
   name: 'default',
   ui_meta: { 'hermes-bots': { shape: 'cloud' } },
   ui_meta_revisions: {}
@@ -119,5 +121,18 @@ describe('the default bot’s handle field', () => {
     render(<EditProfileDialog bot={{ name: 'researcher' }} onClose={() => undefined} open />)
 
     expect(screen.queryByPlaceholderText('hermes')).toBeNull()
+  })
+
+  it('is not offered on an older backend that would store the handle without answering to it', () => {
+    render(<EditProfileDialog bot={{ ...DEFAULT_BOT, mention_handle: undefined }} onClose={() => undefined} open />)
+
+    expect(screen.queryByPlaceholderText('hermes')).toBeNull()
+  })
+
+  it('opens on the handle the backend stores', () => {
+    const bot = { ...DEFAULT_BOT, mention_handle: 'maia', ui_meta: { 'hermes-bots': { mentionHandle: 'maia' } } }
+    render(<EditProfileDialog bot={bot} onClose={() => undefined} open />)
+
+    expect(handleInput().value).toBe('maia')
   })
 })

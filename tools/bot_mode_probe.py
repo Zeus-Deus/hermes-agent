@@ -535,13 +535,21 @@ def capability_fingerprint(home: str | os.PathLike | None = None) -> str:
     # Peer gateways and the Desktop relay roster are part of the messaging
     # surface too: registering a peer or (dis)connecting a machine must show up.
     surface["peers"] = _peers(root)
-    surface["remote_roster"] = sorted(
-        f"{r['connection_id']}:{r['profile']}:{r['title']}" for r in _remote_roster(resolved)
-    )
+    surface["remote_roster"] = sorted(_remote_surface_row(r) for r in _remote_roster(resolved))
     return _swallow(
         lambda: hashlib.sha256(json.dumps(surface, sort_keys=True).encode("utf-8")).hexdigest()[:12],
         "unavailable",
     )
+
+
+def _remote_surface_row(row: dict) -> str:
+    """A relay roster row's share of the epoch. Its advertised handle joins only when it is not
+    one the row would have anyway (``hermes``/``default`` for a default, else the profile), so renaming
+    another machine's default refreshes the prompt that names it while every existing epoch stays
+    byte-identical."""
+    key = f"{row['connection_id']}:{row['profile']}:{row['title']}"
+    usual = ("hermes", "default") if row["profile"] == "default" else (row["profile"],)
+    return key if row["handle"] in usual else f"{key}:@{row['handle']}"
 
 
 def epoch_line(home: str | os.PathLike | None = None) -> str:

@@ -8,6 +8,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 
+import { canonicalGroupRoster } from './canonical-groups'
 import {
   botHandle,
   botMentionTag,
@@ -20,7 +21,7 @@ import {
 } from './data'
 import { durableGroupChatMembers } from './group-membership'
 import { buildGroupChatTurnPrompt } from './group-round-prompt'
-import { parseGroupChatMentions } from './group-rounds'
+import { groupReplyMentionTag, parseGroupChatMentions } from './group-rounds'
 import type { GroupMember, RosterRow } from './types'
 
 vi.mock('@hermes/plugin-sdk', async () => {
@@ -31,7 +32,8 @@ vi.mock('@hermes/plugin-sdk', async () => {
 
 vi.mock('./shared', () => ({ getPluginCtx: () => null, ID: 'hermes-bots' }))
 
-const withHandle = (mentionHandle: string) => ({ ui_meta: { 'hermes-bots': { mentionHandle } } })
+/** What a backend that resolves custom handles reports on its default row. */
+const withHandle = (mention_handle: string) => ({ mention_handle })
 
 /** A Desktop on `laptop` connected to `server`: both list a default (so the registry suffixes both
  *  handles), the laptop's carries a custom handle. */
@@ -89,7 +91,7 @@ describe('a default with a custom handle', () => {
   })
 
   it('outranks a Bot Mode title as the picker tag', () => {
-    const row = { name: 'default', ui_meta: { 'hermes-bots': { mentionHandle: 'maia', title: 'Research Lead' } } }
+    const row = { mention_handle: 'maia', name: 'default', ui_meta: { 'hermes-bots': { title: 'Research Lead' } } }
 
     expect(botMentionTag(row as RosterRow)).toBe('maia')
   })
@@ -150,9 +152,16 @@ describe('a default with a custom handle', () => {
   })
 
   it('reads the backend copy only: a cleared server value wins over a stale durable one', () => {
-    const row = { name: 'default', mentionHandle: 'maia', ui_meta: { 'hermes-bots': { mentionHandle: '' } } }
+    const row = { mention_handle: '', mentionHandle: 'maia', name: 'default' }
 
     expect(botHandle('default', row as RosterRow)).toBe('hermes')
+  })
+
+  it('is never advertised from an older backend that only stores the metadata', () => {
+    // That backend's message_agent, relay door and prompt still know only @hermes.
+    const row = { name: 'default', ui_meta: { 'hermes-bots': { mentionHandle: 'maia' } } } as RosterRow
+
+    expect([botHandle('default', row), botMentionTag(row)]).toEqual(['hermes', 'hermes'])
   })
 })
 
@@ -174,13 +183,24 @@ describe('group rooms', () => {
   const lead = { connectionId: 'local', name: 'default', ...withHandle('maia') } as RosterRow
   const researcher = { connectionId: 'local', name: 'researcher' } as RosterRow
 
-  it('seat the default under its custom handle and keep it on the durable member', () => {
+  it('seat the default under its custom handle and keep the earlier one on the durable member', () => {
     const [member] = durableGroupChatMembers([lead])
 
-    expect(member.handle).toBe('maia')
-    expect(member.mentionHandle).toBe('maia')
+    expect([member.mentionHandle, member.handle]).toEqual(['maia', 'hermes'])
     // Without the live row (connection switched), the descriptor alone still says @maia.
-    expect(botHandle(member.name, { ...member, ui_meta: undefined } as GroupMember)).toBe('maia')
+    expect(botHandle(member.name, member)).toBe('maia')
+  })
+
+  it('give a gateway-hosted room the custom handle', () => {
+    const members = durableGroupChatMembers([lead, researcher])
+    const route = { connectionId: 'local', profile: 'default' }
+
+    const result = canonicalGroupRoster(
+      route as never,
+      members.map(member => ({ ...member, connectionId: 'local' }))
+    )
+
+    expect('roster' in result && result.roster.map(member => member.handle)).toEqual(['maia', 'researcher'])
   })
 
   it('introduce it by that handle in the turn prompt', () => {
@@ -210,12 +230,24 @@ describe('group rooms', () => {
     const members = durableGroupChatMembers([laptop, server])
     const tagged = (text: string) => [...parseGroupChatMentions(text, members).mentioned]
 
-    expect(members.map(member => member.handle)).toEqual(['maia', 'default-server'])
+    expect(members.map(member => member.handle)).toEqual(['default-laptop', 'default-server'])
     expect(tagged('@maia go')).toEqual(['laptop::default'])
+    expect(tagged('@default-laptop go')).toEqual(['laptop::default'])
     expect(tagged('@hermes go')).toEqual([])
     // The live rows (what a seated room prefers) still answer the suffixed handle.
     expect([...parseGroupChatMentions('@default-laptop go', [laptop, server] as GroupMember[]).mentioned]).toEqual([
       'laptop::default'
     ])
+  })
+
+  it('give a handle two machines chose on their own to neither, and reply by the earlier one', () => {
+    const [laptop, , server] = twoMachines('maia', 'maia')
+    const members = durableGroupChatMembers([laptop, server])
+    const tagged = (text: string) => [...parseGroupChatMentions(text, members).mentioned]
+
+    expect(tagged('@maia go')).toEqual([])
+    expect(tagged('@default-laptop go')).toEqual(['laptop::default'])
+    expect(tagged('@default-server go')).toEqual(['server::default'])
+    expect(members.map(member => groupReplyMentionTag(member, members))).toEqual(['default-laptop', 'default-server'])
   })
 })

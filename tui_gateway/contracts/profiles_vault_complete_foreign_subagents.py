@@ -166,6 +166,9 @@ class ProfileRow(Result):
     ui_meta_revisions: dict[str, int] = Field(default_factory=dict)
     ui_meta: dict[str, JsonValue] | None = None
     has_avatar: bool = False
+    # Default row only: its effective custom Bot Mode @handle ("" when unset). Present = this
+    # backend resolves one (#89720).
+    mention_handle: str | None = None
 
 
 class ProfilesListParams(ProfileParams):

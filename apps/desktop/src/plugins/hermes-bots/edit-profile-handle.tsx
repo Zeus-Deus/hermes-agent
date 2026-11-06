@@ -11,11 +11,14 @@ import { labeled } from './dialog-parts'
 import type { BotsMessages } from './i18n-messages'
 import type { BotMeta, RosterRow } from './types'
 
-/** Whether `bot` gets the field, and the handle its backend holds now ('' for none). */
+/** Whether `bot` gets the field — the default, on a backend that resolves a custom handle (it
+ *  sends `mention_handle`; an older one would store the value and never answer to it) — and the
+ *  handle stored there now ('' for none). */
 export function openingHandle(bot: null | RosterRow): { edits: boolean; handle: string } {
-  const edits = Boolean(bot && isDefaultBot(bot))
+  const edits = Boolean(bot && isDefaultBot(bot) && typeof bot.mention_handle === 'string')
+  const stored = bot?.ui_meta?.['hermes-bots']?.mentionHandle || bot?.mention_handle
 
-  return { edits, handle: edits ? String(bot?.ui_meta?.['hermes-bots']?.mentionHandle || '') : '' }
+  return { edits, handle: edits ? String(stored || '') : '' }
 }
 
 /** The save's handle half: nothing when untouched, a patch for a new (or cleared) handle, or the

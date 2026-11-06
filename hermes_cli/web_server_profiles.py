@@ -142,6 +142,15 @@ def _parse_model_ids(resp: Any) -> list[str]:
     return [entry["id"] for entry in _parse_model_entries(resp)]
 
 
+def _default_handle_entry(is_default: bool, home: Path) -> dict[str, str]:
+    """``mention_handle`` on the default row: its effective custom Bot Mode @handle ("" when
+    unset); the key's presence tells the Desktop this backend resolves one (#89720)."""
+    if not is_default:
+        return {}
+    from tools.bot_mode_probe import custom_default_handle
+    return {"mention_handle": _safe(lambda: custom_default_handle(home), "")}
+
+
 def _fallback_profile_entry(profiles_mod, name: str, home: Path, *, is_default: bool,
                             has_env: bool, gateway_running: Callable[[], bool]) -> dict[str, Any]:
     model, provider = _safe(lambda: profiles_mod._read_config_model(home), (None, None))
@@ -154,6 +163,7 @@ def _fallback_profile_entry(profiles_mod, name: str, home: Path, *, is_default: 
         "gateway_running": _safe(gateway_running, False),
         "description": meta("description", ""), "description_auto": meta("description_auto", False),
         "bot_title": meta("bot_title", ""),
+        **_default_handle_entry(is_default, home),
         "distribution_name": None, "distribution_version": None, "distribution_source": None,
         "has_alias": False}
 
