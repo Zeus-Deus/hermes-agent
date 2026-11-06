@@ -280,19 +280,23 @@ def test_deliver_restamps_relayed_sender_with_a_reply_safe_handle(home, monkeypa
                     "plain text (@hermes): x"]
 
 
+@pytest.mark.parametrize("selector", [None, "own"])
 @pytest.mark.parametrize("subdir", ["profiles/ops", "dev"])
-def test_gateway_drains_the_mailbox_the_tools_write_to(tmp_path, monkeypatch, subdir):
+def test_gateway_drains_the_mailbox_the_tools_write_to(tmp_path, monkeypatch, subdir, selector):
     """Both ends of the relay mailbox name the same folder for every HERMES_HOME. The writer
     (``message_agent``) queues in the sending profile's OWN home, so a gateway serving that home
-    drains there — for a ``profiles/<name>`` home AND for an arbitrary subdir of the native
-    ``~/.hermes`` — a split here is silent non-delivery (#146035)."""
+    syncs, drains and replies there — for a ``profiles/<name>`` home AND for an arbitrary subdir of
+    the native ``~/.hermes`` (its own ``default``), with or without a routed ``profile`` naming it —
+    a split here is silent non-delivery (#146035)."""
     from tools.bot_mode_probe import _default_home
     from tui_gateway import methods_bot_relay
 
     monkeypatch.setenv("HOME", str(tmp_path))
     home = tmp_path / ".hermes" / subdir
     home.mkdir(parents=True)
+    (home / "config.yaml").write_text("{}\n")
     monkeypatch.setenv("HERMES_HOME", str(home))
+    routed = {} if selector is None else {"profile": "ops" if subdir.startswith("profiles/") else "default"}
 
     writer_home = Path(_default_home())
     target = {"profile": "scout", "handle": "scout", "connection_id": "cloud-1",
@@ -300,9 +304,14 @@ def test_gateway_drains_the_mailbox_the_tools_write_to(tmp_path, monkeypatch, su
     env = bot_relay.enqueue_envelope(
         writer_home, target=target, message="m", sender_profile="default", sender_handle="hermes")
 
-    assert methods_bot_relay._mailbox_home() == writer_home
-    drained = _result(srv._methods["bot_relay.outbox.drain"](1, {}))
+    with methods_bot_relay._mailbox(routed) as mailbox:
+        assert mailbox == writer_home
+    _result(srv._methods["bot_relay.roster.sync"](1, {**routed, "agents": [target]}))
+    drained = _result(srv._methods["bot_relay.outbox.drain"](2, dict(routed)))
     assert [e["id"] for e in drained["envelopes"]] == [env["id"]]
+    _result(srv._methods["bot_relay.reply"](3, {**routed, "id": env["id"], "reply": "ok"}))
+    assert [r["profile"] for r in bot_relay.read_remote_roster(writer_home)] == ["scout"]
+    assert (bot_relay.relay_root(writer_home) / bot_relay.REPLIES_DIR / f"{env['id']}.json").exists()
 
 
 def _named_sender(home: Path, name: str = "ops") -> Path:
@@ -362,8 +371,10 @@ def test_a_named_profile_dm_round_trips_through_the_legacy_door(home, monkeypatc
 
 def test_the_legacy_door_refuses_a_routed_profile_this_install_lacks(home):
     """A routed profile with no home here is refused, never served from another profile's mailbox."""
-    err = srv.handle_request({"id": 1, "method": "bot_relay.outbox.drain", "params": {"profile": "ghost"}})
-    assert err["error"]["code"] == 4064
+    for rid, method, extra in ((1, "bot_relay.outbox.drain", {}), (2, "bot_relay.roster.sync", {"agents": []}),
+                               (3, "bot_relay.reply", {"id": "c" * 32, "reply": "x"})):
+        err = srv.handle_request({"id": rid, "method": method, "params": {"profile": "ghost", **extra}})
+        assert err["error"]["data"]["reason"] == "unknown_profile", (method, err)
     assert not bot_relay.relay_root(home).exists()
 
 

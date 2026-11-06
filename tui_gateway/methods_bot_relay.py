@@ -6,6 +6,7 @@ Chat delivery on the TARGET gateway, returns the reply), ``reply`` (write the re
 the SENDER gateway for its waiter). Plumbing: ``tools/bot_relay.py``; handlers are rebound onto
 server.py's globals (method_ctx.py) and reference ``_ok``/``_err`` bare."""
 
+import contextlib
 import logging
 from pathlib import Path
 
@@ -21,16 +22,33 @@ def _relay_root() -> Path:
     return _hermes_root(Path(_default_home()))
 
 
-def _mailbox_home() -> Path:
-    """The relay folder (roster/outbox/replies) of the profile this request is served for — bound by
-    ``_profile_scoped``: the routed ``profile`` param, else the legacy socket's ticket profile, else the
-    launch profile; that profile's ``bot_mode`` config (envelope TTL) applies too. ``message_agent``
-    reads its roster from, queues in, and waits under the SENDER's own home (``tools/bot_mode_dm.py``),
-    and the canonical session door serves that same folder (``gateway/session_bot.relay_operation``);
-    the install root here split a named profile's relay across two folders and its DMs were never
-    drained (#146035). A routed profile this install lacks is refused by the scope (4064)."""
-    from hermes_constants import get_hermes_home
-    return get_hermes_home()
+@contextlib.contextmanager
+def _mailbox(params: dict):
+    """Yield the relay folder (roster/outbox/replies) of the profile this request is served for —
+    the routed ``profile`` param, else the legacy socket's ticket profile, else this process's own
+    profile — with HERMES_HOME bound to it, so ITS ``bot_mode`` config (envelope TTL) applies.
+    ``message_agent`` reads its roster from, queues in, and waits under the SENDER's own home
+    (``tools/bot_mode_dm.py``), and the canonical session door serves that same folder
+    (``gateway/session_bot.relay_operation``); the install root here split a named profile's relay
+    across two folders and its DMs were never drained (#146035). A routed name resolves against
+    the same install root the producer and ``deliver`` use (``_roster``), so a custom HERMES_HOME
+    is its own ``default``; one this install lacks raises ``LookupError``."""
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+    profile = str(params.get("profile") or "").strip().lower()
+    if profile:
+        from tools.bot_mode_probe import _profile_for_handle, _roster
+        roster = dict(_roster(_relay_root()))
+        home = roster.get(_profile_for_handle("hermes", roster) if profile == "hermes" else profile)
+        if home is None:
+            raise LookupError(f"no profile '{profile}' on this gateway")
+    else:
+        from tui_gateway.ws_legacy_fallback import connection_profile_home
+        home = connection_profile_home() or get_hermes_home()
+    token = set_hermes_home_override(str(home))
+    try:
+        yield Path(home)
+    finally:
+        reset_hermes_home_override(token)
 
 
 # Desktop deadline mirror; no retry runs here. The owner gateway retries a transiently failed
@@ -39,8 +57,7 @@ TURN_MAX_ATTEMPTS = 2  # first admission + the owner's one transient-failure ret
 
 
 @method("bot_relay.roster.sync")
-@_registry.profile_scoped
-def _(rid, params: dict, _root=_mailbox_home) -> dict:
+def _(rid, params: dict, _mailbox=_mailbox) -> dict:
     """Replace this gateway's view of agents on OTHER connections → ``{count}`` accepted rows
     (``agents`` rows ``{profile, handle, connection_id, ...}``; invalid rows are dropped).
     A roster that changes is logged with its rows: a peer connection listed with this machine's
@@ -49,31 +66,34 @@ def _(rid, params: dict, _root=_mailbox_home) -> dict:
     try:
         from tools.bot_relay import read_remote_roster, write_remote_roster
 
-        home = _root()
+        with _mailbox(params) as home:
+            def trace() -> str:
+                rows = read_remote_roster(home)
+                return f"n={len(rows)} [" + " ".join(
+                    f"{r.get('connection_id')}/{r.get('profile')}={r.get('title')!r}" for r in rows) + "]"
 
-        def trace() -> str:
-            rows = read_remote_roster(home)
-            return f"n={len(rows)} [" + " ".join(
-                f"{r.get('connection_id')}/{r.get('profile')}={r.get('title')!r}" for r in rows) + "]"
-
-        before = trace()
-        count = write_remote_roster(home, params.get("agents"))
-        after = trace()
+            before = trace()
+            count = write_remote_roster(home, params.get("agents"))
+            after = trace()
         if after != before:
             logging.getLogger(__name__).info("bot_relay roster changed: %s -> %s", before, after)
         return _ok(rid, {"count": count})
+    except LookupError as e:
+        return _err(rid, 4092, str(e), data={'reason': 'unknown_profile'})
     except Exception as e:
         return _err(rid, 5090, str(e))
 
 
 @method("bot_relay.outbox.drain")
-@_registry.profile_scoped
-def _(rid, params: dict, _root=_mailbox_home) -> dict:
+def _(rid, params: dict, _mailbox=_mailbox) -> dict:
     """Claim every pending cross-connection envelope queued here → ``{envelopes}``; claimed
     envelopes move to ``claimed/`` atomically so concurrent drains can't double-deliver."""
     try:
         from tools.bot_relay import claim_pending_envelopes
-        return _ok(rid, {"envelopes": claim_pending_envelopes(_root())})
+        with _mailbox(params) as home:
+            return _ok(rid, {"envelopes": claim_pending_envelopes(home)})
+    except LookupError as e:
+        return _err(rid, 4092, str(e), data={'reason': 'unknown_profile'})
     except Exception as e:
         return _err(rid, 5091, str(e))
 
@@ -138,8 +158,7 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
 
 
 @method("bot_relay.reply")
-@_registry.profile_scoped
-def _(rid, params: dict, _root=_mailbox_home) -> dict:
+def _(rid, params: dict, _mailbox=_mailbox) -> dict:
     """Write a relayed ``reply`` and/or ``error`` (+ optional typed ``reason``, see
     ``tools.bot_failure_reasons``) for envelope ``id`` so the sender-side waiter picks it up."""
     envelope_id = str(params.get("id") or "").strip()
@@ -147,9 +166,12 @@ def _(rid, params: dict, _root=_mailbox_home) -> dict:
         return _err(rid, 4093, "id required")
     try:
         from tools.bot_relay import write_reply
-        write_reply(_root(), envelope_id, reply=str(params.get("reply") or ""),
-                    error=str(params.get("error") or ""), reason=str(params.get("reason") or ""))
+        with _mailbox(params) as home:
+            write_reply(home, envelope_id, reply=str(params.get("reply") or ""),
+                        error=str(params.get("error") or ""), reason=str(params.get("reason") or ""))
         return _ok(rid, {"ok": True})
+    except LookupError as e:
+        return _err(rid, 4092, str(e), data={'reason': 'unknown_profile'})
     except ValueError as e:
         return _err(rid, 4094, str(e))
     except Exception as e:
