@@ -33549,6 +33549,18 @@
             ],
             "default": null,
             "title": "Online"
+          },
+          "install_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Install Id"
           }
         },
         "title": "RelayAgentRow",

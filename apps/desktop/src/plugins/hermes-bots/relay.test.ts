@@ -1746,7 +1746,17 @@ describe('each Desktop pushes its roster as its own slice (#139219)', () => {
     hostMock.profileRoutes = vi.fn(async () => [route('local', { mode: 'local' }), route('srv')])
   })
 
-  function serve(options: { install?: string; strictSync?: boolean } = {}) {
+  // What an older gateway's strict door answers for the unknown key: the canonical door a typed
+  // invalid_params, the tui_gateway door a bare 4000 naming the field.
+  const REFUSALS = {
+    canonical: () => Object.assign(new Error('invalid_params'), { code: 4001, data: { fields: ['publisher'], reason: 'invalid_params' } }),
+    tui: () =>
+      Object.assign(new Error('invalid params for bot_relay.roster.sync: publisher: Extra inputs are not permitted'), {
+        code: 4000
+      })
+  }
+
+  function serve(options: { install?: string; strictSync?: keyof typeof REFUSALS } = {}) {
     return respondWith(call => {
       if (call.method === 'profiles.list') {
         return call.connectionId === 'local'
@@ -1755,7 +1765,7 @@ describe('each Desktop pushes its roster as its own slice (#139219)', () => {
       }
 
       if (call.method === 'bot_relay.roster.sync' && options.strictSync && 'publisher' in call.params) {
-        throw Object.assign(new Error('invalid_params'), { data: { fields: ['publisher'], reason: 'invalid_params' } })
+        throw REFUSALS[options.strictSync]()
       }
 
       return {}
@@ -1803,18 +1813,45 @@ describe('each Desktop pushes its roster as its own slice (#139219)', () => {
     stopBotRelay()
   })
 
-  it('pushes the legacy way to a gateway whose strict door predates the publisher', async () => {
-    const calls = serve({ install: INSTALL, strictSync: true })
+  it.each(['canonical', 'tui'] as const)(
+    'pushes the legacy way to a gateway whose %s door predates the publisher, clears included',
+    async door => {
+      const calls = serve({ install: INSTALL, strictSync: door })
+      const { startBotRelay, stopBotRelay } = await loadRelay()
+
+      startBotRelay()
+      await vi.advanceTimersByTimeAsync(0)
+
+      const pushedTo = (id: string) => syncs(calls).filter(call => call.connectionId === id).map(call => call.params)
+
+      expect(pushedTo('srv')).toEqual([
+        { agents: [expect.objectContaining({ profile: 'ops' })], publisher: 'local-0123456789ab' },
+        { agents: [expect.objectContaining({ profile: 'ops' })] }
+      ])
+
+      hostMock.profileRoutes = vi.fn(async () => [route('srv')])
+      await vi.advanceTimersByTimeAsync(60_000)
+      await vi.advanceTimersByTimeAsync(60_000)
+
+      // the clear lands (legacy form) and is spent: no third attempt on the next tick
+      expect(pushedTo('srv').slice(2)).toEqual([{ agents: [], publisher: 'local-0123456789ab' }, { agents: [] }])
+
+      stopBotRelay()
+    }
+  )
+
+  it('stamps each row with the install its gateway reported', async () => {
+    const calls = serve({ install: INSTALL })
     const { startBotRelay, stopBotRelay } = await loadRelay()
 
     startBotRelay()
     await vi.advanceTimersByTimeAsync(0)
 
-    const pushedTo = (id: string) => syncs(calls).filter(call => call.connectionId === id).map(call => call.params)
-
-    expect(pushedTo('srv')).toEqual([
-      { agents: [expect.objectContaining({ profile: 'ops' })], publisher: 'local-0123456789ab' },
-      { agents: [expect.objectContaining({ profile: 'ops' })] }
+    expect(syncs(calls).find(call => call.connectionId === 'local')?.params.agents).toEqual([
+      expect.objectContaining({ connection_id: 'srv', install_id: 'f'.repeat(32), profile: 'scout' })
+    ])
+    expect(syncs(calls).find(call => call.connectionId === 'srv')?.params.agents).toEqual([
+      expect.objectContaining({ connection_id: 'local-0123456789ab', install_id: INSTALL, profile: 'ops' })
     ])
 
     stopBotRelay()

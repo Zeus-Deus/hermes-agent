@@ -1927,6 +1927,7 @@ export interface RelayAgentRow {
   title?: string | null
   description?: string | null
   online?: boolean | null
+  install_id?: string | null
   [key: string]: unknown
 }
 export interface BotRelayRosterSyncResult {

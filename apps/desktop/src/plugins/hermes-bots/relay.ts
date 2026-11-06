@@ -141,6 +141,9 @@ interface RelayAgentRow {
   connection_label: string
   description: string
   handle: string
+  /** The answering gateway's install id: lets the receiving gateway tell one machine two
+   *  Desktops relay from two machines both Desktops call by the same connection name. */
+  install_id?: string
   profile: string
   title: string
 }
@@ -217,13 +220,22 @@ function rosterPublisher(): string {
   return localRelayId !== null && LOCAL_RELAY_ID_RE.test(localRelayId) ? localRelayId : RUN_PUBLISHER_ID
 }
 
-/** Push `agents` as this Desktop's roster slice. A gateway from before the slices refuses the
- *  unknown `publisher` key (invalid_params) on its strict door: push it the legacy way. */
+/** A gateway from before the slices refusing the unknown `publisher` key: the canonical door
+ *  answers a typed invalid_params, the tui_gateway door a 4000 naming the field. */
+function refusedPublisher(error: any): boolean {
+  return (
+    String(error?.data?.reason || '') === 'invalid_params' ||
+    (error?.code === 4000 && String(error?.message || '').includes('publisher'))
+  )
+}
+
+/** Push `agents` as this Desktop's roster slice; to a gateway from before the slices, the
+ *  legacy way (it replaces its whole roster, as it always did). */
 async function pushRelayRoster(route: ProfileRoute, agents: RelayAgentRow[]) {
   try {
     await host.requestProfile(route, 'bot_relay.roster.sync', { agents, publisher: rosterPublisher() })
   } catch (error: any) {
-    if (String(error?.data?.reason || '') !== 'invalid_params') {
+    if (!refusedPublisher(error)) {
       throw error
     }
 
@@ -439,6 +451,10 @@ async function relayAgentsOn(
 
     noteRelayInstall(connection.id, res?.install_id)
 
+    const install = String(res?.install_id || '')
+      .trim()
+      .toLowerCase()
+
     const rows = profiles
       .map(profile => ({
         profile: String(profile?.name || ''),
@@ -449,7 +465,8 @@ async function relayAgentsOn(
         connection_id: relayWireId(connection.id),
         connection_label: label,
         title: String(profile?.ui_meta?.['hermes-bots']?.title || profile?.display_name || ''),
-        description: String(profile?.description || '')
+        description: String(profile?.description || ''),
+        ...(INSTALL_ID_RE.test(install) ? { install_id: install } : {})
       }))
       .filter(row => row.profile)
 

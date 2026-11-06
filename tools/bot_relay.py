@@ -81,6 +81,7 @@ class EnvelopeRefusedError(RuntimeError):
 # Profile names, handles and connection ids share one shape (also the local
 # ``message_agent`` target grammar in ``tools/bot_mode_dm.py``).
 _HANDLE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+_INSTALL_ID_RE = re.compile(r"^[0-9a-f]{16,64}$")
 
 
 def own_relay_connection_id() -> str:
@@ -146,6 +147,11 @@ def _normalize_roster_row(row: Any) -> Optional[dict]:
     # Liveness kept only when a real bool: absent == unknown == fail-open on enqueue.
     if isinstance(row.get("online"), bool):
         out["online"] = row["online"]
+    # The install the row's machine reported to the pushing Desktop: tells two Desktops' rows
+    # for ONE machine from rows for two machines each Desktop happens to call the same name.
+    install = str(row.get("install_id") or "").strip().lower()
+    if _INSTALL_ID_RE.match(install):
+        out["install_id"] = install
     return out
 
 
@@ -153,12 +159,15 @@ def _normalize_roster_row(row: Any) -> Optional[dict]:
 # Every Desktop that relays for this gateway pushes ITS view of the other connections. One
 # whole-file roster made the last pusher win, so with two Desktops a bare name flapped between
 # their machines every push. Each push now replaces only its publisher's slice; readers see
-# the union of the slices pushed within ROSTER_FRESH_SECONDS, rows deduped by
-# (connection_id, profile). A Desktop that names no publisher (older builds) owns the
+# the union of the slices pushed within ROSTER_FRESH_SECONDS, one row per (connection_id,
+# profile) and machine. A Desktop that names no publisher (older builds) owns the
 # LEGACY_PUBLISHER slice, so its push still replaces what it pushed last time. The top-level
 # ``agents`` key stays the merged union for readers that predate the slices.
 LEGACY_PUBLISHER = "legacy"
 ROSTER_PUBLISHERS_MAX = 32  # live Desktops per gateway, bounded against a client inventing ids
+ROSTER_LOCK_TIMEOUT_SECONDS = 10.0  # a wedged holder fails this push; the Desktop re-pushes next tick
+
+_Slice = tuple[float, list[dict]]
 
 
 def _publisher_key(publisher: Any) -> str:
@@ -173,7 +182,7 @@ def _clean_rows(rows: Any) -> list[dict]:
     return [by_key[k] for k in sorted(by_key)]
 
 
-def _roster_slices(root: Path | str) -> dict[str, tuple[float, list[dict]]]:
+def _roster_slices(root: Path | str) -> dict[str, _Slice]:
     """``{publisher: (updated_at, rows)}`` from roster.json; a file without slices (written before
     them) is the legacy publisher's. A slice is never fresher than the file holding it, so an
     old file reads stale whatever it claims. Raises on a missing/unreadable file."""
@@ -193,60 +202,73 @@ def _roster_slices(root: Path | str) -> dict[str, tuple[float, list[dict]]]:
     if not isinstance(publishers, dict):
         agents = data.get("agents")
         return {LEGACY_PUBLISHER: (_stamp(data.get("updated_at")), _clean_rows(agents))} if isinstance(agents, list) else {}
-    out: dict[str, tuple[float, list[dict]]] = {}
+    out: dict[str, _Slice] = {}
     for key, entry in publishers.items():
         if isinstance(entry, dict) and isinstance(entry.get("agents"), list) and _publisher_key(key) == key:
             out[key] = (_stamp(entry.get("updated_at")), _clean_rows(entry["agents"]))
     return out
 
 
-def _live_slices(slices: dict[str, tuple[float, list[dict]]], now: float, *, fresh_only: bool) -> list[tuple[float, list[dict]]]:
-    """The slices a reader merges, newest first: those pushed within ROSTER_FRESH_SECONDS. With
-    none fresh, the newest slice alone (unless ``fresh_only``) — what the last Desktop to push
-    left, exactly as the single-file roster kept it once every Desktop had gone."""
-    ordered = sorted(slices.values(), key=lambda item: item[0], reverse=True)
-    fresh = [item for item in ordered if now - item[0] <= ROSTER_FRESH_SECONDS]
-    return fresh if fresh or fresh_only else ordered[:1]
+def _live_slices(slices: dict[str, _Slice], now: float, *, fresh_only: bool) -> list[list[dict]]:
+    """The slices' rows a reader merges, in publisher order (so a merge never depends on who
+    pushed last): those pushed within ROSTER_FRESH_SECONDS. With none fresh, the newest slice
+    alone (unless ``fresh_only``) — what the last Desktop to push left, exactly as the
+    single-file roster kept it once every Desktop had gone."""
+    fresh = [slices[key][1] for key in sorted(slices) if now - slices[key][0] <= ROSTER_FRESH_SECONDS]
+    if fresh or fresh_only or not slices:
+        return fresh
+    return [max(slices.values(), key=lambda item: item[0])[1]]
 
 
-def _merge_slices(slices: list[tuple[float, list[dict]]]) -> list[dict]:
-    """Union of ``slices`` (newest first), one row per (connection_id, profile): the newest
-    publisher's row, online when ANY publisher sees it online, unknown when any does not know,
-    offline only when every publisher listing it says so."""
-    merged: dict[tuple[str, str], dict] = {}
-    online: dict[tuple[str, str], list[Any]] = {}
-    for _stamp, rows in slices:
+def _merge_slices(slices: list[list[dict]]) -> list[dict]:
+    """Union of ``slices``: one row per (connection_id, profile) and machine. A non-local
+    connection id is a label slug from ONE Desktop's registry, so two Desktops can each call a
+    different machine ``homelab``: rows whose machines report different install ids stay
+    separate rows (a name they share is ambiguous, never one of them); a row without an install
+    id joins the first. Per machine: the first publisher's row, online when ANY publisher sees it
+    online, unknown when any does not know, offline only when every publisher listing it says so."""
+    groups: dict[tuple[str, str], list[list[dict]]] = {}
+    for rows in slices:
         for row in rows:
-            key = (row["connection_id"], row["profile"])
-            merged.setdefault(key, row)
-            online.setdefault(key, []).append(row.get("online"))
+            candidates = groups.setdefault((row["connection_id"], row["profile"]), [])
+            install = row.get("install_id")
+            group = next((g for g in candidates if install is None or _group_install(g) in (None, install)), None)
+            if group is None:
+                candidates.append([row])
+            else:
+                group.append(row)
     out = []
-    for key in sorted(merged):
-        row = {k: v for k, v in merged[key].items() if k != "online"}
-        seen = online[key]
-        if True in seen:
-            row["online"] = True
-        elif all(value is False for value in seen):
-            row["online"] = False
-        out.append(row)
+    for key in sorted(groups):
+        for group in groups[key]:
+            merged = {k: v for k, v in group[0].items() if k not in ("online", "install_id")}
+            if (install := _group_install(group)) is not None:
+                merged["install_id"] = install
+            seen = [row.get("online") for row in group]
+            if True in seen:
+                merged["online"] = True
+            elif all(value is False for value in seen):
+                merged["online"] = False
+            out.append(merged)
     return out
+
+
+def _group_install(group: list[dict]) -> Optional[str]:
+    return next((row["install_id"] for row in group if row.get("install_id")), None)
 
 
 @contextlib.contextmanager
 def _roster_lock(base: Path) -> Iterator[None]:
-    """Serialise roster read-modify-writes across processes (two Desktops push concurrently,
-    through either relay door). Without ``fcntl`` (Windows) it is a no-op."""
+    """Serialise roster read-modify-writes across threads and processes (two Desktops push
+    concurrently, through either relay door), on POSIX and Windows alike."""
+    from pm.filesystem import lock_path
+
+    fd = lock_path(base / f"{ROSTER_FILE}.lock", timeout=ROSTER_LOCK_TIMEOUT_SECONDS)
+    if fd is None:
+        raise TimeoutError("the relay roster is locked by another push; the Desktop retries on its next sync")
     try:
-        import fcntl
-    except ImportError:  # pragma: no cover — Windows
-        yield
-        return
-    fd = os.open(base / f"{ROSTER_FILE}.lock", os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
-        os.close(fd)  # releases the flock
+        os.close(fd)  # releases the lock
 
 
 def write_remote_roster(root: Path | str, rows: Any, publisher: Any = None) -> int:

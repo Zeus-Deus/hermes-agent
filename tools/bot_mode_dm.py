@@ -399,9 +399,16 @@ def _try_relay_delivery(root: Path, raw_target: str, content: str, me: str, *,
             return None
         if match == "ambiguous":
             want = raw_target.strip().lstrip("@").partition("@")[0].lower()
-            forms = ", ".join(form for r, form in zip(roster, remote_target_forms(roster, local_taken_forms(root)))
-                              if want in _target_aliases(r))
-            return _err(f"'{raw_target}' exists on several connected machines — disambiguate with one of: {forms}.")
+            forms = [form for r, form in zip(roster, remote_target_forms(roster, local_taken_forms(root)))
+                     if want in _target_aliases(r)]
+            # Two Desktops can each give a DIFFERENT machine the same connection name (#139219):
+            # then even the qualified form names both, and only renaming one connection helps.
+            shared = sorted({form for form in forms if forms.count(form) > 1})
+            note = (f" {', '.join(shared)} names a different machine on each Desktop relaying it (they gave "
+                    "those machines the same connection name) — rename one of those connections in its "
+                    "Desktop so the names differ.") if shared else ""
+            return _err(f"'{raw_target}' exists on several connected machines — disambiguate with one of: "
+                        f"{', '.join(dict.fromkeys(forms))}.{note}")
         try:
             envelope = enqueue_envelope(root, target=match, message=content, sender_profile=me,
                                        sender_handle=_handle(me, [n for n, _d in _roster(_hermes_root(root))]))

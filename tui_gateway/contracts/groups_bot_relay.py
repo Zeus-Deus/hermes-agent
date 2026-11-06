@@ -587,6 +587,9 @@ class RelayAgentRow(Params):
     title: str | None = None
     description: str | None = None
     online: bool | None = None
+    # The answering gateway's install id: one machine relayed by two Desktops vs two machines
+    # both Desktops call by the same connection name.
+    install_id: str | None = None
     model_config = Params.model_config | {"extra": "allow"}
 
 

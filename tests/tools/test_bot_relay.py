@@ -12,6 +12,7 @@ relay adds to message_agent:
   the injection/execution gates key on managed-install, not section text.
 """
 
+import contextlib
 import json
 import os as _os2
 import re
@@ -227,6 +228,59 @@ def test_liveness_merges_publishers(root):
     bot_relay.write_remote_roster(root, [_row("scout", "vps")], "local-bbbbbbbbbbbb")
     assert bot_relay._target_liveness(root, _row("scout", "vps")) is None
     assert bot_relay._target_liveness(root, _row("ghost", "vps")) is False
+
+
+def test_one_name_for_two_machines_across_desktops_stays_two_rows(root, tmp_path, monkeypatch):
+    """Non-local connection ids are one Desktop's registry slugs: two Desktops can each call a
+    DIFFERENT machine ``homelab``. Rows whose machines report different install ids stay apart, so
+    ``scout`` / ``scout@homelab`` are ambiguous (never whichever pushed last); the same machine seen
+    by both Desktops is one row, and a row without an install id joins it."""
+    x, y = "1" * 32, "2" * 32
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id=x)], "local-aaaaaaaaaaaa")
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id=y)], "local-bbbbbbbbbbbb")
+    roster = bot_relay.read_remote_roster(root)
+    assert sorted(r["install_id"] for r in roster) == [x, y]
+    assert bot_relay.resolve_remote_target("scout", roster) == "ambiguous"
+    assert bot_relay.resolve_remote_target("scout@homelab", roster) == "ambiguous"
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id=x)], "local-bbbbbbbbbbbb")
+    bot_relay.write_remote_roster(root, [_row("scout", "homelab")], "legacy")
+    [row] = bot_relay.read_remote_roster(root)
+    assert row["install_id"] == x
+
+    (tmp_path / "gw").mkdir()
+    home = _managed_home(tmp_path / "gw")
+    bot_relay.write_remote_roster(home, [_row("scout", "homelab", install_id=x)], "local-aaaaaaaaaaaa")
+    bot_relay.write_remote_roster(home, [_row("scout", "homelab", install_id=y)], "local-bbbbbbbbbbbb")
+    monkeypatch.setattr("tools.bot_mode_dm._spawn_delivery", lambda *a, **k: json.dumps({"status": "queued"}))
+    err = json.loads(message_agent_tool(target="scout@homelab", message="hi", agent=_FakeAgent(home)))["error"]
+    assert "rename one of those connections" in err and err.count("scout@homelab") == 3
+    assert bot_relay.claim_pending_envelopes(home) == []
+
+
+def test_concurrent_pushes_never_lose_a_publisher(root, monkeypatch):
+    """Pushes from several Desktops land concurrently (the gateway serves RPCs on a worker pool):
+    the read-modify-write is serialised, so every publisher's slice survives."""
+    import threading
+
+    real = bot_relay._roster_slices
+    # Unserialised, every writer would read the same old file before any writes (the barrier
+    # lines them up there); serialised, the first reader's wait breaks it and the rest go on.
+    all_read = threading.Barrier(6)
+
+    def lined_up(*a, **k):
+        out = real(*a, **k)
+        with contextlib.suppress(threading.BrokenBarrierError):
+            all_read.wait(timeout=0.5)
+        return out
+
+    monkeypatch.setattr(bot_relay, "_roster_slices", lined_up)
+    threads = [threading.Thread(target=bot_relay.write_remote_roster,
+                                args=(root, [_row(f"p{n}", "vps")], f"desktop-{n:012x}")) for n in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(r["profile"] for r in bot_relay.read_remote_roster(root)) == [f"p{n}" for n in range(6)]
 
 
 def test_publisher_slices_are_bounded(root):
