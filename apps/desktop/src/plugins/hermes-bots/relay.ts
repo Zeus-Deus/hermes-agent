@@ -658,6 +658,9 @@ async function publishRelayRoster(connection: RelayConnection, rows: RelayAgentR
   const key = relayRouteKey(connection)
 
   let landed: 'legacy' | 'slice'
+  // The gateway stamps the slice somewhere between the request and its answer, and the answer can
+  // be processed much later (a renderer suspended meanwhile): age the slice from the request.
+  const sent = Date.now()
 
   try {
     landed = await pushRelayRoster(connection.route, rows)
@@ -675,11 +678,10 @@ async function publishRelayRoster(connection: RelayConnection, rows: RelayAgentR
 
   // A gateway upgraded under this window takes its first slice with the rows its legacy push had.
   const pushed = `${landed}:${JSON.stringify(rows)}`
-  const now = Date.now()
   const last = pushedRosters.get(key)
-  const changed = !last || last.rows !== pushed || now - last.at > RELAY_SLICE_EXPIRY_MS
+  const changed = !last || last.rows !== pushed || Date.now() - last.at > RELAY_SLICE_EXPIRY_MS
 
-  pushedRosters.set(key, { at: now, rows: pushed })
+  pushedRosters.set(key, { at: sent, rows: pushed })
 
   if (changed && drainedSinceSlice.delete(key)) {
     noteRelayOutboxWork({ connectionId: connection.id })

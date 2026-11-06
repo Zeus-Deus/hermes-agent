@@ -678,6 +678,75 @@ describe('each Desktop pushes its roster as its own slice (#139219)', () => {
     expect(calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.connectionId)).toEqual(['srv'])
   })
 
+  it('ages a slice from its push request: an answer processed after a suspend does not refresh it', async () => {
+    // The gateway wrote the slice, then the renderer slept past the freshness window before it
+    // processed the answer; the slice expired on the gateway meanwhile.
+    let landedAt = 0
+    let answerPush: (() => void) | null = null
+    let holdNextPush = true
+
+    const envelope = {
+      canonical_delivery_v1: true,
+      from_handle: 'ops',
+      from_profile: 'ops',
+      id: 'env-a',
+      message: 'hi',
+      target_connection: 'srv',
+      target_profile: 'scout',
+      target_publishers: ['desktop-aaaaaaaaaaaa', PUBLISHER]
+    }
+
+    const calls = respondWith(call => {
+      if (call.method === 'profiles.list') {
+        return call.connectionId === 'local'
+          ? { install_id: INSTALL, profiles: [{ name: 'ops' }] }
+          : { install_id: 'f'.repeat(32), profiles: [{ name: 'scout' }] }
+      }
+
+      if (call.method === 'bot_relay.roster.sync' && call.connectionId === 'local') {
+        landedAt = Date.now()
+
+        if (holdNextPush) {
+          holdNextPush = false
+
+          return new Promise(resolve => {
+            answerPush = () => resolve({ count: 1 })
+          })
+        }
+
+        return { count: 1 }
+      }
+
+      if (call.method === 'bot_relay.outbox.drain' && call.connectionId === 'local') {
+        return { envelopes: Date.now() - landedAt <= 600_000 ? [envelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { status: 'settled', delivery_id: call.params.id, admission_id: 'admission', reply: 'done' }
+      }
+
+      return { envelopes: [] }
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(answerPush).not.toBeNull()
+    vi.setSystemTime(Date.now() + 700_000) // suspended after the gateway wrote the slice
+    answerPush!()
+    await vi.advanceTimersByTimeAsync(0)
+    await pushAndSettle(1, { connectionId: 'local' })
+
+    expect(calls.filter(call => call.method === 'bot_relay.deliver')).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(60_000) // the roster tick refreshes the same rows
+    await vi.advanceTimersByTimeAsync(RELAY_PUSH_DEBOUNCE_MS + 10)
+    stopBotRelay()
+
+    expect(calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.connectionId)).toEqual(['srv'])
+  })
+
   it('a gateway upgraded under the window: its first slice counts as a change though the rows match', async () => {
     // Before the upgrade the push fell back to the legacy way; the upgraded gateway offers mail
     // naming this window's machine only once this window's own slice lists it.
