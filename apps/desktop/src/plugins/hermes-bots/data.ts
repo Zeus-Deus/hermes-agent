@@ -836,15 +836,17 @@ export function socketConnectionId(): string {
   return String(host.activeConnectionId?.() || '').trim()
 }
 
-/** The snapshot's serving connection: the query key, when the request was
- *  routed to it or the ambient socket provably serves it. Read before asking. */
+/** The connection that answers the snapshot's profiles.list: the keyed
+ *  route's, else the route requestForBot picks for the bare bot, else the
+ *  live socket's — never the query key on trust. Read before asking. */
 function servedBy(
-  activeConnectionId: null | string | undefined,
-  routed: boolean
+  route: null | ProfileRoute | undefined,
+  activeBot: { name: string }
 ): Pick<RosterSnapshot, 'servedConnectionId'> {
-  const servedConnectionId = String(activeConnectionId || '').trim()
+  const target = route ?? resolveBotConnectionRoute(activeBot).route
+  const servedConnectionId = target ? String(target.connectionId || '').trim() : socketConnectionId()
 
-  return servedConnectionId && (routed || socketConnectionId() === servedConnectionId) ? { servedConnectionId } : {}
+  return servedConnectionId ? { servedConnectionId } : {}
 }
 
 async function fetchRosterSnapshot(activeConnectionId: null | string | undefined): Promise<RosterSnapshot> {
@@ -896,7 +898,7 @@ async function fetchRosterSnapshot(activeConnectionId: null | string | undefined
     ? routes.find(r => r?.connectionId === activeConnectionId && r?.profile === activeBot.name)
     : undefined
 
-  const served = servedBy(activeConnectionId, Boolean(route))
+  const served = servedBy(route, activeBot)
 
   const local = route
     ? await host.requestProfile<RosterSnapshot>(route, 'profiles.list', {})

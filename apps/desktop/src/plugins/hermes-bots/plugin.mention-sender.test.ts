@@ -365,6 +365,34 @@ describe('mention targets follow the focused chat owner, not the active connecti
     }
   )
 
+  it.each([
+    ['the cold profiles.list fallback', true],
+    ['a prime with no keyed route', false]
+  ])('credits %s to the socket that answered for a sender on the published connection', async (_label, primeFails) => {
+    live.socket = 'server'
+    live.owner = { connectionId: 'local', profile: 'default' }
+    live.focused = 'default'
+    hostMock.request.mockImplementation(async (...args: unknown[]) => {
+      if (args[0] !== 'profiles.list') {
+        return {}
+      }
+
+      if (primeFails && (args[1] as Record<string, unknown>)?.include_sessions !== false) {
+        throw new Error('offline')
+      }
+
+      return { profiles: [{ name: 'default' }, { name: 'writer' }] }
+    })
+    hostMock.agents.mockRejectedValue(new Error('offline'))
+
+    const { handler } = await contributions({ profiles: null })
+    const { text } = await handler({ text: 'ask @writer and @hermes' })
+
+    // The server's rows, read by this device's default: both need the qualifier.
+    expect(text).toContain('(message_agent target: "writer@server")')
+    expect(text).toContain('(message_agent target: "default@server")')
+  })
+
   it('places rows the union enumeration failed to scope on the gateway that served them', async () => {
     // profiles.list answers, host.agents fails: the cached rows carry no connectionId.
     hostMock.request.mockResolvedValue({ profiles: [{ name: 'default' }, { name: 'writer' }] })
