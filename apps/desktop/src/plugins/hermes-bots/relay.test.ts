@@ -384,11 +384,11 @@ describe('relay-route socket retention (#93594)', () => {
     // route, since each profile home holds its own roster; the local source is never polled.
     // Two profiles of one connection are not peers: no profiles.list, nothing pinned.
     expect(calls).toEqual([
-      { connectionId: 'remote-primary', method: 'bot_relay.roster.sync', params: { agents: [] }, route: route('remote-primary', { primary: true }) },
+      { connectionId: 'remote-primary', method: 'bot_relay.roster.sync', params: { agents: [], publisher: expect.any(String) }, route: route('remote-primary', { primary: true }) },
       {
         connectionId: 'remote-primary',
         method: 'bot_relay.roster.sync',
-        params: { agents: [] },
+        params: { agents: [], publisher: expect.any(String) },
         route: route('remote-primary', { primary: true, profile: 'research' })
       }
     ])
@@ -807,7 +807,7 @@ describe('the roster loop pushes the OTHER connections’ agents', () => {
     await vi.advanceTimersByTimeAsync(0)
 
     expect(calls).toEqual([
-      expect.objectContaining({ connectionId: 'a', method: 'bot_relay.roster.sync', params: { agents: [] } })
+      expect.objectContaining({ connectionId: 'a', method: 'bot_relay.roster.sync', params: { agents: [], publisher: expect.any(String) } })
     ])
 
     await vi.advanceTimersByTimeAsync(60_000)
@@ -830,7 +830,7 @@ describe('the roster loop pushes the OTHER connections’ agents', () => {
     hostMock.profileRoutes = vi.fn(async () => [route('a')])
     await vi.advanceTimersByTimeAsync(60_000)
     expect(calls).toEqual([
-      expect.objectContaining({ connectionId: 'a', method: 'bot_relay.roster.sync', params: { agents: [] } })
+      expect.objectContaining({ connectionId: 'a', method: 'bot_relay.roster.sync', params: { agents: [], publisher: expect.any(String) } })
     ])
 
     stopBotRelay()
@@ -1166,7 +1166,7 @@ describe('the roster loop forgets a machine that left', () => {
     await vi.advanceTimersByTimeAsync(60_000)
 
     const syncs = calls.filter(call => call.method === 'bot_relay.roster.sync')
-    expect(syncs).toEqual([expect.objectContaining({ connectionId: 'a', params: { agents: [] } })])
+    expect(syncs).toEqual([expect.objectContaining({ connectionId: 'a', params: { agents: [], publisher: expect.any(String) } })])
 
     // Once, not on every tick.
     calls.length = 0
@@ -1219,7 +1219,7 @@ describe('the roster loop forgets a machine that left', () => {
     clearFails = false
     await vi.advanceTimersByTimeAsync(60_000)
     expect(calls.filter(call => call.method === 'bot_relay.roster.sync')).toEqual([
-      expect.objectContaining({ connectionId: 'a', params: { agents: [] } })
+      expect.objectContaining({ connectionId: 'a', params: { agents: [], publisher: expect.any(String) } })
     ])
 
     // And once it lands it is spent, exactly as before.
@@ -1731,6 +1731,91 @@ describe("the Desktop's own machine goes out under its install id, never the sha
     await pushAndSettle()
 
     expect(calls.filter(call => call.method === 'bot_relay.deliver' || call.method === 'bot_relay.reply')).toEqual([])
+
+    stopBotRelay()
+  })
+})
+
+describe('each Desktop pushes its roster as its own slice (#139219)', () => {
+  // Two Desktops relaying for one gateway used to overwrite each other's whole roster every
+  // push, so a bare name resolved to whichever machine pushed last. Each push now names its
+  // publisher and the gateway replaces only that Desktop's slice.
+  const INSTALL = '0123456789abcdef0123456789abcdef'
+
+  beforeEach(() => {
+    hostMock.profileRoutes = vi.fn(async () => [route('local', { mode: 'local' }), route('srv')])
+  })
+
+  function serve(options: { install?: string; strictSync?: boolean } = {}) {
+    return respondWith(call => {
+      if (call.method === 'profiles.list') {
+        return call.connectionId === 'local'
+          ? { install_id: options.install, profiles: [{ name: 'ops' }] }
+          : { install_id: 'f'.repeat(32), profiles: [{ name: 'scout' }] }
+      }
+
+      if (call.method === 'bot_relay.roster.sync' && options.strictSync && 'publisher' in call.params) {
+        throw Object.assign(new Error('invalid_params'), { data: { fields: ['publisher'], reason: 'invalid_params' } })
+      }
+
+      return {}
+    })
+  }
+
+  const syncs = (calls: RelayCall[]) => calls.filter(call => call.method === 'bot_relay.roster.sync')
+
+  it('names this machine’s relay id as the publisher of every push', async () => {
+    const calls = serve({ install: INSTALL })
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(syncs(calls).map(call => [call.connectionId, call.params.publisher])).toEqual([
+      ['local', 'local-0123456789ab'],
+      ['srv', 'local-0123456789ab']
+    ])
+
+    // the sole-connection clear empties only this Desktop's slice
+    hostMock.profileRoutes = vi.fn(async () => [route('srv')])
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(syncs(calls).slice(2)).toEqual([
+      expect.objectContaining({ connectionId: 'srv', params: { agents: [], publisher: 'local-0123456789ab' } })
+    ])
+
+    stopBotRelay()
+  })
+
+  it('keeps one stable stand-in publisher while its machine id is unknown', async () => {
+    const calls = serve()
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    const publishers = new Set(syncs(calls).map(call => call.params.publisher))
+
+    expect(syncs(calls).length).toBeGreaterThanOrEqual(4)
+    expect([...publishers]).toEqual([expect.stringMatching(/^desktop-[0-9a-f]{12}$/)])
+
+    stopBotRelay()
+  })
+
+  it('pushes the legacy way to a gateway whose strict door predates the publisher', async () => {
+    const calls = serve({ install: INSTALL, strictSync: true })
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+
+    const pushedTo = (id: string) => syncs(calls).filter(call => call.connectionId === id).map(call => call.params)
+
+    expect(pushedTo('srv')).toEqual([
+      { agents: [expect.objectContaining({ profile: 'ops' })], publisher: 'local-0123456789ab' },
+      { agents: [expect.objectContaining({ profile: 'ops' })] }
+    ])
 
     stopBotRelay()
   })

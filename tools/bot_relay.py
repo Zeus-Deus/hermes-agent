@@ -149,29 +149,146 @@ def _normalize_roster_row(row: Any) -> Optional[dict]:
     return out
 
 
-def write_remote_roster(root: Path | str, rows: Any) -> int:
-    """Atomically persist the Desktop-pushed remote roster. Returns count."""
-    base = _ensure_dirs(root)
+# ── per-publisher roster (#139219) ───────────────────────────────────────────
+# Every Desktop that relays for this gateway pushes ITS view of the other connections. One
+# whole-file roster made the last pusher win, so with two Desktops a bare name flapped between
+# their machines every push. Each push now replaces only its publisher's slice; readers see
+# the union of the slices pushed within ROSTER_FRESH_SECONDS, rows deduped by
+# (connection_id, profile). A Desktop that names no publisher (older builds) owns the
+# LEGACY_PUBLISHER slice, so its push still replaces what it pushed last time. The top-level
+# ``agents`` key stays the merged union for readers that predate the slices.
+LEGACY_PUBLISHER = "legacy"
+ROSTER_PUBLISHERS_MAX = 32  # live Desktops per gateway, bounded against a client inventing ids
+
+
+def _publisher_key(publisher: Any) -> str:
+    text = str(publisher or "").strip()
+    return text if _HANDLE_RE.match(text) else LEGACY_PUBLISHER
+
+
+def _clean_rows(rows: Any) -> list[dict]:
     by_key: dict[tuple[str, str], dict] = {}
     for norm in filter(None, map(_normalize_roster_row, rows if isinstance(rows, list) else [])):
         by_key.setdefault((norm["connection_id"], norm["profile"]), norm)
-    cleaned = [by_key[k] for k in sorted(by_key)]
-    _atomic_write_json(base / ROSTER_FILE, {"updated_at": int(time.time()), "agents": cleaned}, sort_keys=True)
+    return [by_key[k] for k in sorted(by_key)]
+
+
+def _roster_slices(root: Path | str) -> dict[str, tuple[float, list[dict]]]:
+    """``{publisher: (updated_at, rows)}`` from roster.json; a file without slices (written before
+    them) is the legacy publisher's. A slice is never fresher than the file holding it, so an
+    old file reads stale whatever it claims. Raises on a missing/unreadable file."""
+    path = relay_root(root) / ROSTER_FILE
+    mtime = path.stat().st_mtime
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict):
+        return {}
+
+    def _stamp(value: Any) -> float:
+        try:
+            return min(float(value), mtime)
+        except (TypeError, ValueError, OverflowError):
+            return mtime
+
+    publishers = data.get("publishers")
+    if not isinstance(publishers, dict):
+        agents = data.get("agents")
+        return {LEGACY_PUBLISHER: (_stamp(data.get("updated_at")), _clean_rows(agents))} if isinstance(agents, list) else {}
+    out: dict[str, tuple[float, list[dict]]] = {}
+    for key, entry in publishers.items():
+        if isinstance(entry, dict) and isinstance(entry.get("agents"), list) and _publisher_key(key) == key:
+            out[key] = (_stamp(entry.get("updated_at")), _clean_rows(entry["agents"]))
+    return out
+
+
+def _live_slices(slices: dict[str, tuple[float, list[dict]]], now: float, *, fresh_only: bool) -> list[tuple[float, list[dict]]]:
+    """The slices a reader merges, newest first: those pushed within ROSTER_FRESH_SECONDS. With
+    none fresh, the newest slice alone (unless ``fresh_only``) — what the last Desktop to push
+    left, exactly as the single-file roster kept it once every Desktop had gone."""
+    ordered = sorted(slices.values(), key=lambda item: item[0], reverse=True)
+    fresh = [item for item in ordered if now - item[0] <= ROSTER_FRESH_SECONDS]
+    return fresh if fresh or fresh_only else ordered[:1]
+
+
+def _merge_slices(slices: list[tuple[float, list[dict]]]) -> list[dict]:
+    """Union of ``slices`` (newest first), one row per (connection_id, profile): the newest
+    publisher's row, online when ANY publisher sees it online, unknown when any does not know,
+    offline only when every publisher listing it says so."""
+    merged: dict[tuple[str, str], dict] = {}
+    online: dict[tuple[str, str], list[Any]] = {}
+    for _stamp, rows in slices:
+        for row in rows:
+            key = (row["connection_id"], row["profile"])
+            merged.setdefault(key, row)
+            online.setdefault(key, []).append(row.get("online"))
+    out = []
+    for key in sorted(merged):
+        row = {k: v for k, v in merged[key].items() if k != "online"}
+        seen = online[key]
+        if True in seen:
+            row["online"] = True
+        elif all(value is False for value in seen):
+            row["online"] = False
+        out.append(row)
+    return out
+
+
+@contextlib.contextmanager
+def _roster_lock(base: Path) -> Iterator[None]:
+    """Serialise roster read-modify-writes across processes (two Desktops push concurrently,
+    through either relay door). Without ``fcntl`` (Windows) it is a no-op."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover — Windows
+        yield
+        return
+    fd = os.open(base / f"{ROSTER_FILE}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # releases the flock
+
+
+def write_remote_roster(root: Path | str, rows: Any, publisher: Any = None) -> int:
+    """Replace ``publisher``'s slice of the Desktop-pushed remote roster (no publisher: the
+    legacy slice) and drop the slices no Desktop refreshed within ROSTER_FRESH_SECONDS.
+    Returns the accepted row count of this push."""
+    base = _ensure_dirs(root)
+    key, cleaned, now = _publisher_key(publisher), _clean_rows(rows), time.time()
+    with _roster_lock(base):
+        try:
+            slices = _roster_slices(root)
+        except FileNotFoundError:
+            slices = {}
+        except Exception:
+            logger.debug("bot_relay roster unreadable; rewriting it from this push", exc_info=True)
+            slices = {}
+        slices = {k: v for k, v in slices.items() if k != key and now - v[0] <= ROSTER_FRESH_SECONDS}
+        for stale in sorted(slices, key=lambda k: slices[k][0])[:max(0, len(slices) + 1 - ROSTER_PUBLISHERS_MAX)]:
+            del slices[stale]
+        slices[key] = (now, cleaned)
+        _atomic_write_json(base / ROSTER_FILE, {
+            "updated_at": int(now),
+            "agents": _merge_slices(_live_slices(slices, now, fresh_only=False)),
+            "publishers": {k: {"updated_at": int(stamp), "agents": agents} for k, (stamp, agents) in slices.items()},
+        }, sort_keys=True)
     return len(cleaned)
 
 
-def read_remote_roster(root: Path | str) -> list[dict]:
-    """The current remote roster (possibly empty). Never raises."""
+def _read_merged_roster(root: Path | str, *, fresh_only: bool) -> list[dict]:
     try:
-        raw = (relay_root(root) / ROSTER_FILE).read_text(encoding="utf-8-sig")
-        data = json.loads(raw)
-        agents = data.get("agents") if isinstance(data, dict) else None
-        return [r for r in map(_normalize_roster_row, agents) if r] if isinstance(agents, list) else []
+        return _merge_slices(_live_slices(_roster_slices(root), time.time(), fresh_only=fresh_only))
     except FileNotFoundError:
         return []
     except Exception:
         logger.debug("bot_relay roster read failed", exc_info=True)
         return []
+
+
+def read_remote_roster(root: Path | str) -> list[dict]:
+    """The current remote roster: the union of every relaying Desktop's live slice (possibly
+    empty). Never raises."""
+    return _read_merged_roster(root, fresh_only=False)
 
 
 def _target_ids(row: dict) -> set[str]:
@@ -269,14 +386,10 @@ def _envelope_ttl_seconds() -> int:
 
 def _target_liveness(root: Path | str, target: dict) -> Optional[bool]:
     """Tri-state liveness: True / False / None (unknown → callers fail open). Offline =
-    explicit ``online: false`` or ABSENT from a *fresh* roster; a missing, unreadable,
-    empty or stale roster proves nothing → None. Never raises."""
+    explicit ``online: false`` or ABSENT from the union of the *fresh* publisher slices; a
+    missing, unreadable, empty or stale roster proves nothing → None. Never raises."""
     try:
-        try:
-            age = time.time() - (relay_root(root) / ROSTER_FILE).stat().st_mtime
-        except OSError:
-            return None
-        roster = read_remote_roster(root) if age <= ROSTER_FRESH_SECONDS else []
+        roster = _read_merged_roster(root, fresh_only=True)
         if not roster:
             return None
         key = (str(target.get("connection_id") or ""), str(target.get("profile") or ""))

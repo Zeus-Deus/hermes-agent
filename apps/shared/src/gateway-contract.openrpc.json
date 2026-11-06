@@ -242,7 +242,7 @@
     },
     {
       "name": "bot_relay.roster.sync",
-      "summary": "Replace this gateway's view of agents on other connections; answers the accepted row count.",
+      "summary": "Replace the pushing Desktop's slice of this gateway's view of agents on other connections; answers the accepted row count.",
       "params": [
         {
           "name": "params",
@@ -7539,6 +7539,18 @@
             ],
             "default": null,
             "title": "Agents"
+          },
+          "publisher": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Publisher"
           }
         },
         "title": "BotRelayRosterSyncParams",

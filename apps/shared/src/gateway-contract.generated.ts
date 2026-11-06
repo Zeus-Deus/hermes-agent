@@ -1916,6 +1916,7 @@ export interface GroupsPeerRegisterResult {
 export interface BotRelayRosterSyncParams {
   profile?: string | null
   agents?: RelayAgentRow[] | null
+  publisher?: string | null
 }
 /** A roster row the Desktop pushes (``tools/bot_relay.py::_normalize_roster_row``); invalid rows are dropped server-side, so the shape stays open. */
 export interface RelayAgentRow {
@@ -6173,7 +6174,7 @@ export interface RpcMethods {
   'bot_relay.outbox.drain': { params: BotRelayOutboxDrainParams; result: BotRelayOutboxDrainResult }
   /** Write a relayed reply and/or typed error for an envelope so the sender-side waiter resolves. */
   'bot_relay.reply': { params: BotRelayReplyParams; result: OkResult }
-  /** Replace this gateway's view of agents on other connections; answers the accepted row count. */
+  /** Replace the pushing Desktop's slice of this gateway's view of agents on other connections; answers the accepted row count. */
   'bot_relay.roster.sync': { params: BotRelayRosterSyncParams; result: BotRelayRosterSyncResult }
   /** Inspect, attach to, or drop the CDP browser the tools use; ``messages`` narrate a connect. */
   'browser.manage': { params: BrowserManageParams; result: BrowserManageResult }

@@ -13,7 +13,9 @@ relay adds to message_agent:
 """
 
 import json
+import os as _os2
 import re
+import time as _time2
 from pathlib import Path
 
 import pytest
@@ -103,6 +105,136 @@ def test_resolve_ambiguous_handle_across_connections(root):
     forms = bot_relay.remote_target_forms(roster)
     assert "researcher@ssh-vps" in forms and "researcher@cloud-1" in forms
     assert "hermes" in forms  # unique handle stays bare
+
+
+# ── per-publisher roster (#139219) ───────────────────────────────────────────
+
+
+def _row(profile, conn, **extra):
+    return {"profile": profile, "handle": profile, "connection_id": conn, **extra}
+
+
+def test_two_publishers_taking_turns_never_flap_the_union(root):
+    """Two Desktops relay for one gateway and each pushes ITS view of the other connections. The
+    roster a reader sees is the union of both, whichever pushed last — never one view or the other."""
+    laptop = [_row("alice", "local-aaaaaaaaaaaa"), _row("scout", "vps")]
+    desk = [_row("bob", "local-bbbbbbbbbbbb"), _row("scout", "vps")]
+    bot_relay.write_remote_roster(root, laptop, "local-aaaaaaaaaaaa")
+    seen = set()
+    for _ in range(3):
+        for publisher, rows in (("local-bbbbbbbbbbbb", desk), ("local-aaaaaaaaaaaa", laptop)):
+            bot_relay.write_remote_roster(root, rows, publisher)
+            roster = bot_relay.read_remote_roster(root)
+            seen.add(tuple((r["connection_id"], r["profile"]) for r in roster))
+            assert bot_relay.resolve_remote_target("alice", roster)["connection_id"] == "local-aaaaaaaaaaaa"
+            assert bot_relay.resolve_remote_target("bob", roster)["connection_id"] == "local-bbbbbbbbbbbb"
+    assert seen == {(("local-aaaaaaaaaaaa", "alice"), ("local-bbbbbbbbbbbb", "bob"), ("vps", "scout"))}
+    # a row both publishers list is one row, so it stays a unique bare target
+    assert bot_relay.resolve_remote_target("scout", bot_relay.read_remote_roster(root))["connection_id"] == "vps"
+
+
+def test_publisher_push_replaces_only_its_own_slice(root):
+    bot_relay.write_remote_roster(root, [_row("alice", "lan")], "local-aaaaaaaaaaaa")
+    bot_relay.write_remote_roster(root, [_row("bob", "vps")], "local-bbbbbbbbbbbb")
+    bot_relay.write_remote_roster(root, [], "local-aaaaaaaaaaaa")  # its sole-connection clear
+    assert [r["profile"] for r in bot_relay.read_remote_roster(root)] == ["bob"]
+
+
+def test_bare_name_on_two_publishers_machines_errors_with_qualified_forms(tmp_path, monkeypatch):
+    """Two Desktops each relay a machine with a ``scout``: a bare ``scout`` names neither, so
+    message_agent refuses with both qualified forms instead of picking the last pusher's."""
+    home = _managed_home(tmp_path)
+    monkeypatch.setattr("tools.bot_mode_dm._spawn_delivery", lambda *a, **k: json.dumps({"status": "queued"}))
+    bot_relay.write_remote_roster(home, [_row("scout", "local-aaaaaaaaaaaa")], "local-aaaaaaaaaaaa")
+    bot_relay.write_remote_roster(home, [_row("scout", "local-bbbbbbbbbbbb")], "local-bbbbbbbbbbbb")
+    agent = _FakeAgent(home)
+    err = json.loads(message_agent_tool(target="scout", message="hi", agent=agent))["error"]
+    assert "scout@local-aaaaaaaaaaaa" in err and "scout@local-bbbbbbbbbbbb" in err
+    assert bot_relay.claim_pending_envelopes(home) == []
+    out = json.loads(message_agent_tool(target="scout@local-bbbbbbbbbbbb", message="hi", agent=agent))
+    assert out.get("status") == "queued"
+
+
+def test_unrefreshed_publisher_slice_expires(root, monkeypatch):
+    now = [1_000_000.0]
+    monkeypatch.setattr(bot_relay.time, "time", lambda: now[0])
+    bot_relay.write_remote_roster(root, [_row("alice", "lan")], "local-aaaaaaaaaaaa")
+    now[0] += 30
+    bot_relay.write_remote_roster(root, [_row("bob", "vps")], "local-bbbbbbbbbbbb")
+    _os2.utime(bot_relay.relay_root(root) / bot_relay.ROSTER_FILE, (now[0], now[0]))
+    now[0] += bot_relay.ROSTER_FRESH_SECONDS - 10  # alice's Desktop went quiet ROSTER_FRESH+20 ago
+    assert [r["profile"] for r in bot_relay.read_remote_roster(root)] == ["bob"]
+    # the next write drops the expired slice from the file too
+    bot_relay.write_remote_roster(root, [_row("bob", "vps")], "local-bbbbbbbbbbbb")
+    data = json.loads((bot_relay.relay_root(root) / bot_relay.ROSTER_FILE).read_text())
+    assert sorted(data["publishers"]) == ["local-bbbbbbbbbbbb"]
+
+
+def test_last_slice_outlives_freshness_like_the_single_file_roster(root, monkeypatch):
+    """Once every Desktop is gone the newest push still names the targets (as the single-file
+    roster did), but proves nothing about liveness."""
+    now = [1_000_000.0]
+    monkeypatch.setattr(bot_relay.time, "time", lambda: now[0])
+    bot_relay.write_remote_roster(root, [_row("alice", "lan")], "local-aaaaaaaaaaaa")
+    now[0] += 5
+    bot_relay.write_remote_roster(root, [_row("bob", "vps")], "local-bbbbbbbbbbbb")
+    path = bot_relay.relay_root(root) / bot_relay.ROSTER_FILE
+    _os2.utime(path, (now[0], now[0]))
+    now[0] += bot_relay.ROSTER_FRESH_SECONDS + 60
+    assert [r["profile"] for r in bot_relay.read_remote_roster(root)] == ["bob"]
+    assert bot_relay._target_liveness(root, _row("ghost", "vps")) is None
+
+
+def test_legacy_push_owns_its_own_slice(root):
+    """An older Desktop pushes no publisher: its push replaces what IT pushed last time, and
+    neither touches nor is touched by a newer Desktop's slice."""
+    bot_relay.write_remote_roster(root, [_row("old", "lan")])
+    bot_relay.write_remote_roster(root, [_row("bob", "vps")], "local-bbbbbbbbbbbb")
+    bot_relay.write_remote_roster(root, [_row("older", "lan")], None)
+    bot_relay.write_remote_roster(root, [_row("bob", "vps")], "bad publisher!")  # invalid → legacy
+    assert [r["profile"] for r in bot_relay.read_remote_roster(root)] == ["bob"]
+    data = json.loads((bot_relay.relay_root(root) / bot_relay.ROSTER_FILE).read_text())
+    assert sorted(data["publishers"]) == [bot_relay.LEGACY_PUBLISHER, "local-bbbbbbbbbbbb"]
+
+
+def test_roster_file_keeps_the_union_for_readers_that_predate_slices(root):
+    bot_relay.write_remote_roster(root, [_row("alice", "lan")], "local-aaaaaaaaaaaa")
+    bot_relay.write_remote_roster(root, [_row("bob", "vps")], "local-bbbbbbbbbbbb")
+    data = json.loads((bot_relay.relay_root(root) / bot_relay.ROSTER_FILE).read_text())
+    assert [(r["connection_id"], r["profile"]) for r in data["agents"]] == [("lan", "alice"), ("vps", "bob")]
+
+
+def test_roster_file_written_before_slices_reads_as_the_legacy_slice(root):
+    base = bot_relay.relay_root(root)
+    base.mkdir(parents=True)
+    (base / bot_relay.ROSTER_FILE).write_text(json.dumps(
+        {"updated_at": int(_time2.time()), "agents": [_row("alice", "lan")]}), encoding="utf-8")
+    assert [r["profile"] for r in bot_relay.read_remote_roster(root)] == ["alice"]
+    bot_relay.write_remote_roster(root, [_row("bob", "vps")], "local-bbbbbbbbbbbb")
+    assert [r["profile"] for r in bot_relay.read_remote_roster(root)] == ["alice", "bob"]
+    bot_relay.write_remote_roster(root, [], None)  # the older Desktop's next push replaces it
+    assert [r["profile"] for r in bot_relay.read_remote_roster(root)] == ["bob"]
+
+
+def test_liveness_merges_publishers(root):
+    """One Desktop sees a machine online, another (whose socket to it is down) offline: the
+    target is reachable through the first, so it is not refused. Offline only when every fresh
+    publisher listing it says so; absent from every fresh slice is offline."""
+    bot_relay.write_remote_roster(root, [_row("scout", "vps", online=False)], "local-aaaaaaaaaaaa")
+    assert bot_relay._target_liveness(root, _row("scout", "vps")) is False
+    bot_relay.write_remote_roster(root, [_row("scout", "vps", online=True)], "local-bbbbbbbbbbbb")
+    assert bot_relay._target_liveness(root, _row("scout", "vps")) is True
+    bot_relay.write_remote_roster(root, [_row("scout", "vps")], "local-bbbbbbbbbbbb")
+    assert bot_relay._target_liveness(root, _row("scout", "vps")) is None
+    assert bot_relay._target_liveness(root, _row("ghost", "vps")) is False
+
+
+def test_publisher_slices_are_bounded(root):
+    for n in range(bot_relay.ROSTER_PUBLISHERS_MAX + 5):
+        bot_relay.write_remote_roster(root, [_row(f"p{n}", "vps")], f"desktop-{n:012x}")
+    data = json.loads((bot_relay.relay_root(root) / bot_relay.ROSTER_FILE).read_text())
+    assert len(data["publishers"]) == bot_relay.ROSTER_PUBLISHERS_MAX
+    assert f"desktop-{bot_relay.ROSTER_PUBLISHERS_MAX + 4:012x}" in data["publishers"]
 
 
 # ── outbox / replies ─────────────────────────────────────────────────────────
@@ -496,9 +628,6 @@ def test_cleanup_bot_relay_artifacts_missing_dir_is_zero(tmp_path, monkeypatch):
 
 
 # ── #93091 item 2: offline fail-fast + drain-time TTL ────────────────────────
-
-import os as _os2
-import time as _time2
 
 
 def _target(conn="cloud-1", profile="scout", handle="scout"):

@@ -30,11 +30,13 @@ TURN_MAX_ATTEMPTS = 2  # first admission + the owner's one transient-failure ret
 
 @method("bot_relay.roster.sync")
 def _(rid, params: dict, _root=_relay_root) -> dict:
-    """Replace this gateway's view of agents on OTHER connections → ``{count}`` accepted rows
-    (``agents`` rows ``{profile, handle, connection_id, ...}``; invalid rows are dropped).
-    A roster that changes is logged with its rows: a peer connection listed with this machine's
-    own profiles, or two publishers alternating, shows up as a flapping line (the pushing window
-    is in the Desktop's desktop.log ``[bot-relay win=…]`` lines at the same time)."""
+    """Replace the pushing Desktop's slice of this gateway's view of agents on OTHER connections
+    → ``{count}`` accepted rows (``agents`` rows ``{profile, handle, connection_id, ...}``; invalid
+    rows are dropped). ``publisher`` names the pushing Desktop; readers see the union of every
+    Desktop's fresh slice (#139219), and a push without one replaces the legacy slice. A roster
+    that changes is logged with its rows and publisher: a peer connection listed with this
+    machine's own profiles shows up as a flapping line (the pushing window is in the Desktop's
+    desktop.log ``[bot-relay win=…]`` lines at the same time)."""
     try:
         from tools.bot_relay import read_remote_roster, write_remote_roster
 
@@ -44,10 +46,11 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
                 f"{r.get('connection_id')}/{r.get('profile')}={r.get('title')!r}" for r in rows) + "]"
 
         before = trace()
-        count = write_remote_roster(_root(), params.get("agents"))
+        count = write_remote_roster(_root(), params.get("agents"), params.get("publisher"))
         after = trace()
         if after != before:
-            logging.getLogger(__name__).info("bot_relay roster changed: %s -> %s", before, after)
+            logging.getLogger(__name__).info("bot_relay roster changed (publisher=%s): %s -> %s",
+                                             params.get("publisher") or "-", before, after)
         return _ok(rid, {"count": count})
     except Exception as e:
         return _err(rid, 5090, str(e))

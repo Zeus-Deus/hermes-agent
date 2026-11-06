@@ -592,6 +592,9 @@ class RelayAgentRow(Params):
 
 class BotRelayRosterSyncParams(ProfileParams):
     agents: list[RelayAgentRow] | None = None
+    # The pushing Desktop (its own machine's relay id): the push replaces only that Desktop's
+    # slice of the roster. Absent = an older Desktop's push, which owns the legacy slice.
+    publisher: str | None = None
 
 
 class BotRelayRosterSyncResult(Result):
@@ -599,7 +602,7 @@ class BotRelayRosterSyncResult(Result):
 
 
 method("bot_relay.roster.sync", params=BotRelayRosterSyncParams, result=BotRelayRosterSyncResult,
-       doc="Replace this gateway's view of agents on other connections; answers the accepted row count.")
+       doc="Replace the pushing Desktop's slice of this gateway's view of agents on other connections; answers the accepted row count.")
 
 
 class BotRelayOutboxDrainParams(ProfileParams):

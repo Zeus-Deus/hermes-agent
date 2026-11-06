@@ -678,12 +678,12 @@ def relay_operation(connection, operation, params):
     _home(authority, actor, name)
     if 'session:control' not in actor.capabilities:
         raise RuntimeStoreError('permission_denied')
-    fields = {'roster': {'agents'}, 'outbox': set(), 'reply': {'id', 'reply', 'error', 'reason'}}
+    fields = {'roster': {'agents', 'publisher'}, 'outbox': set(), 'reply': {'id', 'reply', 'error', 'reason'}}
     if set(params) - fields[operation]:
         raise RuntimeStoreError('invalid_params')
     from tools.bot_relay import write_remote_roster, claim_pending_envelopes, write_reply
     if operation == 'roster':
-        return {'count': write_remote_roster(home, params.get('agents'))}
+        return {'count': write_remote_roster(home, params.get('agents'), params.get('publisher'))}
     if operation == 'outbox':
         return {'envelopes': claim_pending_envelopes(home)}
     try:

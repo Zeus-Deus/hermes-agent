@@ -205,6 +205,32 @@ function relayWireId(connectionId: string): string {
   return connectionId === LOCAL_CONNECTION_ID && localRelayId ? localRelayId : connectionId
 }
 
+// ── who is pushing a roster (#139219) ──
+// Every Desktop relaying for a gateway pushes it a roster; the gateway keeps one slice per
+// publisher and resolves against their union, so two Desktops no longer overwrite each other
+// (the last push used to win and a bare name flapped between machines). The publisher is this
+// Desktop's own machine id (`local-<install>`); until that is known, a per-run random id, whose
+// slice the gateway expires once it goes unrefreshed.
+const RUN_PUBLISHER_ID = `desktop-${Array.from({ length: 12 }, () => Math.floor(Math.random() * 16).toString(16)).join('')}`
+
+function rosterPublisher(): string {
+  return localRelayId !== null && LOCAL_RELAY_ID_RE.test(localRelayId) ? localRelayId : RUN_PUBLISHER_ID
+}
+
+/** Push `agents` as this Desktop's roster slice. A gateway from before the slices refuses the
+ *  unknown `publisher` key (invalid_params) on its strict door: push it the legacy way. */
+async function pushRelayRoster(route: ProfileRoute, agents: RelayAgentRow[]) {
+  try {
+    await host.requestProfile(route, 'bot_relay.roster.sync', { agents, publisher: rosterPublisher() })
+  } catch (error: any) {
+    if (String(error?.data?.reason || '') !== 'invalid_params') {
+      throw error
+    }
+
+    await host.requestProfile(route, 'bot_relay.roster.sync', { agents })
+  }
+}
+
 /** A target id naming some Desktop's local machine: a `local-<install>` form, or the
  *  legacy bare 'local' an older Desktop pushed. */
 function namesALocalMachine(id: string): boolean {
@@ -512,7 +538,7 @@ async function syncRelayRosters() {
             }
 
             try {
-              await host.requestProfile(connection.route, 'bot_relay.roster.sync', { agents: [] })
+              await pushRelayRoster(connection.route, [])
 
               return true
             } catch {
@@ -588,9 +614,7 @@ async function syncRelayRosters() {
         }
 
         try {
-          await host.requestProfile(connection.route, 'bot_relay.roster.sync', {
-            agents: others
-          })
+          await pushRelayRoster(connection.route, others)
         } catch {
           // Older backend without the relay RPCs — skip this connection.
         }

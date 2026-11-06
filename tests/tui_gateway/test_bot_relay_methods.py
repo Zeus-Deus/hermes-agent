@@ -50,6 +50,34 @@ def test_roster_sync_persists_and_counts(home):
     assert [r["profile"] for r in bot_relay.read_remote_roster(home)] == ["scout"]
 
 
+def test_roster_sync_from_two_desktops_keeps_both_views(home):
+    """#139219: two Desktops relay for this gateway, each pushing every ~60 s the agents on ITS
+    other connections. Each push replaces only its publisher's slice, so the roster a bare name
+    resolves against holds both machines whichever Desktop pushed last — it no longer flips
+    between them. An older Desktop (no publisher) keeps replacing only its own legacy slice."""
+    laptop = {"publisher": "local-aaaaaaaaaaaa",
+              "agents": [{"profile": "alice", "handle": "alice", "connection_id": "local-aaaaaaaaaaaa"}]}
+    desk = {"publisher": "local-bbbbbbbbbbbb",
+            "agents": [{"profile": "bob", "handle": "bob", "connection_id": "local-bbbbbbbbbbbb"}]}
+    _result(srv._methods["bot_relay.roster.sync"](0, laptop))
+    for n, push in enumerate([desk, laptop, desk, laptop], start=1):
+        assert _result(srv._methods["bot_relay.roster.sync"](n, push))["count"] == 1
+        roster = bot_relay.read_remote_roster(home)
+        assert [r["profile"] for r in roster] == ["alice", "bob"], f"push {n} replaced the other Desktop's rows"
+        assert bot_relay.resolve_remote_target("alice", roster)["connection_id"] == "local-aaaaaaaaaaaa"
+    _result(srv._methods["bot_relay.roster.sync"](9, {"agents": [
+        {"profile": "carol", "handle": "carol", "connection_id": "lan"}]}))
+    _result(srv._methods["bot_relay.roster.sync"](10, {**laptop, "agents": []}))
+    assert sorted(r["profile"] for r in bot_relay.read_remote_roster(home)) == ["bob", "carol"]
+
+
+def test_roster_sync_contract_accepts_the_publisher():
+    """The strict (canonical) door refuses unknown keys before the handler runs."""
+    from tui_gateway.contracts.registry import METHODS, canonical_param_problems
+    contract = METHODS["bot_relay.roster.sync"]
+    assert canonical_param_problems(contract, {"agents": [], "publisher": "local-aaaaaaaaaaaa"}) == []
+
+
 def test_outbox_drain_replays_canonical_envelope_until_reply_acknowledged(home):
     """A drained envelope is not "delivered" — its stable id is replayed on every
     drain until the target's terminal reply is written under that id, so a
