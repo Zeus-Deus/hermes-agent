@@ -880,19 +880,35 @@ function retainedSourceIdentities(): Pick<RosterSnapshot, 'sourceIdentities'> {
   return sourceIdentities.length ? { sourceIdentities } : {}
 }
 
-/** The connection the rich rows are merged against: the one that answered
- *  when it is proven to differ from the key (mid-apply, no keyed route). */
+/** The connection the rich rows are merged against: the one proven to have
+ *  answered (mid-apply or a null key, the socket can sit elsewhere), else
+ *  the key. */
 function mergeConnection(
   served: Pick<RosterSnapshot, 'servedConnectionId'>,
   activeConnectionId: null | string | undefined
 ): null | string | undefined {
-  const servedId = served.servedConnectionId
-
-  return servedId && activeConnectionId && servedId !== activeConnectionId ? servedId : activeConnectionId
+  return served.servedConnectionId || activeConnectionId
 }
 
-function snapshotIdentities(snapshot: Pick<RosterSnapshot, 'sourceIdentities' | 'sources'> | null | undefined) {
-  return snapshot?.sources?.length ? snapshot.sources : (snapshot?.sourceIdentities ?? [])
+/** A successful union's identities. A source whose enumeration failed comes
+ *  back without its install id; it is still registered, so keep the one last
+ *  seen for it (reachability is reported separately, by `sources`). */
+function freshSourceIdentities(sources: readonly GatewaySource[]): Pick<RosterSnapshot, 'sourceIdentities'> {
+  const known = new Map(knownSourceIdentities().map(source => [source.connectionId, source.installId]))
+
+  const sourceIdentities = sources.map(source => ({
+    connectionId: source.connectionId,
+    installId: String(source.installId || '').trim() || known.get(source.connectionId)
+  }))
+
+  return { sourceIdentities }
+}
+
+/** Which registry addresses are one install, as the snapshot knows it. */
+export function snapshotIdentities(
+  snapshot: Pick<RosterSnapshot, 'sourceIdentities' | 'sources'> | null | undefined
+): readonly SourceIdentity[] {
+  return snapshot?.sourceIdentities?.length ? snapshot.sourceIdentities : (snapshot?.sources ?? [])
 }
 
 async function fetchRosterSnapshot(activeConnectionId: null | string | undefined): Promise<RosterSnapshot> {
@@ -975,6 +991,7 @@ async function fetchRosterSnapshot(activeConnectionId: null | string | undefined
         ...merged,
         profiles,
         sources,
+        ...freshSourceIdentities(sources),
         ...served,
         fetchedAt: issuedAt
       }

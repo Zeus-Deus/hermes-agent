@@ -99,6 +99,7 @@ import {
   dropTilesForProfile,
   focusWorkspaceOwnerSessionTile,
   sessionTileDelegate,
+  sessionTileOwnerRoute,
   storedSessionIdForRuntimeId
 } from '@/store/session-states'
 import { runGatewayRestart } from '@/store/system-actions'
@@ -728,17 +729,25 @@ export const host = {
    *  profile/agent swaps. */
   activeConnectionId: (): null | string => activeGatewayConnectionId(),
 
-  /** Connection-qualified owner of ANY session, resolved exactly as
-   *  `state.focusedSessionOwner` resolves the focused one — for code acting on
-   *  a chat that need not have focus (a composer middleware's `context`: a
-   *  queued prompt drains in its own tile). Takes a stored id or a runtime id;
-   *  a runtime id is first mapped to the stored id its tile / session state
+  /** Connection-qualified owner of ANY session — for code acting on a chat
+   *  that need not have focus (a composer middleware's `context`: a queued
+   *  prompt drains in its own tile). Takes a stored id or a runtime id; a
+   *  runtime id is first mapped to the stored id its tile / session state
    *  binds (the destination itself, not a lineage root standing in for it).
-   *  Null for an empty, ambiguous or unresolved id; never a guess from focus. */
+   *  Then the owner a send to it routes by: its tile's owner route, else what
+   *  `state.focusedSessionOwner` would resolve (a unique owner hint or a
+   *  unique connection-qualified row). Null for an empty, ambiguous or
+   *  unresolved id; never a guess from focus. */
   sessionOwner: (sessionId: null | string | undefined): PluginFocusedSessionOwner | null => {
     const id = String(sessionId || '').trim()
+    const stored = id ? (storedSessionIdForRuntimeId(id) ?? id) : ''
+    const route = stored ? sessionTileOwnerRoute(stored) : undefined
 
-    return id ? storedSessionOwner(storedSessionIdForRuntimeId(id) ?? id, $sessions.get()) : null
+    if (route?.connectionId) {
+      return { connectionId: route.connectionId, profile: normalizeProfileKey(route.profile) }
+    }
+
+    return stored ? storedSessionOwner(stored, $sessions.get()) : null
   },
 
   /** The registered connection list (labels, kinds, primary) — token bytes

@@ -34,10 +34,10 @@ interface Contribution {
 
 type Owner = { connectionId: string; profile: string } | null
 
-const { cache, hostMock, live } = vi.hoisted(() => {
+const { cache, hostMock, live, paneQuery } = vi.hoisted(() => {
   // `socket`: where host.request answers when it differs from the published `active` (mid-apply).
   const live = {
-    active: 'local',
+    active: 'local' as null | string,
     focused: 'ops',
     focusedRuntime: null as null | string,
     focusedStored: null as null | string,
@@ -50,6 +50,7 @@ const { cache, hostMock, live } = vi.hoisted(() => {
 
   return {
     cache: new Map<string, { key: unknown[]; value: unknown }>(),
+    paneQuery: { current: null as null | { queryFn: () => Promise<unknown>; queryKey: unknown[] } },
     hostMock: {
       activeConnectionId: () => live.socket ?? live.active,
       notify: vi.fn(),
@@ -102,7 +103,14 @@ vi.mock('@hermes/plugin-sdk', async () => {
     COMPOSER_AREAS: { atCompletions: 'composer.atCompletions', middleware: 'composer.middleware' },
     host: hostMock,
     PALETTE_AREA: 'palette',
-    queryClient
+    queryClient,
+    // The Bots pane's roster query, captured so a test can run it with the pane's own key.
+    useQuery: (options: unknown) => {
+      paneQuery.current = options as typeof paneQuery.current
+
+      return {}
+    },
+    useValue: (store: { get: () => unknown }) => store.get()
   }
 
   return new Proxy(known, {
@@ -438,6 +446,40 @@ describe('mention targets follow the focused chat owner, not the active connecti
     expect(text).not.toContain('default@local')
   })
 
+  it("merges the pane's null-keyed roster against the gateway that answered", async () => {
+    // Recovery: no connection is published, the server's socket still answers.
+    live.active = null
+    live.socket = 'server'
+    hostMock.request.mockImplementation(async (...args: unknown[]) =>
+      args[0] === 'profiles.list'
+        ? { profiles: [{ name: 'default', ui_meta: { 'hermes-bots': { title: 'Server Helper' } } }, { name: 'ops' }] }
+        : {}
+    )
+    hostMock.agents.mockResolvedValue({
+      agents: [
+        { connectionId: 'local', connectionKind: 'local', connectionLabel: 'This device', profile: 'default' },
+        { connectionId: 'server', connectionKind: 'remote', connectionLabel: 'Server', profile: 'default' },
+        { connectionId: 'server', connectionKind: 'remote', connectionLabel: 'Server', profile: 'ops' }
+      ],
+      sources: [
+        { connectionId: 'local', kind: 'local' },
+        { connectionId: 'server', kind: 'remote' }
+      ]
+    } as never)
+
+    const { handler } = await contributions({ profiles: null })
+    const { useRoster } = await import('./data')
+
+    useRoster()
+    const query = paneQuery.current!
+    cache.set(JSON.stringify(query.queryKey), { key: query.queryKey, value: await query.queryFn() })
+
+    const { text } = await handler({ text: 'ask @server-helper' })
+
+    expect(text).toContain('@hermes = agent profile "default" ("Server Helper").')
+    expect(text).not.toContain('default@local')
+  })
+
   it('places rows the union enumeration failed to scope on the gateway that served them', async () => {
     // profiles.list answers, host.agents fails: the cached rows carry no connectionId.
     hostMock.request.mockResolvedValue({ profiles: [{ name: 'default' }, { name: 'writer' }] })
@@ -623,6 +665,41 @@ describe('one server registered under two addresses', () => {
     $lastRoster.set(COLLAPSED as never)
 
     expect((await handler({ text: 'send it to @default-server' })).text).toContain('(message_agent target: "hermes")')
+  })
+
+  it("keeps a source's last install id when only its own enumeration fails", async () => {
+    // The window is on server-b; server-a timed out, so the union reports it without an install id.
+    live.active = 'server-b'
+    hostMock.request.mockResolvedValue({ profiles: [{ name: 'default' }, { name: 'ops' }] })
+    hostMock.agents.mockResolvedValue({
+      agents: [
+        { connectionId: 'local', connectionKind: 'local', connectionLabel: 'This device', profile: 'default' },
+        {
+          connectionId: 'server-b',
+          connectionKind: 'remote',
+          connectionLabel: 'Server',
+          handle: 'default-server',
+          profile: 'default'
+        },
+        { connectionId: 'server-b', connectionKind: 'remote', connectionLabel: 'Server', profile: 'ops' }
+      ],
+      sources: [
+        { connectionId: 'local', installId: 'a'.repeat(32), kind: 'local' },
+        { connectionId: 'server-a', error: 'timeout', kind: 'remote', reachable: false },
+        { connectionId: 'server-b', installId: 'b'.repeat(32), kind: 'remote' }
+      ]
+    } as never)
+
+    const { handler, provide } = await contributions({ profiles: null })
+
+    cache.set(JSON.stringify(['hermes-bots', 'roster', 'earlier']), {
+      key: ['hermes-bots', 'roster', 'earlier'],
+      value: { fetchedAt: 1, sources: sources('b'.repeat(32)) }
+    })
+
+    expect((await handler({ text: 'send it to @default-server' })).text).toContain('(message_agent target: "hermes")')
+    // server-b's ops is the sender itself.
+    expect(provide('').map(item => item.insert)).not.toContain('@ops')
   })
 
   it('keeps addresses distinct while their install ids are unknown', async () => {

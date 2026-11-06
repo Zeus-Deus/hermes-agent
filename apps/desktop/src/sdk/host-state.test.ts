@@ -284,6 +284,26 @@ describe('host.sessionOwner', () => {
     session.$sessions.set([])
   })
 
+  it("answers with an open tile's owner route, as a send to it routes", async () => {
+    const { host } = await import('@/sdk/index')
+    const states = await import('@/store/session-states')
+
+    // A hidden Bot Chat: no session row, no owner hint, only its tile's route.
+    states.$sessionTiles.set([
+      {
+        id: 'tile-hidden',
+        ownerRoute: { connectionId: 'server', mode: 'remote', profile: 'ops', targetProfile: 'ops' },
+        runtimeId: 'rt-hidden',
+        storedSessionId: 'hidden-chat'
+      } as never
+    ])
+
+    expect(host.sessionOwner('hidden-chat')).toEqual({ connectionId: 'server', profile: 'ops' })
+    expect(host.sessionOwner('rt-hidden')).toEqual({ connectionId: 'server', profile: 'ops' })
+
+    states.$sessionTiles.set([])
+  })
+
   it('never guesses: empty, unknown and ambiguous ids are null', async () => {
     const { host } = await import('@/sdk/index')
     const session = await import('@/store/session')
