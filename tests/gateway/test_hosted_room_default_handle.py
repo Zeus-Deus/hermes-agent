@@ -79,3 +79,17 @@ def test_lead_routing_leaves_a_message_to_hermes_with_the_default(tmp_path):
                                          room_context=context.room_context(db, room_id=room_id, before_seq=seq))
 
     assert (decision.reason, decision.task.member.profile) == ("member_turn", "default")
+
+
+def test_an_installed_hermes_profile_this_gateway_does_not_serve_keeps_the_name(tmp_path, monkeypatch):
+    """A gateway serving only some profiles checks rooms against those (``room_profiles`` gives
+    ``default`` + ``research`` here), but @hermes names the install's real ``hermes`` profile
+    wherever it is served, so the default never answers it."""
+    from tests.tools.test_bot_mode_dm import _managed_home
+
+    monkeypatch.setenv("HERMES_HOME", str(_managed_home(tmp_path, teammates=("research", "hermes"))))
+    members = discussion.validate_roster(
+        [_member("default", "maia"), _member("research", "research")], local_profiles=("default", "research"))
+
+    assert _addressed("@hermes @research check", members) == ["research"]
+    assert _addressed("@maia check", members) == ["default"]

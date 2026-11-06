@@ -322,17 +322,26 @@ def validate_roster(value: Any, *, local_profiles: Iterable[str]) -> tuple[Discu
     return _with_hermes_alias(tuple(members), known_profiles)
 
 
+def _install_holds_hermes() -> bool:
+    """Whether this install has a live named ``hermes`` profile, served here or not: the room-eligible
+    ``known_profiles`` can be narrower than the install (a gateway serving only some profiles)."""
+    from hermes_constants import get_hermes_home
+    from tools.bot_mode_probe import _hermes_root, _roster
+
+    return any(name == "hermes" for name, _dir in _roster(_hermes_root(get_hermes_home())))
+
+
 def _with_hermes_alias(members: tuple[DiscussionMember, ...], known_profiles: set[str]) -> tuple[DiscussionMember, ...]:
     """Give the local default seated under its custom Bot Mode @handle (#89720) the ``hermes``
     alias: @hermes keeps reaching the default everywhere else, so it does in the room too — but
-    only while no profile on this gateway (seated or not) and no member holds that name, the rule
-    ``tools.bot_mode_probe._profile_for_handle`` applies. A default frozen as ``hermes`` needs no
-    alias, and one frozen as ``default`` (a real ``hermes`` profile held @hermes then) gets none."""
+    only while no profile on this install (seated, served or not) and no member holds that name,
+    the rule ``tools.bot_mode_probe._profile_for_handle`` applies. A default frozen as ``hermes``
+    needs no alias, and one frozen as ``default`` (a real ``hermes`` profile held @hermes then) gets none."""
     if "hermes" in known_profiles or any("hermes" in (m.handle.casefold(), m.profile.casefold()) for m in members):
         return members
     defaults = [index for index, m in enumerate(members)
                 if (m.target or {}).get("kind") == "local" and m.profile == "default"]
-    if len(defaults) != 1 or members[defaults[0]].handle.casefold() in ("hermes", "default"):
+    if len(defaults) != 1 or members[defaults[0]].handle.casefold() in ("hermes", "default") or _install_holds_hermes():
         return members
     index = defaults[0]
     return (*members[:index], replace(members[index], aliases=("hermes",)), *members[index + 1:])
