@@ -151,9 +151,9 @@ function stampCoversPrefix(log: GroupMessage[], stamp: GroupMessage, anchor: num
 }
 
 /** The member's turn payload from log index `seen`: this thread's entries
- *  plus any held entries being released, oldest first. Held entries before
- *  `proven` (the log-derived cursor) are ones the member's session already
- *  holds; `withheld` says some were left out for that reason. */
+ *  plus any held entries being released, oldest first. Held entries of this
+ *  thread before `proven` (the log-derived cursor) are ones the member's
+ *  session already holds; `withheld` says some were left out for that reason. */
 function groupTurnPayload(
   context: GroupRoundMemberContext,
   member: GroupMember,
@@ -167,11 +167,14 @@ function groupTurnPayload(
   const heldSet = new Set(heldIds)
   let withheld = false
 
+  // The cursor proves only this thread's session input: a held entry from a
+  // sibling thread is never in it, whatever its position.
   const delivered = room.log.filter((entry: GroupMessage, index: number) => {
     const held = Boolean(entry.id && heldSet.has(entry.id))
-    withheld ||= held && index < proven
+    const seenHere = index < proven && groupThreadOf(entry) === thread
+    withheld ||= held && seenHere
 
-    return held && index >= proven
+    return held && !seenHere
   })
 
   const deliveredIds = new Set(delivered.map((entry: GroupMessage) => entry.id).filter(Boolean))

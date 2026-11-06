@@ -253,6 +253,38 @@ describe('a member seated on a connection this Desktop does not have', () => {
     }
   })
 
+  it('keeps a marked seat out of the drive when its connection returns before its live row', async () => {
+    // A drive marked laptop::alice; the user then registers `laptop`, but the
+    // live roster has not re-seated that bot yet (stored descriptor, marked).
+    const room = await loadRoom(['local', 'server', 'laptop'], { turn: () => 'on it' })
+    room.chat.$groupChats.set({
+      g: {
+        log: [],
+        members: [ALICE, BOB, { ...PHANTOM, sourceMissing: true, sourceReachable: false }],
+        roomId: 'room',
+        sessions: {},
+        watermarks: {}
+      }
+    })
+    await room.rounds.registeredConnectionIds()
+
+    const thread = await send(room, 'stop @alice')
+
+    expect(Object.keys(room.chat.$groupChats.get().g.holds || {})).toEqual(['local::alice'])
+    expect(room.routed).toEqual([])
+
+    await send(room, '@everyone status?', thread)
+
+    expect(room.routed).not.toContain('laptop::alice')
+    expect(room.routed).toContain('server::bob')
+
+    // The live row (no mark) re-seats it: driven again.
+    room.rounds.sendToGroupChat('g', [ALICE, BOB, PHANTOM], '@everyone status?', thread)
+    await drain(() => Boolean(room.chat.$groupChats.get().g?.running))
+
+    expect(room.routed).toContain('laptop::alice')
+  })
+
   it('does not start a thread that a Stop cancelled while the registry was being read', async () => {
     const room = await loadRoom(null, { turn: () => 'on it' })
     let release: (rows: unknown[]) => void = () => undefined

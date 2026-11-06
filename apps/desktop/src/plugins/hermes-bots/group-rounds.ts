@@ -1051,12 +1051,14 @@ function onUnregisteredConnection(member: GroupMember, registered: ReadonlySet<s
 async function reachableGroupMembers(group: string, members: GroupMember[]): Promise<GroupMember[]> {
   const registered = await registeredConnectionIds()
 
-  if (!registered) {
-    return members
-  }
-
+  // A seat already marked stays out even once its connection is registered
+  // again, until the live roster re-seats it (the live row carries no mark):
+  // mention parsing keeps a marked seat off shared @forms, so driving it would
+  // route "stop @alice" around the hold it never got.
   const unreachable = new Set(
-    members.filter(member => onUnregisteredConnection(member, registered)).map(member => botRosterKey(member))
+    members
+      .filter(member => member?.sourceMissing || Boolean(registered && onUnregisteredConnection(member, registered)))
+      .map(member => botRosterKey(member))
   )
 
   if (!unreachable.size) {

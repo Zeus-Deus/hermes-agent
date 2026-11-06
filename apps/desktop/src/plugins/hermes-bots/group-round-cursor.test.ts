@@ -229,6 +229,24 @@ describe('a member turn driven by a Desktop that did not drive the earlier turns
     expect(prompt).not.toContain('Brief: draft the release notes')
   })
 
+  it('releases a hold set in another thread with that thread\'s held entry', async () => {
+    const desktop = await loadDesktop({ turn: ({ profile }) => (profile === 'bob' ? 'noted' : '(pass)') })
+
+    desktop.chat.$groupChats.set({ g: { log: [], members: MEMBERS, roomId: 'room', sessions: {}, watermarks: {} } })
+    const threadB = await send(desktop, '@bob draft the notes')
+    await send(desktop, 'stop @bob - remember HELD_CONSTRAINT')
+    expect(Object.keys(desktop.chat.$groupChats.get().g.holds || {})).toEqual(['server::bob'])
+
+    const before = bobPrompts(desktop).length
+    await send(desktop, '@bob resume', threadB)
+
+    const [prompt] = bobPrompts(desktop).slice(before)
+
+    expect(prompt).toContain('HELD_CONSTRAINT')
+    expect(prompt).toContain('@bob resume')
+    expect(prompt).not.toContain('draft the notes')
+  })
+
   it('does not trust an anchor whose prefix holds an entry the stamping turn never had', async () => {
     const { members } = await loadDesktop()
     const kickoff: GroupMessage = { at: 1, from: { kind: 'user', name: 'You' }, id: 'u-kick', text: '@bob kick off', thread: 't' }
