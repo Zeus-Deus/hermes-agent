@@ -1042,11 +1042,28 @@ def local_desktop_turn(runner, source, scope):
     policy = None
     if getattr(source, 'platform', None) == Platform.LOCAL:
         policy = getattr(runner._adapter_for_source(source), 'policies', {}).get(source.chat_id)
-    # The request_json mark: a chat an earlier build created, which stamped it into the creation request.
-    if policy is None or policy.source != 'gui' or not any(
-            json.loads(raw).get(LOCAL_DESKTOP_CHAT) is True for raw in (policy.config_json, policy.request_json)):
+    if policy is None or not is_local_desktop_chat(policy):
         return scope
     return _serving_local_desktop_within(scope)
+
+
+def is_local_desktop_chat(policy):
+    """Whether *policy* (a ``LocalSessionPolicy`` or the dict a receipt stores) is a Desktop chat its
+    creator's connection proved local: the owner's ``LOCAL_DESKTOP_CHAT`` mark, set at creation from the
+    connection's native ticket (``stage_local_session``), never from a value the client sends. A policy
+    of any other source (``cli``, ``tui``, ``bot_room``, ``kanban``, ``cron``, ``a2a``) never is. The
+    request_json mark: a chat an earlier build created, which stamped it into the creation request."""
+    def field(name):
+        return policy.get(name) if isinstance(policy, dict) else getattr(policy, name, None)
+    if field('source') != 'gui':
+        return False
+    for raw in (field('config_json'), field('request_json')):
+        try:
+            if isinstance(raw, str) and json.loads(raw).get(LOCAL_DESKTOP_CHAT) is True:
+                return True
+        except (ValueError, AttributeError):
+            continue
+    return False
 
 
 @contextmanager

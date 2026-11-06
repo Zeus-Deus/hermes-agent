@@ -282,6 +282,20 @@ def local_lineage_owner(conn, session_id):
     return owner if isinstance(lineage, list) and session_id in lineage else session_id
 
 
+def local_desktop_chat(db, session_id):
+    """Whether physical segment *session_id* belongs to a local conversation whose frozen creation
+    policy is a local Desktop chat (``gateway.session_policy.is_local_desktop_chat``). Read from the
+    receipt the owner wrote at creation, through the lineage, so a rename, a ``/new`` or compression
+    segment, and whichever surface a later turn runs from never change the answer. A row outside
+    every local lineage (a subagent, a messaging, cron or legacy session) has no receipt: False."""
+    with db._read_ctx() as conn:
+        owner = local_lineage_owner(conn, session_id)
+        saved = conn.execute('SELECT value FROM state_meta WHERE key=?', (POLICY_PREFIX + owner,)).fetchone()
+    policy = (_receipt(saved[0]) or {}).get('policy') if saved else None
+    from gateway.session_policy import is_local_desktop_chat
+    return isinstance(policy, dict) and is_local_desktop_chat(policy)
+
+
 def owned_lineage_ids(conn, session_id):
     """[session_id] for any row outside a local reset/compression lineage, else the whole
     conversation (*session_id* first). Any segment deletes as all of it: the owner's policy goes

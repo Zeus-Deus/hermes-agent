@@ -346,8 +346,9 @@ def execute(frame, channel):
     from tools.process_registry import process_registry
     process_registry.recover_from_checkpoint()
     # Store construction binds the delegation ledger before tool discovery.
-    from gateway.session_policy import restore_policy, policy_scope, register_worker_hooks
+    from gateway.session_policy import is_local_desktop_chat, restore_policy, policy_scope, register_worker_hooks
     policy = restore_policy(frame['policy'])
+    store.desktop_chat = is_local_desktop_chat(policy)
     register_worker_hooks(policy)
     discover_profile_mcp(policy)
     from run_agent import AIAgent

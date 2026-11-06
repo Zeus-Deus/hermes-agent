@@ -4,10 +4,11 @@ Lets a Bot Mode agent message a teammate (a profile on this install, an agent on
 a registered peer gateway, or one on another Desktop-connected machine): the
 target is validated against the live roster, the attribution prefix is applied
 server-side, and the reply arrives later via the background-process completion
-notification (fire-and-forget). Containment: the schema is injected ONLY into a
-bot's canonical "Bot Chat" session on a Bot-Mode-managed install (same gate as
-``tools/bot_mode_probe.py``; never in the registry or any toolset), and dispatch
-re-checks that gate so a forged call returns a structured error. Transports:
+notification (fire-and-forget). Containment: the schema is injected ONLY on a
+Bot-Mode-managed install, into a bot's canonical "Bot Chat" session or a chat the
+local Desktop app started (a gateway-issued, per-session capability; never in the
+registry or any toolset), and dispatch re-checks that gate so a forged call returns
+a structured error. Transports:
 local → ``hermes -p <name> chat --in ~ -c "Bot Chat" --create-if-missing -Q
 --query-file <tmp>``; peer → ``hermes peer dm <peer>[/<name>] < <tmp>``; both via
 ``terminal_tool(background=True, notify_on_complete=True)``.
@@ -125,9 +126,9 @@ def message_agent_tool_schema() -> dict:
 
 
 def message_agent_authorized(agent: Any) -> bool:
-    """The ``message_agent`` gate: a protocol-enabled agent whose session is a managed
-    Bot-Mode canonical Bot Chat. Session-stable, so it is prompt-cache safe to re-evaluate
-    on every tool-snapshot rebuild. Never raises."""
+    """The ``message_agent`` gate: a protocol-enabled agent on a Bot-Mode-managed install whose
+    session is the canonical Bot Chat or a local Desktop chat (``local_desktop_chat_capability``).
+    Session-stable, so it is prompt-cache safe to re-evaluate on every tool-snapshot rebuild. Never raises."""
     try:
         if not getattr(agent, "_bot_mode_protocol", True):
             return False
@@ -135,14 +136,45 @@ def message_agent_authorized(agent: Any) -> bool:
 
         # Managed-install check, NOT section non-emptiness: a SOUL.md carrying the
         # legacy protocol text gets an empty section but must still get the tool.
-        return _session_title(agent) == BOT_CHAT_TITLE and is_bot_mode_managed(_agent_home(agent))
+        return ((_session_title(agent) == BOT_CHAT_TITLE or local_desktop_chat_capability(agent))
+                and is_bot_mode_managed(_agent_home(agent)))
     except Exception:  # pragma: no cover — must never break a turn
         logger.debug("message_agent_authorized failed", exc_info=True)
         return False
 
 
+def local_desktop_chat_capability(agent: Any) -> bool:
+    """Whether the agent's session is a chat the Desktop app on this machine started: a capability the
+    gateway issues at creation, never a client claim. The owner stamps ``LOCAL_DESKTOP_CHAT`` into a
+    ``gui`` chat's frozen policy only when the creating connection redeemed a native ticket and declared
+    itself the Desktop (``gateway.session_local.stage_local_session``); this reads that persisted receipt
+    through the session's lineage, not ``agent.platform`` (the client's create ``source``) or the title.
+    So it holds for the session's life: a rename, a compaction or ``/new`` segment, and a resume from the
+    CLI or TUI neither add nor remove it, and a subagent, cron, kanban, hosted-room member, messaging or
+    legacy ``serve`` session (no such receipt) never has it. Cached per session id. Never raises."""
+    sid, db = getattr(agent, "session_id", None), getattr(agent, "_session_db", None)
+    if not sid or db is None:
+        return False
+    cached = getattr(agent, "_local_desktop_chat", None)
+    if isinstance(cached, tuple) and cached[0] == sid:
+        return cached[1]
+    try:
+        probe = getattr(db, "local_desktop_chat", None)  # a worker's store answers for its one session
+        if callable(probe):
+            granted = bool(probe(sid))
+        else:
+            from hermes_state_local import local_desktop_chat
+            granted = bool(local_desktop_chat(db, sid))
+    except Exception:  # an unreadable receipt grants nothing and is read again next time
+        logger.debug("local Desktop chat capability unreadable", exc_info=True)
+        return False
+    with contextlib.suppress(Exception):
+        agent._local_desktop_chat = (sid, granted)
+    return granted
+
+
 def ensure_message_agent_tool(agent: Any) -> bool:
-    """Inject the ``message_agent`` schema into a Bot Chat agent's tool list (once per turn).
+    """Inject the ``message_agent`` schema into an authorized agent's tool list (once per turn).
     Idempotent and deterministic for the session's life (the gate is stable from the
     first turn), so the tool list is byte-identical across turns — prompt-cache safe. Never raises."""
     try:
@@ -248,9 +280,9 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
             _profile_name as _self_profile_name, _roster, is_bot_mode_managed,
         )
 
-        if _session_title(agent) != BOT_CHAT_TITLE:
-            return _err("message_agent is only available in a Bot Mode 'Bot Chat' session. "
-                        "This session is not one; do not retry.")
+        if _session_title(agent) != BOT_CHAT_TITLE and not local_desktop_chat_capability(agent):
+            return _err("message_agent is only available in a Bot Mode 'Bot Chat' session or a chat "
+                        "started in the Desktop app on this machine. This session is neither; do not retry.")
         if not is_bot_mode_managed(home):
             return _err("This install is not Bot-Mode-managed (no bot roster); "
                         "message_agent is unavailable. Do not retry.")

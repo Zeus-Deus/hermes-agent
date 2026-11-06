@@ -222,6 +222,9 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
     """
     # The process's async-delegation ledger belongs to the adopted execution, never a reserved child.
     binds_delegation_ledger = True
+    # Set by the worker bootstrap from the frozen policy the owner handed it
+    # (``session_policy.is_local_desktop_chat``); a reserved child's store never carries it.
+    desktop_chat = False
 
     def __init__(self, rpc, scope, outbox_dir, adopted=None, *, max_bytes=4 * 1024 * 1024):
         self.rpc = rpc
@@ -455,6 +458,11 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
 
     def get_compression_recovery_deadline(self, session_id):
         return self._session_number(session_id, 'compression_recovery_deadline', float, 0.0)
+
+    def local_desktop_chat(self, session_id):
+        """``hermes_state_local.local_desktop_chat`` for the one session this worker runs (it cannot
+        read the owner's receipts): the creation policy's mark, as the owner handed it over."""
+        return bool(self.desktop_chat) and session_id == self.scope.get('session_id')
 
     def get_session_model_config_value(self, session_id, key, default=None):
         from hermes_state_sessions import _parse_model_config
