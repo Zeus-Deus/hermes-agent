@@ -112,7 +112,9 @@ def _start_combined(collected: list[dict], sender: Any) -> dict:
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         json.dump([{**{k: entry[k] for k in ("command", "label", "delivery_id")},
                     "output": _runner_output(entry["command"])} for entry in collected], stream)
-    argv = [sys.executable, str(Path(__file__).resolve().parent / "bot_mode_dm.py"), "--fan-out", spec]
+    from tools.bot_relay import runner_python
+
+    argv = [runner_python(), str(Path(__file__).resolve().parent / "bot_mode_dm.py"), "--fan-out", spec]
     if sys.platform == "win32":
         argv = [part.replace("\\", "/") for part in argv]  # Git Bash runs the tracked command (see _delivery_command)
     started = json.loads(_spawn_delivery(shlex.join(argv), f"{len(collected)} teammates", dm_file=spec,

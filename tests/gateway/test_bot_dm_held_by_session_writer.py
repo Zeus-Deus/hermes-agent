@@ -110,6 +110,14 @@ def _admissions(held):
     return [row['request_id'] for row in list_session_admissions(held.db, session_id=CHAT, pending_only=False)]
 
 
+def _refused_id(held):
+    """The id the owner settled as not sent: the tool's no-send answer names none (#149264)."""
+    from tools.bot_live_delivery import DELIVERY_DIR_NAME
+    receipts = [json.loads(path.read_text()) for path in (held.home / 'runtime' / DELIVERY_DIR_NAME).glob('*.json')]
+    [refused] = [r for r in receipts if r.get('refused') is True]
+    return refused['delivery_id']
+
+
 @pytest.mark.asyncio
 async def test_a_dm_refused_while_another_writer_holds_the_chat_is_a_definite_no_send(held):
     from gateway.session_bot import recover_bot_deliveries
@@ -122,7 +130,7 @@ async def test_a_dm_refused_while_another_writer_holds_the_chat_is_a_definite_no
     # The pinned intent is settled with its payload, and the owner holds the id's terminal
     # not-sent receipt: no runner, retry or sweep can replay it.
     assert sorted(path.name for path in held.dm_dir.iterdir()) == []
-    receipt = read_delivery_result(held.home, refused['delivery_id'])
+    receipt = read_delivery_result(held.home, _refused_id(held))
     assert receipt['refused'] is True and receipt['status'] == 'failed' and not receipt.get('admission_id'), receipt
     held.release()
     await recover_bot_deliveries(held.authority)
@@ -130,8 +138,21 @@ async def test_a_dm_refused_while_another_writer_holds_the_chat_is_a_definite_no
     # Once the other writer closes, a new send is adopted and admitted exactly once.
     sent = await _send(held, 'ping again')
     assert sent.get('status') in {'queued', 'claimed', 'settled'}, sent
-    assert sent['delivery_id'] != refused['delivery_id']
+    assert sent['delivery_id'] != receipt['delivery_id']
     assert _admissions(held) == ['bot:' + sent['delivery_id']]
+
+
+@pytest.mark.asyncio
+async def test_a_held_no_send_hands_out_no_delivery_id(held):
+    """#149264: a delivery id is the handle of something that was sent. The answer for a DM the
+    owner settled as never admitted carries none, so a caller that scores a send by its id (an
+    outbox, a monitor) cannot record the dropped message as healthy; it says so in fields too."""
+    refused = await _send(held, 'ping')
+    assert 'delivery_id' not in refused, refused
+    assert refused.get('sent') is False and refused.get('retryable') is True, refused
+    assert 'nothing was queued' in refused['error'], refused
+    from tools.bot_live_delivery import read_delivery_result
+    assert read_delivery_result(held.home, _refused_id(held))['refused'] is True
 
 
 @pytest.mark.asyncio
@@ -190,7 +211,7 @@ async def test_a_not_sent_answer_is_the_delivery_ids_durable_disposition(held):
     refused = await _send(held, 'ping')
     assert 'NOT sent' in refused['error'], refused
     held.release()
-    again = await asyncio.to_thread(_resubmit, held, refused['delivery_id'], 'ping')
+    again = await asyncio.to_thread(_resubmit, held, _refused_id(held), 'ping')
     assert again.get('refused') is True and again['status'] == 'failed', again
     assert _admissions(held) == [] and held.executed == []
 

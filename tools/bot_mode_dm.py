@@ -512,13 +512,19 @@ class LiveTargetHeldError(LiveTargetUnavailableError):
 
 def _unavailable_payload(dm_file: str, exc: LiveTargetUnavailableError) -> str:
     return json.dumps({"reason": exc.reason, "delivery_id": _dm_delivery_id(dm_file),
-                       "error": f"{exc} — the message was NOT sent; it is safe to resend {exc.resend}."})
+                       "sent": False, "retryable": True,
+                       "error": f"{exc} — the message was NOT sent and nothing was queued; "
+                                f"it is safe to resend {exc.resend}."})
 
 
-def _settled_no_send(dm_file: str, exc: LiveTargetUnavailableError) -> str:
+def _settled_no_send(dm_file: str, exc: LiveTargetUnavailableError, *, ack_id: bool = False) -> str:
     """The answer to a definite no-send, for both the tool and its runner: first the payload and
     any pinned intent go, so nothing local can rebuild or replay the delivery. A file that is still
-    there is not settlement: the answer is then the unknown outcome, never "safe to resend"."""
+    there is not settlement: the answer is then the unknown outcome, never "safe to resend".
+
+    A delivery id names something that was sent, so the tool's own answer carries none: a caller
+    scoring sends by id (an outbox, a monitor) must not count this one (#149264). ``ack_id`` is for a
+    runner, whose sender already holds the id from its dispatch ack: there it only correlates."""
     left = []
     for path in (_live_intent_file(dm_file), dm_file):
         _unlink_dm_file(path)
@@ -526,7 +532,10 @@ def _settled_no_send(dm_file: str, exc: LiveTargetUnavailableError) -> str:
             left.append(path)
     if left:
         return _live_outcome_unknown(dm_file, f"could not remove {left[0]}")
-    return _unavailable_payload(dm_file, exc)
+    answer = json.loads(_unavailable_payload(dm_file, exc))
+    if not ack_id:
+        del answer["delivery_id"]
+    return json.dumps(answer)
 
 
 def _held_disposition(record: dict | None) -> bool:
@@ -714,7 +723,7 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool,
             try:
                 record = _admit_live_dm(home, dm_file, author)
             except LiveTargetHeldError as exc:
-                print(_settled_no_send(dm_file, exc))  # the owner settled the id: drop the payload too
+                print(_settled_no_send(dm_file, exc, ack_id=True))  # the owner settled the id: drop the payload too
                 return 1
             except LiveTargetUnavailableError as exc:
                 print(_unavailable_payload(dm_file, exc))
@@ -744,7 +753,9 @@ def _delivery_command(argv: list[str], dm_file: str, *, stdin_file: bool,
                       profile_home: Path | None = None, author: Optional[dict] = None) -> str:
     """Build an argv-safe command for the cleanup-owning background runner:
     ``--run-delivery [--author <json>] <mode> <dm_file> [--profile-home <path>] <argv...>``."""
-    runner_argv = [sys.executable, str(Path(__file__).resolve()), "--run-delivery",
+    from tools.bot_relay import runner_python
+
+    runner_argv = [runner_python(), str(Path(__file__).resolve()), "--run-delivery",
                    "stdin" if stdin_file else "query-file", dm_file]
     if profile_home is not None:
         runner_argv.extend(["--profile-home", str(Path(profile_home).resolve())])
@@ -842,9 +853,13 @@ def _spawn_delivery(command: str, label: str, *, dm_file: Optional[str] = None, 
     try:
         from tools.terminal_tool import terminal_tool
 
+        # persist_on_release: the runner outlives the sender's agent. A fast sender's turn-end sweep, or
+        # a Desktop/TUI session its client closes, kills every other child it owns (``agent_close``),
+        # and that killed the reply wait or the peer send itself (#130559, #134898); its completion
+        # still notifies the sender's session, parked for a resumed owner if that session is gone.
         raw = terminal_tool(command, background=True, notify_on_complete=wake != "none", task_id=task_id,
                             workdir=str(Path(__file__).resolve().parent.parent), _host_local=True,
-                            _completion_output_chars=completion_chars)
+                            persist_on_release=True, _completion_output_chars=completion_chars)
         try:
             parsed = json.loads(raw)
         except (ValueError, TypeError):
@@ -1026,8 +1041,8 @@ def _session_title(agent: Any) -> str:
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised as a background process
-    # Spawned as a script with the sender's sys.executable, which under PM is the bare store
-    # interpreter (dependencies are activated in-process, never inherited), so boot like every
+    # Spawned as a script on ``bot_relay.runner_python()``, under PM the bare store interpreter
+    # (dependencies are activated in-process, never inherited), so boot like every
     # entry point before the lazy Hermes imports. Run as a path, sys.path[0] is tools/.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     # Only the delivery lane boots: the reply waiter is stdlib only and its stdout is the

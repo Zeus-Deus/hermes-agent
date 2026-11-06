@@ -472,12 +472,31 @@ def waiter_command(root: Path | str, envelope: dict) -> str:
     reply_path = str(relay_root(root) / REPLIES_DIR / f"{envelope['id']}.json")
     label = f"@{envelope.get('target_handle', '')} on {envelope.get('target_connection', '')}"
     runner = str(Path(__file__).resolve().with_name("bot_mode_dm.py"))
-    argv = [sys.executable or "python3", runner, "--wait-reply", reply_path, label, str(REPLY_WAIT_SECONDS)]
+    argv = [runner_python(), runner, "--wait-reply", reply_path, label, str(REPLY_WAIT_SECONDS)]
     if sys.platform == "win32":
         # Same rewrite as the delivery runner: the tracked local backend uses Git Bash on native
         # Windows, where forward-slash drive paths run and backslash paths parse as command names.
         argv = [part.replace("\\", "/") for part in argv]
     return shlex.join(argv)
+
+
+def runner_python() -> str:
+    """The interpreter every Bot DM runner boots on (the local delivery runner, the fan-out runner,
+    this reply waiter), resolved at each launch: PM's current store Python, else this process's.
+
+    A long-running host keeps the ``sys.executable`` it started with, and ``hermes update`` deletes
+    that store entry when it installs a new one, so a runner built from it exited 127 and the DM or
+    its reply was lost (#144658). The runner boots its own dependencies (``bot_mode_dm.py``'s
+    ``__main__``), so the bare store Python is enough; the same rule as ``runtime_command``.
+    Developer and PATH installs have no store and keep their own interpreter.
+    """
+    with contextlib.suppress(Exception):
+        from hermes_cli._launchers import resolve_store_python
+
+        store = resolve_store_python(Path(__file__).resolve().parents[1])
+        if store is not None:
+            return str(store)
+    return sys.executable or "python3"
 
 
 def _hermes_cli() -> str:
