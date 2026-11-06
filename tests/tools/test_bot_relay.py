@@ -343,7 +343,12 @@ def test_a_restarted_desktop_window_still_gets_the_mail_its_machine_was_sent(roo
     assert [e["id"] for e in bot_relay.claim_pending_envelopes(root, old)] == [blue["id"]]  # claimed, then the app quits
     assert bot_relay.claim_pending_envelopes(root, restarted) == []  # its new window has not pushed yet
     bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id="2" * 32, title="Blue Bot")], restarted)
-    assert [e["id"] for e in bot_relay.claim_pending_envelopes(root, restarted)] == [blue["id"]]
+    # handed out listing the restarted window too: the Desktop leaves one that lists only others
+    assert [(e["id"], e["target_publishers"]) for e in bot_relay.claim_pending_envelopes(root, restarted)] == [
+        (blue["id"], [old, restarted])]
+    assert [e["target_publishers"] for e in bot_relay.claim_pending_envelopes(root, old)] == [[old]]
+    on_disk = json.loads((bot_relay.relay_root(root) / "claimed" / f"{blue['id']}.json").read_text())
+    assert on_disk["target_publishers"] == [old]  # the stamp itself is unchanged
     assert bot_relay.claim_pending_envelopes(root) == []  # the older Desktop's Red Bot is another machine
     bot_relay.write_remote_roster(root, [_row("scout", "homelab", install_id="9" * 32)], "desktop-eeeeeeeeeeee")
     assert bot_relay.claim_pending_envelopes(root, "desktop-eeeeeeeeeeee") == []

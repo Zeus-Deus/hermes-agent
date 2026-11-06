@@ -630,6 +630,15 @@ function rosterTrace(rows: RelayAgentRow[], installId: string, connectionId: str
 const RELAY_AGENTS_CACHE_MAX = 32
 const relayAgentsCache = new LruCache<string, RelayAgentRow[]>(RELAY_AGENTS_CACHE_MAX)
 
+// Per connection: the rows this relay run last pushed there, and whether it was drained since. A
+// gateway offers an envelope that names a machine only to the Desktops whose slice lists it
+// (#139219), so a drain that ran before this window's slice landed (a restarted window, or a
+// roster that just gained the machine) got nothing and spent its work signal: a push that changes
+// the slice of a gateway drained meanwhile drains it again. Never one that was not drained — a
+// route without outbox work is not dialled (#118856).
+const pushedRosters = new Map<string, string>()
+const drainedSinceSlice = new Set<string>()
+
 /** Push every gateway the union roster of agents on the OTHER connections. */
 async function syncRelayRosters() {
   if (relay.disposed || relay.rosterBusy || !relayBotModeOn()) {
@@ -757,6 +766,18 @@ async function syncRelayRosters() {
           await pushRelayRoster(connection.route, others)
         } catch {
           // Older backend without the relay RPCs — skip this connection.
+          return
+        }
+
+        const pushed = JSON.stringify(others)
+
+        if (isCurrent() && pushedRosters.get(connection.id) !== pushed) {
+          pushedRosters.set(connection.id, pushed)
+
+          if (drainedSinceSlice.delete(connection.id)) {
+            noteRelayOutboxWork({ connectionId: connection.id })
+            scheduleRelayPushDrain()
+          }
         }
       })
     )
@@ -785,6 +806,7 @@ async function drainRelayOutboxes() {
   }
 
   relay.drainBusy = true
+  const generation = relay.rosterGeneration
 
   try {
     const connections = await relayConnections()
@@ -822,6 +844,10 @@ async function drainRelayOutboxes() {
 
       try {
         const res = await drainRelayOutbox(sender.route)
+
+        if (relay.rosterGeneration === generation) {
+          drainedSinceSlice.add(sender.id)
+        }
 
         const pending = pendingRelaysFor(sender)
         const offered = Array.isArray(res?.envelopes) ? res.envelopes : []
@@ -1263,6 +1289,8 @@ export function stopBotRelay() {
   // it would fire one stale drain after restart.
   relay.drainRerun = false
   routesWithOutboxWork.clear()
+  pushedRosters.clear()
+  drainedSinceSlice.clear()
   localRelayIdLookup = null
   // Queued deliveries check `disposed` before they run; forget the lane tails
   // so a restart starts every target fresh instead of behind stale chains.

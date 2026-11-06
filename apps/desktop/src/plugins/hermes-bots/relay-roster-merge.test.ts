@@ -291,6 +291,71 @@ describe('each Desktop pushes its roster as its own slice (#139219)', () => {
     }
   )
 
+  it('drains a gateway again once this window’s slice lands there, if a drain ran before it', async () => {
+    // A restarted window has a new publisher id. Mail signalled before its first slice reaches
+    // the sender's gateway is withheld (the gateway offers it to the Desktops relaying its
+    // machine) and that drain spent the work signal; the gateway does not signal again.
+    let publishSlice: () => void = () => {}
+    let published = false
+
+    const calls = respondWith(call => {
+      if (call.method === 'profiles.list') {
+        return call.connectionId === 'local'
+          ? { install_id: INSTALL, profiles: [{ name: 'ops' }] }
+          : { install_id: 'f'.repeat(32), profiles: [{ name: 'scout' }] }
+      }
+
+      if (call.method === 'bot_relay.roster.sync' && call.connectionId === 'local') {
+        return new Promise(resolve => {
+          publishSlice = () => {
+            published = true
+            resolve({ count: 1 })
+          }
+        })
+      }
+
+      if (call.method === 'bot_relay.outbox.drain') {
+        // What the gateway hands this window once its slice lists the target machine.
+        const envelope = {
+          canonical_delivery_v1: true, from_handle: 'ops', from_profile: 'ops', id: 'env-r', message: 'hi',
+          target_connection: 'srv', target_profile: 'scout', target_publishers: ['desktop-aaaaaaaaaaaa', PUBLISHER]
+        }
+
+        return { envelopes: call.connectionId === 'local' && published ? [envelope] : [] }
+      }
+
+      if (call.method === 'bot_relay.deliver') {
+        return { status: 'settled', delivery_id: call.params.id, admission_id: 'admission', reply: 'done' }
+      }
+
+      return {}
+    })
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+    const drainsOfLocal = () => calls.filter(call => call.method === 'bot_relay.outbox.drain' && call.connectionId === 'local')
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+    await pushAndSettle(1, { connectionId: 'local' })
+
+    expect(drainsOfLocal()).toHaveLength(1)
+
+    publishSlice()
+    await vi.advanceTimersByTimeAsync(RELAY_PUSH_DEBOUNCE_MS + 10)
+
+    expect(drainsOfLocal()).toHaveLength(2)
+    expect(calls.filter(call => call.method === 'bot_relay.deliver').map(call => call.connectionId)).toEqual(['srv'])
+
+    // the next tick pushes the same slice: no further drain without new work
+    await vi.advanceTimersByTimeAsync(60_000)
+    publishSlice()
+    await vi.advanceTimersByTimeAsync(RELAY_PUSH_DEBOUNCE_MS + 10)
+
+    expect(drainsOfLocal()).toHaveLength(2)
+
+    stopBotRelay()
+  })
+
   describe('an envelope only another Desktop relays is left to it', () => {
     function drainOne(envelope: Record<string, unknown>) {
       return respondWith(call => {

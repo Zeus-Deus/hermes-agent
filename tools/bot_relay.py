@@ -543,6 +543,16 @@ def _offered_to(envelope: dict, drainer: str, relays: Callable[[dict], bool]) ->
     return drainer != LEGACY_PUBLISHER or not envelope.get("target_install") or relays(envelope)
 
 
+def _as_offered(envelope: dict, drainer: str) -> dict:
+    """The copy handed to ``drainer``: an envelope offered because the drainer relays its machine
+    NOW also lists it, so the Desktop — which leaves an envelope listing only other Desktops —
+    takes it. The queued file keeps what the sender's gateway stamped."""
+    listed = envelope.get("target_publishers")
+    if isinstance(listed, list) and listed and drainer not in {str(item) for item in listed}:
+        return {**envelope, "target_publishers": [*listed, drainer]}
+    return envelope
+
+
 def _read_envelope(path: Path) -> Optional[dict]:
     with contextlib.suppress(OSError, ValueError):
         envelope = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -586,16 +596,17 @@ def claim_pending_envelopes(root: Path | str, publisher: Any = None) -> list[dic
             envelope = json.loads(claimed.read_text(encoding="utf-8-sig"))
             if not isinstance(envelope, dict):
                 raise ValueError(f"expected a JSON object, got {type(envelope).__name__}")
-            out.append((order, envelope))
+            if offered(envelope):  # (its pre-claim read failed) else replays reach the Desktops it names
+                out.append((order, _as_offered(envelope, drainer)))
     seen = {row["id"] for _order, row in out}
     # One enqueue-ordered list: a claimed-but-unanswered DM (Desktop reconnected before its reply)
     # is OLDER than mail queued since, so appending replays after fresh rows reversed them.
-    out.extend(_replay_unanswered(root, base, seen, now, offered))
+    out.extend(_replay_unanswered(root, base, seen, now, offered, drainer))
     return [envelope for _order, envelope in sorted(out, key=lambda item: item[0])]
 
 
 def _replay_unanswered(root: Path | str, base: Path, seen: set, now: float,
-                       offered: Callable[[dict], bool]) -> list[tuple[tuple[float, str], dict]]:
+                       offered: Callable[[dict], bool], drainer: str) -> list[tuple[tuple[float, str], dict]]:
     """``claimed/`` canonical envelopes whose reply has not landed yet, replayed on EVERY drain.
 
     A drained envelope is not "delivered": its stable id is handed out again until the target's
@@ -630,7 +641,7 @@ def _replay_unanswered(root: Path | str, base: Path, seen: set, now: float,
                     "the message up but never reported a delivery. It will not be retried; resend if it matters."))
                 continue
             if offered(envelope):
-                out.append((_queued_at(path), envelope))
+                out.append((_queued_at(path), _as_offered(envelope, drainer)))
     return out
 
 
