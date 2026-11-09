@@ -188,12 +188,19 @@ def _print_switch_summary(cli, result, old_model, *, one_turn: bool, strict_cont
         _cprint(f"    ⚠ {result.usage_notice}")
 
 
+def _current_route_provider(cli):
+    """Keep the endpoint-owned menu identity, not the resolved billing class."""
+    from hermes_cli.runtime_provider_custom import session_provider_identity
+    return session_provider_identity(
+        cli.provider or "", getattr(cli, "requested_provider", None), cli.base_url or "")
+
+
 def _switch_model_from(
     cli, raw_input, *, is_global, explicit_provider, user_providers, custom_providers):
     """``switch_model`` seeded with this CLI's live route."""
     from hermes_cli.model_switch import switch_model
     return switch_model(
-        raw_input=raw_input, current_provider=cli.provider or "", current_model=cli.model or "",
+        raw_input=raw_input, current_provider=_current_route_provider(cli), current_model=cli.model or "",
         current_base_url=cli.base_url or "", current_api_key=cli.api_key or "", is_global=is_global,
         explicit_provider=explicit_provider, user_providers=user_providers,
         custom_providers=custom_providers)
@@ -751,7 +758,7 @@ class CLIModelSwitchMixin:
                 # The classic CLI only builds a GatewayAgent (``_init_agent``): its ``once`` / ``restore`` are
                 # named, so a rename fails loudly instead of turning the restore into a session mutate.
                 restored = agent.switch_model(
-                    new_model=snapshot.get("model", ""), new_provider=snapshot.get("provider", ""),
+                    new_model=snapshot.get("model", ""), new_provider=_current_route_provider(self),
                     api_key=snapshot.get("api_key", ""), base_url=snapshot.get("base_url", ""),
                     api_mode=snapshot.get("api_mode", ""),
                     capabilities=snapshot.get("capabilities"), once=True, restore=True)
@@ -999,7 +1006,7 @@ class CLIModelSwitchMixin:
             if not target:
                 _cprint(f"  ✗ {t('cli.model.reset_no_default')}")
                 return
-            if target == self.model and explicit_provider in ("", self.provider):
+            if target == self.model and explicit_provider in ("", _current_route_provider(self)):
                 self._pending_one_turn_model_restore = None
                 _cprint(f"  {t('cli.model.reset_none', model=target)}")
                 return
@@ -1021,7 +1028,7 @@ class CLIModelSwitchMixin:
         from hermes_cli.inventory import load_picker_context
         try:
             ctx = load_picker_context().with_overrides(
-                current_provider=self.provider or "", current_model=self.model or "",
+                current_provider=_current_route_provider(self), current_model=self.model or "",
                 current_base_url=self.base_url or "")
         except Exception:
             ctx = None
