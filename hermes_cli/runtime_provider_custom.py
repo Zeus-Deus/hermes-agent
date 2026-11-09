@@ -672,7 +672,9 @@ def _resolve_direct_alias_runtime(requested_provider: str, explicit_api_key: str
     # launch key still wins over the pool (R2-M1).
     explicit_key = _explicit_key(explicit_api_key)
     has_explicit_key = callable(explicit_key) or rp.has_usable_secret(explicit_key)
-    pool_result = None if has_explicit_key else rp._try_resolve_from_custom_pool(base_url, "custom", None)
+    declared, entry_key = _owning_entry_credential(rp, base_url)
+    # An owning command must not be replaced by a pool row seeded from its stale static key.
+    pool_result = None if has_explicit_key or callable(entry_key) else rp._try_resolve_from_custom_pool(base_url, "custom", None)
     if pool_result:
         pool_result["source"] = "direct-alias"
         return pool_result
@@ -681,7 +683,6 @@ def _resolve_direct_alias_runtime(requested_provider: str, explicit_api_key: str
     # ``model.key_env`` only when this alias endpoint IS the configured model.base_url (#67453).
     # A ``providers:`` entry that owns the URL and declares a credential supplies it instead of
     # the host-gated env keys (on the entry's built-in's host those are another account's).
-    declared, entry_key = _owning_entry_credential(rp, base_url)
     candidates = [explicit_key, _model_cfg_key_env_for(rp._get_model_config(), base_url),
                   *([] if declared else rp._host_gated_env_key_candidates(base_url, ollama=True))]
     api_key = next((c for c in candidates if callable(c) or rp.has_usable_secret(c)), "") or entry_key
