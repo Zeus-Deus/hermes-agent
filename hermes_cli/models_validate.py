@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from difflib import get_close_matches
+from functools import cache
 from typing import Any, Callable, Optional
 
 from utils import base_url_host_matches
@@ -99,7 +100,7 @@ class _Request:
     lookup: str                 # id used for catalog membership (profile-normalized / preset base)
     provider: Optional[str]     # raw caller value (Ollama checks look at this, not ``normalized``)
     normalized: str
-    api_key: Optional[str]
+    api_key: Any
     base_url: Optional[str]
     api_mode: Optional[str]
     headers: Optional[dict[str, str]]
@@ -304,20 +305,23 @@ def _ollama_probe_headers(req: _Request) -> dict[str, str]:
     when the probed endpoint is the configured one (never leak them to a different host). Caller
     headers win; a caller ``api_key`` becomes the Authorization header unless the caller sent one."""
     from hermes_cli import models as _m
-    from hermes_cli import models_local as _ml
-    from hermes_cli.models_local import _configured_ollama_base_url, _drop_authorization
+    from hermes_cli.models_local import _drop_authorization
 
-    configured_base = _configured_ollama_base_url()
-    configured_allowed = not configured_base or _ml._same_ollama_native_root(req.base_url or "", configured_base)
-    configured = _m._get_ollama_native_headers(req.base_url, api_key=req.api_key) if configured_allowed else {}
+    from agent.command_token_source import materialize_probe_api_key
+
+    api_key = materialize_probe_api_key(req.api_key)
+    if callable(req.api_key):
+        # Detection may fall through to another validator: reuse this snapshot, not a new mint.
+        req.api_key = lambda: api_key
+    configured = _m._get_ollama_native_headers(req.base_url, api_key=req.api_key)
     if req.headers is None:
         return configured
     out = dict(configured)
     _drop_authorization(out)
     out.update(req.headers)
-    if req.api_key and not any(key.lower() == "authorization" for key in req.headers):
+    if api_key and not any(key.lower() == "authorization" for key in req.headers):
         _drop_authorization(out)
-        out["Authorization"] = f"Bearer {req.api_key}"
+        out["Authorization"] = f"Bearer {api_key}"
     return out
 
 
@@ -330,14 +334,18 @@ def _validate_ollama_native(req: _Request) -> Optional[dict[str, Any]]:
 
     if str(req.provider or "").strip().lower() == "ollama" and not req.base_url:
         req.base_url = _m._get_ollama_base_url()
-    headers = _ollama_probe_headers(req)
-    if not _ml.should_use_ollama_native_catalog(req.provider, req.base_url, headers=headers):
+    @cache
+    def probe_headers():
+        return _ollama_probe_headers(req)
+
+    if not _ml.should_use_ollama_native_catalog(req.provider, req.base_url, headers=probe_headers):
         return None
+    headers = probe_headers()
     models = _ml.probe_ollama_local_models(req.base_url, headers=headers)
     if models is None:
         # A failed native probe is not authoritative; fall back to the OpenAI-compatible catalog.
         models = _m.probe_api_models(
-            req.api_key, _ml._normalize_openai_base_url(req.base_url), request_headers=headers,
+            None, _ml._normalize_openai_base_url(req.base_url), request_headers=headers,
         ).get("models")
     if models is None:
         return _soft_accept(
@@ -781,7 +789,7 @@ def validate_requested_model(
     model_name: str,
     provider: Optional[str],
     *,
-    api_key: Optional[str] = None,
+    api_key: Any = None,
     base_url: Optional[str] = None,
     api_mode: Optional[str] = None,
     headers: Optional[dict[str, str]] = None,

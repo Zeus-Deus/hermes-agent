@@ -23,6 +23,7 @@ def test_picker_command_auth_is_lazy_and_credential_scoped(monkeypatch, route, s
         return f"token-{command}", 3600
 
     def fetch(key, url, **kwargs):
+        key = command_token_source.materialize_probe_api_key(key)
         probes.append(key)
         return ["fallback", f"catalog-{key}"] if key.startswith("token-") else None
 

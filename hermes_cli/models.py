@@ -3,7 +3,7 @@
 Origin module; cohesive clusters live in siblings and are re-imported here so
 ``hermes_cli.models.<name>`` stays the stable import/monkeypatch surface:
 ``models_catalog_static`` (curated tables, provider registry, aliases), ``models_reasoning_caps``,
-``models_local`` (Ollama / LM Studio), ``models_pricing``, ``models_validate``.
+``models_local`` (Ollama / LM Studio), ``models_pricing``, ``models_probe``, ``models_validate``.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from typing import TypeGuard
 
 from agent.proxy_bypass import is_loopback_host
+from hermes_cli.models_probe import probe_api_models
 from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.urllib_security import open_credentialed_url
 from hermes_cli.version_info import hermes_user_agent
@@ -2121,7 +2122,7 @@ def _resolve_anthropic_pool_catalog_credentials() -> tuple[str, str]:
 
 
 def _fetch_anthropic_models(
-    timeout: float = 5.0, *, base_url: Optional[str] = None, api_key: Optional[str] = None
+    timeout: float = 5.0, *, base_url: Optional[str] = None, api_key: Any = None
 ) -> Optional[list[str]]:
     """Sorted model ids from the Anthropic /v1/models endpoint, or None. Credentials: explicit
     ``api_key``, else ``resolve_anthropic_token()`` (env / OAuth / Claude Code), else a read-only
@@ -2132,7 +2133,13 @@ def _fetch_anthropic_models(
         return None
 
     resolved_base_url = base_url
-    token = (api_key or "").strip() or resolve_anthropic_token()
+    from agent.command_token_source import materialize_probe_api_key
+
+    bearer_provider = callable(api_key)
+    token = materialize_probe_api_key(api_key)
+    if bearer_provider and not token:
+        return None
+    token = token or resolve_anthropic_token()
     if not token:
         # A pool credential and its endpoint are one security boundary — never pair the pool key
         # with a caller-provided endpoint.
@@ -2142,12 +2149,13 @@ def _fetch_anthropic_models(
 
     headers: dict[str, str] = {"anthropic-version": "2023-06-01"}
     is_oauth = _is_oauth_token(token)
-    if is_oauth:
+    if bearer_provider or is_oauth:
         headers["Authorization"] = f"Bearer {token}"
-        from agent.anthropic_adapter import _COMMON_BETAS, _OAUTH_ONLY_BETAS, _CONTEXT_1M_BETA
-        headers["anthropic-beta"] = ",".join(_COMMON_BETAS + _OAUTH_ONLY_BETAS)
     else:
         headers["x-api-key"] = token
+    if is_oauth:
+        from agent.anthropic_adapter import _COMMON_BETAS, _OAUTH_ONLY_BETAS, _CONTEXT_1M_BETA
+        headers["anthropic-beta"] = ",".join(_COMMON_BETAS + _OAUTH_ONLY_BETAS)
 
     url = _anthropic_models_url(resolved_base_url)
     try:
@@ -2311,87 +2319,6 @@ def _probe_result(
         "used_fallback": used_fallback}
 
 
-def probe_api_models(
-    api_key: Optional[str], base_url: Optional[str], timeout: float = 5.0,
-    api_mode: Optional[str] = None, request_headers: Optional[dict[str, str]] = None,
-) -> dict[str, Any]:
-    """Probe a ``/models`` endpoint with light URL heuristics (``base`` then ``base±/v1``).
-    ``anthropic_messages`` mode sends ``x-api-key`` + ``anthropic-version`` instead of a bearer; the
-    ``data[].id`` response shape is identical. ``models`` is None when no candidate answered."""
-    normalized = (base_url or "").strip().rstrip("/")
-    if not normalized:
-        return _probe_result(None, None, "")
-    from providers import profile_for_host
-
-    owner = profile_for_host(normalized, metadata=True)
-    owned = owner.probe_models(base_url=normalized, api_key=api_key, timeout=timeout) if owner else None
-    if owned is not None:
-        return _probe_result(*owned)
-
-    alternate_base = normalized[:-3].rstrip("/") if normalized.endswith("/v1") else normalized + "/v1"
-    candidates: list[tuple[str, bool]] = [(normalized, False)]
-    if alternate_base and alternate_base != normalized:
-        candidates.append((alternate_base, True))
-
-    tried: list[str] = []
-    _neg_key = _probe_neg_key(normalized)
-    if _neg_key is not None:
-        _neg_seen = _probe_neg_cache.get(_neg_key)
-        if _neg_seen is not None and (time.monotonic() - _neg_seen) < _PROBE_NEG_TTL:
-            return _probe_result(
-                None, normalized.rstrip("/") + "/models", normalized,
-                alternate_base if alternate_base != normalized else None)
-    headers: dict[str, str] = {"User-Agent": hermes_user_agent()}
-    if urllib.parse.urlparse(normalized).hostname == "generativelanguage.googleapis.com":
-        headers["X-Goog-Api-Client"] = hermes_user_agent("hermes-agent")
-    if api_key and api_mode == "anthropic_messages":
-        headers["x-api-key"] = api_key
-        headers["anthropic-version"] = "2023-06-01"
-    elif api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    if isinstance(request_headers, dict):
-        # Per-provider custom headers can contain secrets: merge last so endpoint config wins; never log.
-        from hermes_cli.config import normalize_extra_headers
-
-        headers.update(normalize_extra_headers(request_headers))
-
-    # Only thread ssl_context when a per-provider TLS override applies; public endpoints keep the
-    # original 2-arg call so existing call-seam mocks stay valid.
-    _open_kwargs: dict[str, Any] = {}
-    _ssl_context = _custom_provider_ssl_context(normalized)
-    if _ssl_context is not None:
-        _open_kwargs["ssl_context"] = _ssl_context
-    all_timed_out = True
-    for candidate_base, is_fallback in candidates:
-        url = candidate_base.rstrip("/") + "/models"
-        tried.append(url)
-        try:
-            data = _get_json(url, timeout=timeout, headers=headers, **_open_kwargs)
-        except Exception as exc:
-            # TLS, authentication and parsing failures must not hide corrected settings.
-            cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-            all_timed_out = all_timed_out and isinstance(cause, TimeoutError)
-            continue
-        if _neg_key is not None:
-            _probe_neg_cache.pop(_neg_key, None)
-        from hermes_cli.chat_catalog import note_catalog_item
-
-        probed = []
-        for item in data.get("data", []):
-            if isinstance(item, dict) and note_catalog_item(item):
-                continue
-            probed.append(item.get("id", ""))
-        return _probe_result(
-            probed, url, candidate_base.rstrip("/"),
-            alternate_base if alternate_base != candidate_base else normalized, is_fallback)
-
-    if _neg_key is not None and all_timed_out:
-        _probe_neg_cache[_neg_key] = time.monotonic()
-    return _probe_result(
-        None, tried[0] if tried else normalized.rstrip("/") + "/models", normalized,
-        alternate_base if alternate_base != normalized else None)
-
-
 # Legacy id-regex filter for items with no surface tag; unreachable (deletable) once every catalog
 # entry carries an explicit ``chat``/``embed``/``image-gen``/``tts``/``stt`` tag.
 _DEEPINFRA_EXCLUDE_RE = re.compile(
@@ -2530,7 +2457,7 @@ def _fetch_ai_gateway_models(timeout: float = 5.0) -> Optional[list[str]]:
 
 
 def fetch_api_models(
-    api_key: Optional[str], base_url: Optional[str], timeout: float = 5.0,
+    api_key: Any, base_url: Optional[str], timeout: float = 5.0,
     api_mode: Optional[str] = None, headers: Optional[dict[str, str]] = None,
 ) -> Optional[list[str]]:
     """Fetch the list of available model IDs from the provider's ``/models`` endpoint."""
@@ -2608,8 +2535,7 @@ def cached_fetch_api_models(
     def _live():
         if fetch_models is not None:
             return fetch_models()
-        from agent.command_token_source import materialize_probe_api_key
-        return fetch_api_models(materialize_probe_api_key(api_key), base_url, timeout=timeout, api_mode=api_mode, headers=headers)
+        return fetch_api_models(api_key, base_url, timeout=timeout, api_mode=api_mode, headers=headers)
 
     normalized_url = str(base_url or "").strip().rstrip("/").lower()
     if not normalized_url:  # nothing to key the cache on

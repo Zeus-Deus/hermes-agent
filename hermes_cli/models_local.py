@@ -18,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple, Optional
 from agent.secret_scope import get_secret_str
 from hermes_cli.urllib_security import url_origin
 
@@ -293,13 +293,14 @@ _LOCAL_LIKE_PROVIDERS = frozenset({"", "custom", "local", "llamacpp", "llama.cpp
 def should_use_ollama_native_catalog(
     provider: Optional[str],
     base_url: Optional[str],
-    headers: Optional[dict[str, str]] = None,
+    headers: Optional[dict[str, str] | Callable[[], dict[str, str]]] = None,
 ) -> bool:
     """True when model discovery should use local Ollama ``/api/tags``: the caller asked for Ollama
     explicitly, the base URL matches ``providers.ollama.base_url``, or an ambiguous custom URL on
     Ollama's default port actually serves ``/api/tags``. (Bare ``ollama`` is normalized to
     ``custom`` elsewhere so runtime paths share the OpenAI client, but ``/api/tags`` is the
     authoritative local list; other custom endpoints keep the ``/models`` probe.)"""
+    # Resolve lazy headers only when detection actually performs network I/O.
     requested = str(provider or "").strip().lower()
     root = _root_for_ollama_native_api(base_url or "")
     if root:
@@ -318,7 +319,7 @@ def should_use_ollama_native_catalog(
         if not root:
             return False
         if configured_base and not _same_ollama_native_root(root, configured_base):
-            return probe_ollama_local_models(root, timeout=0.5, headers=headers) is not None
+            return probe_ollama_local_models(root, timeout=0.5, headers=headers() if callable(headers) else headers) is not None
         return True
 
     if configured_base and _same_ollama_native_root(root, configured_base):
@@ -339,7 +340,7 @@ def should_use_ollama_native_catalog(
     except ValueError:
         return False
 
-    return probe_ollama_local_models(root, timeout=0.5, headers=headers) is not None
+    return probe_ollama_local_models(root, timeout=0.5, headers=headers() if callable(headers) else headers) is not None
 
 
 def _ollama_local_catalog(force_refresh: bool) -> list[str]:

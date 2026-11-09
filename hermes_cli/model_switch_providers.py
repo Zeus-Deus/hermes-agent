@@ -102,15 +102,19 @@ def _fetch_picker_live_models(
         should_use_ollama_native_catalog,
     )
 
-    if callable(api_key):
+    if callable(api_key) and cache:
         # Let the catalog cache decide whether any token or network I/O is needed.
         return cached_fetch_api_models(
             api_key, api_url, timeout=timeout, headers=headers, api_mode=api_mode,
             fetch_models=lambda: _fetch_picker_live_models(
-                materialize_probe_api_key(api_key), api_url, native_catalog_provider,
+                api_key, api_url, native_catalog_provider,
                 preserve_native_models, headers, timeout, api_mode, cache=False))
 
-    candidate_headers = _get_ollama_native_headers(api_url, api_key=api_key)
+    bearer_provider = callable(api_key)
+    api_key = materialize_probe_api_key(api_key)
+    # Keep bearer provenance after taking one snapshot for native detection and fallback.
+    probe_key = (lambda: api_key) if bearer_provider else api_key
+    candidate_headers = _get_ollama_native_headers(api_url, api_key=probe_key)
 
     def _drop(pred) -> None:
         for key in tuple(candidate_headers):
@@ -156,7 +160,7 @@ def _fetch_picker_live_models(
         # A failed native probe is not authoritative: retry the cached generic catalog.
         api_url = _normalize_openai_base_url(api_url)
     generic_models = (cached_fetch_api_models if cache else fetch_api_models)(
-        api_key, api_url, timeout=timeout, headers=resolved_headers, api_mode=api_mode)
+        probe_key, api_url, timeout=timeout, headers=resolved_headers, api_mode=api_mode)
     return generic_models if generic_models or use_native else None
 
 
