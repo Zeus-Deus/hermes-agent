@@ -1480,8 +1480,9 @@ def _creds_for_switched_provider(st: _Switch) -> Optional[ModelSwitchResult]:
         # Retain the entry identity on the next turn, even when its key is a built-in name.
         st.target_provider = custom_provider_slug(user_pdef.name, user_pdef.id)
         st.provider_label = user_pdef.name
-        # Use the same command-first, profile-scoped credential as runtime resolution.
-        ukey = _entry_credential(runtime_provider, ucfg, user_pdef.name)
+        # Commands stay lazy and first; static references keep the picker's scoped .env reads.
+        ukey = (_entry_credential(runtime_provider, ucfg, user_pdef.name) if ucfg.get("key_cmd")
+                else _entry_configured_key(ucfg, _scoped_key_env))
         st.validation_headers = _extra_headers_from_config(ucfg)
         try:
             st.resolve_runtime(
