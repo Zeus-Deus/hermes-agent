@@ -2128,7 +2128,9 @@ def _fetch_anthropic_models(
     ``api_key``, else ``resolve_anthropic_token()`` (env / OAuth / Claude Code), else a read-only
     API-key credential_pool entry."""
     try:
-        from agent.anthropic_credentials import resolve_anthropic_token, _is_oauth_token, is_native_anthropic_host
+        from agent.anthropic_credentials import (
+            resolve_anthropic_token, _is_oauth_token, is_native_anthropic_host, anthropic_route_is_oauth,
+        )
     except ImportError:
         return None
 
@@ -2153,7 +2155,8 @@ def _fetch_anthropic_models(
         headers["Authorization"] = f"Bearer {token}"
     else:
         headers["x-api-key"] = token
-    if is_oauth:
+    native_oauth = anthropic_route_is_oauth(resolved_base_url, token)
+    if native_oauth:
         from agent.anthropic_adapter import _COMMON_BETAS, _OAUTH_ONLY_BETAS, _CONTEXT_1M_BETA
         headers["anthropic-beta"] = ",".join(_COMMON_BETAS + _OAUTH_ONLY_BETAS)
 
@@ -2164,7 +2167,7 @@ def _fetch_anthropic_models(
         except urllib.error.HTTPError as http_err:
             # OAuth subscriptions that 400 the 1M context beta ("long context beta is not yet
             # available for this subscription"): retry once without it; re-raise anything else.
-            if not (is_oauth and http_err.code == 400):
+            if not (native_oauth and http_err.code == 400):
                 raise
             try:
                 body_text = http_err.read().decode(errors="ignore").lower()

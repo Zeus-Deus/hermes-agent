@@ -91,6 +91,8 @@ def _catalog_matches_sdk(tmp_path, monkeypatch, endpoint, route, credential, tok
     assert endpoint.calls
     assert all(headers.get(expected_header) == sdk_calls[0][expected_header] for _, headers, _ in endpoint.calls)
     assert all(other_header not in headers for _, headers, _ in endpoint.calls)
-    if route == "native" and token.startswith("sk-ant-oat"):
-        assert all("oauth-2025-04-20" in headers.get("anthropic-beta", "") for _, headers, _ in endpoint.calls)
+    from agent.anthropic_adapter import _OAUTH_ONLY_BETAS
+    for _, headers, _ in endpoint.calls:
+        assert (set(headers.get("anthropic-beta", "").split(",")) & set(_OAUTH_ONLY_BETAS)) == (
+            set(sdk_calls[0].get("anthropic-beta", "").split(",")) & set(_OAUTH_ONLY_BETAS))
     assert all(headers.get("anthropic-version") == "2023-06-01" for _, headers, _ in endpoint.calls)
