@@ -54,11 +54,10 @@ def probe_api_models(
     if urllib.parse.urlparse(normalized).hostname == "generativelanguage.googleapis.com":
         headers["X-Goog-Api-Client"] = _m.hermes_user_agent("hermes-agent")
     if api_mode == "anthropic_messages":
-        headers["anthropic-version"] = "2023-06-01"
-    if api_mode == "anthropic_messages" and bearer_provider:
         from agent.anthropic_credentials import anthropic_route_is_oauth, is_native_anthropic_host
-        native_oauth = anthropic_route_is_oauth(normalized, api_key)
-        bearer_provider = not is_native_anthropic_host(normalized) or native_oauth
+        headers["anthropic-version"] = "2023-06-01"
+        native_oauth = bearer_provider and anthropic_route_is_oauth(normalized, api_key)
+        bearer_provider = bearer_provider and (not is_native_anthropic_host(normalized) or native_oauth)
         if native_oauth:
             from agent.anthropic_adapter import _COMMON_BETAS, _OAUTH_ONLY_BETAS
             headers["anthropic-beta"] = ",".join(_COMMON_BETAS + _OAUTH_ONLY_BETAS)
