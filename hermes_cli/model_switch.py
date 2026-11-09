@@ -1473,9 +1473,15 @@ def _creds_for_switched_provider(st: _Switch) -> Optional[ModelSwitchResult]:
         user_pdef = (resolve_user_provider(explicit_norm, st.user_providers)
                      or resolve_user_provider(st.target_provider, st.user_providers))
     if user_pdef is not None and user_pdef.base_url:
-        ucfg = st.user_providers.get(explicit_norm) or st.user_providers.get(st.target_provider) or {}
-        # Key reads go through the per-profile secret scope (multiplexed gateway).
-        ukey = _entry_configured_key(ucfg, _scoped_key_env)
+        from hermes_cli import runtime_provider
+        from hermes_cli.runtime_provider_custom import _entry_credential
+        from hermes_cli.providers import custom_provider_slug
+        ucfg = st.user_providers[user_pdef.id]
+        # Retain the entry identity on the next turn, even when its key is a built-in name.
+        st.target_provider = custom_provider_slug(user_pdef.name, user_pdef.id)
+        st.provider_label = user_pdef.name
+        # Use the same command-first, profile-scoped credential as runtime resolution.
+        ukey = _entry_credential(runtime_provider, ucfg, user_pdef.name)
         st.validation_headers = _extra_headers_from_config(ucfg)
         try:
             st.resolve_runtime(

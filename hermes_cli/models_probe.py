@@ -15,8 +15,9 @@ def probe_api_models(
     api_mode: Optional[str] = None, request_headers: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     """Probe a ``/models`` endpoint with light URL heuristics (``base`` then ``base±/v1``).
-    ``anthropic_messages`` uses ``x-api-key`` for static keys, Bearer for callable credentials
-    (matching the runtime client), and ``anthropic-version``; the ``data[].id`` shape is identical. ``models`` is None when no candidate answered."""
+    ``anthropic_messages`` uses ``x-api-key`` for static keys and command-minted native
+    Console keys, Bearer for other callable credentials (matching runtime), and
+    ``anthropic-version``; ``models`` is None when no candidate answered."""
     from hermes_cli import models as _m
 
     normalized = (base_url or "").strip().rstrip("/")
@@ -54,6 +55,9 @@ def probe_api_models(
         headers["X-Goog-Api-Client"] = _m.hermes_user_agent("hermes-agent")
     if api_mode == "anthropic_messages":
         headers["anthropic-version"] = "2023-06-01"
+    if api_mode == "anthropic_messages" and bearer_provider:
+        from agent.anthropic_credentials import _is_oauth_token, is_native_anthropic_host
+        bearer_provider = not is_native_anthropic_host(normalized) or _is_oauth_token(api_key)
     if api_key and api_mode == "anthropic_messages" and not bearer_provider:
         headers["x-api-key"] = api_key
     elif api_key:

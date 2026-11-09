@@ -230,7 +230,9 @@ def test_desktop_pick_resolves_a_provider_added_after_the_session_and_freezes_on
         assert frozen['providers'] == {'loop': {
             'name': 'Loopback', 'base_url': picked_url, 'key_env': 'LOOP_KEY', 'api_mode': 'chat_completions',
             'models': {'switched': {'context_length': 100000}}}}
-        assert frozen['model']['provider'] == 'loop' and frozen['model']['key_env'] == 'LOOP_KEY'
+        assert frozen['model']['provider'] == 'custom:loop'
+        # The named entry above owns key_env; the model only stores its durable pointer.
+        assert 'key_env' not in frozen['model'] and 'api_key' not in frozen['model']
         assert frozen['model']['default'] == 'switched'
         # Nothing else in the frozen config moved.
         assert {k: v for k, v in frozen.items() if k not in ('model', 'providers')} == \

@@ -103,7 +103,7 @@ def test_default_model_only_declaration_routes():
         user_providers=user_providers,
     )
     assert result.success is True, result.error_message
-    assert result.target_provider == "local-ollama"
+    assert result.target_provider == "custom:local-ollama"
     assert result.new_model == "qwen3.5-4b"
 
 
@@ -139,7 +139,7 @@ def test_compat_projection_of_same_provider_is_not_ambiguous():
         raw_input="claude-opus-4-7", current_provider="openrouter", user_providers=user_providers,
         custom_providers=get_compatible_custom_providers({"providers": user_providers}))
     assert result.success is True, result.error_message
-    assert result.target_provider == "relay"
+    assert result.target_provider == "custom:relay"
 
 
 def test_distinct_legacy_endpoint_with_same_model_stays_ambiguous():
@@ -169,7 +169,7 @@ _LEGACY_RELAY = {"name": "relay", "base_url": "https://relay.example/v1", "key_e
 def test_legacy_duplicate_of_same_endpoint_collapses_by_identity():
     """A hand-migrated config that kept the same endpoint under ``providers.relay`` AND as a legacy
     ``custom_providers`` row (same name, endpoint, credential, protocol) is one provider: ``/model``
-    routes to ``relay`` instead of calling it ambiguous (#112788)."""
+    routes to ``custom:relay`` instead of calling it ambiguous (#112788)."""
     from hermes_cli.config import get_compatible_custom_providers
 
     user_providers = {"relay": _RELAY}
@@ -178,7 +178,7 @@ def test_legacy_duplicate_of_same_endpoint_collapses_by_identity():
         raw_input="claude-opus-4-7", current_provider="openrouter", user_providers=user_providers,
         custom_providers=get_compatible_custom_providers(cfg))
     assert result.success is True, result.error_message
-    assert result.target_provider == "relay"
+    assert result.target_provider == "custom:relay"
 
 
 @pytest.mark.parametrize("delta", [
@@ -238,7 +238,7 @@ def test_legacy_duplicate_keeps_its_own_declared_models():
         raw_input="gpt-5.4-mini", current_provider="openrouter", user_providers=user_providers,
         custom_providers=get_compatible_custom_providers(cfg))
     assert result.success is True, result.error_message
-    assert result.target_provider == "relay"
+    assert result.target_provider == "custom:relay"
     assert result.new_model == "gpt-5.4-mini"
 
 

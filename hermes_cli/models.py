@@ -2128,7 +2128,7 @@ def _fetch_anthropic_models(
     ``api_key``, else ``resolve_anthropic_token()`` (env / OAuth / Claude Code), else a read-only
     API-key credential_pool entry."""
     try:
-        from agent.anthropic_credentials import resolve_anthropic_token, _is_oauth_token
+        from agent.anthropic_credentials import resolve_anthropic_token, _is_oauth_token, is_native_anthropic_host
     except ImportError:
         return None
 
@@ -2149,7 +2149,7 @@ def _fetch_anthropic_models(
 
     headers: dict[str, str] = {"anthropic-version": "2023-06-01"}
     is_oauth = _is_oauth_token(token)
-    if bearer_provider or is_oauth:
+    if (bearer_provider and not is_native_anthropic_host(resolved_base_url)) or is_oauth:
         headers["Authorization"] = f"Bearer {token}"
     else:
         headers["x-api-key"] = token

@@ -323,7 +323,7 @@ class TestSwitchModelDirectAliasOverride:
         })
 
         assert result.success, result.error_message
-        assert result.target_provider == "provider-b"
+        assert result.target_provider == "custom:provider-b"
         assert result.base_url == "https://api-b.example.com/v1"
         assert result.api_key == "sk-provider-b"
         assert result.resolved_via_alias == ""

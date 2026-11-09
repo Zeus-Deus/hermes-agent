@@ -796,7 +796,8 @@ _EXPLICIT_RESOLVERS: dict[str, Callable[..., dict[str, Any]]] = {
 def _resolve_explicit_runtime(*, provider: str, requested_provider: str, model_cfg: dict[str, Any],
                               explicit_api_key: Optional[str] = None, explicit_base_url: Optional[str] = None,
                               target_model: Optional[str] = None) -> Optional[dict[str, Any]]:
-    explicit_api_key = str(explicit_api_key or "").strip()
+    from hermes_cli.runtime_provider_custom import _explicit_key
+    explicit_api_key = _explicit_key(explicit_api_key)
     explicit_base_url = str(explicit_base_url or "").strip().rstrip("/")
     if not explicit_api_key and not explicit_base_url:
         return None

@@ -744,7 +744,9 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
     # ``no-key-required`` placeholder to a host that wants one (C11 pool rows). An explicit launch
     # key is the operator's credential for this route and wins over the pool (R2-M1). An entry
     # that names its own credential never borrows a same-named built-in's env-seeded pool rows.
-    pool_result = None if has_explicit_key else rp._try_resolve_from_custom_pool(
+    # A command is the entry's first credential, including over a pool row seeded
+    # from its stale api_key. Resolve it lazily below; a failed mint must not borrow that row.
+    pool_result = None if has_explicit_key or custom_provider.get("key_cmd") else rp._try_resolve_from_custom_pool(
         base_url, "custom", custom_provider.get("api_mode"),
         provider_name=custom_provider.get("provider_key") or custom_provider.get("name"),
     )

@@ -503,10 +503,11 @@ def resolve_user_provider(name: str, user_config: dict[str, Any]) -> Optional[Pr
     if not isinstance(user_config, dict) or not user_config:
         return None
     # Callers lowercase the requested name; the config key keeps the user's case (``Axonhub``).
-    # The pdef id is the config key so later ``user_config[target_provider]`` reads still hit.
+    # Accept the durable custom:<key> identity too, retaining the original config key on the pdef.
     if name not in user_config:
         wanted = str(name or "").strip().lower()
-        name = next((k for k in user_config if isinstance(k, str) and k.strip().lower() == wanted), name)
+        name = next((k for k in user_config if isinstance(k, str)
+                     and wanted in custom_provider_aliases("", k)), name)
     entry = user_config.get(name)
     if not isinstance(entry, dict):
         return None
