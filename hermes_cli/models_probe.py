@@ -56,9 +56,10 @@ def probe_api_models(
     if api_mode == "anthropic_messages":
         headers["anthropic-version"] = "2023-06-01"
     if api_mode == "anthropic_messages" and bearer_provider:
-        from agent.anthropic_credentials import _is_oauth_token, is_native_anthropic_host
-        bearer_provider = not is_native_anthropic_host(normalized) or _is_oauth_token(api_key)
-        if is_native_anthropic_host(normalized) and _is_oauth_token(api_key):
+        from agent.anthropic_credentials import anthropic_route_is_oauth, is_native_anthropic_host
+        native_oauth = anthropic_route_is_oauth(normalized, api_key)
+        bearer_provider = not is_native_anthropic_host(normalized) or native_oauth
+        if native_oauth:
             from agent.anthropic_adapter import _COMMON_BETAS, _OAUTH_ONLY_BETAS
             headers["anthropic-beta"] = ",".join(_COMMON_BETAS + _OAUTH_ONLY_BETAS)
     if api_key and api_mode == "anthropic_messages" and not bearer_provider:
