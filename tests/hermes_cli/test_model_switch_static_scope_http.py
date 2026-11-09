@@ -19,7 +19,8 @@ make_agent = live.make_agent
 @pytest.mark.platforms("posix")
 @pytest.mark.parametrize("origin", ["dotenv-only", "dotenv-over-process", "installed-scope"])
 @pytest.mark.parametrize("reference", ["key-env", "api-reference", "both", "literal"])
-@pytest.mark.parametrize("command", [False, True])
+@pytest.mark.parametrize("command", [None, "", "   ", "\t", "\n", True],
+                         ids=["absent", "empty", "spaces", "tab", "newline", "nonblank"])
 def test_static_scope_survives_switch_refresh_sdk(
         tmp_path, monkeypatch, endpoint, old_endpoint, make_agent, origin, reference, command):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -36,9 +37,11 @@ def test_static_scope_survives_switch_refresh_sdk(
         entry["api_key"] = "${FIXTURE_SCOPED_KEY}"
     if reference == "literal":
         entry["api_key"] = endpoint.token
-    if command:
+    if command is True:
         entry["key_cmd"] = shlex.join([sys.executable, "-c", "print('fixture-command-key')"])
         endpoint.token = "fixture-command-key"
+    elif command is not None:
+        entry["key_cmd"] = command
     atomic_config_write(tmp_path / "config.yaml", {
         "model": {"provider": "custom", "default": "fixture-old"}, "providers": {"relay": entry}})
     scope = secret_scope.set_secret_scope({"FIXTURE_SCOPED_KEY": "fixture-token-one"}) if origin == "installed-scope" else None
@@ -51,8 +54,8 @@ def test_static_scope_survives_switch_refresh_sdk(
         client, request, expected, path = live.sdk_request(cli)
         with client:
             assert request() == expected
-        assert callable(cli.api_key) == command
-        if not command:
+        assert callable(cli.api_key) == (command is True)
+        if command is not True:
             assert result.api_key == cli.api_key == cli._explicit_api_key == endpoint.token
         assert [p for p, _, _ in endpoint.calls] == ["/v1/models", path]
         assert all(h.get("authorization") == "Bearer " + endpoint.token for _, h, _ in endpoint.calls)
