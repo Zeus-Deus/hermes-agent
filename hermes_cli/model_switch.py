@@ -1484,8 +1484,10 @@ def _creds_for_switched_provider(st: _Switch) -> Optional[ModelSwitchResult]:
         from hermes_cli.providers import custom_provider_slug
         entry_name = user_pdef.id
         ucfg = st.user_providers.get(entry_name) or {}
-        # Retain the entry identity on the next turn, even when its key is a built-in name.
-        st.target_provider = custom_provider_slug(user_pdef.name, user_pdef.id)
+        # Retain the entry identity on the next turn, even when its key is a built-in name. A
+        # ``providers.custom`` entry already is bare ``custom``'s own endpoint, not ``custom:custom``.
+        if _clean(user_pdef.id).lower() != "custom":
+            st.target_provider = custom_provider_slug(user_pdef.name, user_pdef.id)
         st.provider_label = user_pdef.name
         # Commands stay lazy and first; static references keep the picker's scoped .env reads
         # (per-profile secret scope on a multiplexed gateway).
