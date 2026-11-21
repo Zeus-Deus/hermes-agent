@@ -81,6 +81,7 @@ def _prepare_for_chat(monkeypatch, cli_mod, stub):
     stub._chat_settle_turn = lambda turn: None
     stub._chat_render_turn = lambda turn, thread, interrupt: (turn.result or {}).get("final_response")
     stub._flush_credit_notices = lambda: None
+    stub._report_terminal_session = lambda: None
     for callback in ("_secret_capture_callback", "_sudo_password_callback", "_approval_callback",
                      "_vault_unlock_callback", "_vault_save_login_callback", "_vault_code_callback"):
         setattr(stub, callback, None)

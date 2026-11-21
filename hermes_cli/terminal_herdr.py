@@ -122,7 +122,8 @@ def _send(binary: str, pane: str, argv: tuple) -> str:
                "--seq", str(time.time_ns()), "--agent-session-id", argv[-1], "--", *argv]
     try:
         done = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.PIPE, text=True, timeout=_TIMEOUT, check=False)
+                              stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                              errors="replace", timeout=_TIMEOUT, check=False)
     except (OSError, subprocess.SubprocessError):
         return "failed"
     if done.returncode == 0:
