@@ -12,6 +12,7 @@ import pytest_asyncio
 
 from gateway import code_skew
 from tests.gateway import test_session_mutation_model_busy as busy
+from tests.fixtures.storage_holder import raw_holder
 from tests.waiting import async_wait_until
 
 
@@ -51,8 +52,13 @@ async def _denials(owner, request):
         owner.actor = actor
 
 
+def _session(db, session_id):
+    from persistence.sqlite.conversation._store.sessions import get_session
+    return get_session(raw_holder(db), session_id)
+
+
 def _request(db, ref, rid='pick'):
-    row = db.get_session(ref.session_id)
+    row = _session(db, ref.session_id)
     return {'id': 1, 'method': 'session.mutate', 'params': {
         'session_id': ref.session_id, 'request_id': rid,
         'expected_revision': row['runtime_revision'], 'expected_generation': row['runtime_generation'],
@@ -60,9 +66,9 @@ def _request(db, ref, rid='pick'):
 
 
 def _durable(db, ref):
-    with db._read_ctx() as conn:
+    with raw_holder(db)._read_ctx() as conn:
         meta = [tuple(row) for row in conn.execute('SELECT key,value FROM state_meta ORDER BY key')]
-    return db.get_session(ref.session_id), meta
+    return _session(db, ref.session_id), meta
 
 
 @pytest_asyncio.fixture
@@ -141,10 +147,14 @@ async def test_model_options_admission_preserves_auth_and_read_access(owner_stat
 @pytest.mark.parametrize('phase', ['idle', 'busy', 'retry-idle', 'retry-busy', 'apply-pending'])
 async def test_model_mutation_admission_preserves_receipts_and_turn_safety(owner_state, monkeypatch, state, phase):
     from gateway.session_contract import Submission
-    from gateway.session_deferred_pick import apply_deferred_pick, defer_pick, _PREFIX
-    from hermes_state_mutation_retirement import has_mutation_receipt
+    from gateway.session_deferred_pick import apply_deferred_pick, defer_pick
+    from persistence.sqlite.authority._runtime_picks import DEFERRED_PICK_PREFIX as _PREFIX
+    from gateway.session_persistence import authority_persistence
 
     s = owner_state
+
+    def has_mutation_receipt(_db, *identity):
+        return authority_persistence(s.authority).runtime.has_mutation_receipt(*identity)
     if phase in {'busy', 'retry-busy'}:
         await s.authority.submit(s.owner.actor, Submission('held', s.ref, {'text': 'RUNNING'}, 'queue'))
         await async_wait_until(s.started.is_set, timeout=10, what='the real turn is held')
@@ -202,11 +212,11 @@ async def test_model_mutation_admission_preserves_receipts_and_turn_safety(owner
         assert 'result' in await s.owner.dispatch(rename)
     elif phase == 'busy':
         assert reply['result']['status'] == 'deferred', reply
-        assert s.db.get_session(s.ref.session_id) == before[0]
+        assert _session(s.db, s.ref.session_id) == before[0]
         assert s.calls == []
     else:
         assert reply['result']['model'] == 'picked', reply
-        assert s.db.get_session(s.ref.session_id)['model'] == 'picked'
+        assert _session(s.db, s.ref.session_id)['model'] == 'picked'
         assert s.calls == ['resolve']
     if phase in {'busy', 'retry-busy'}:
         assert busy._running_model(s.authority, s.ref) == 'frozen'

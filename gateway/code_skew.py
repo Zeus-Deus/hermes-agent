@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+from hermes_cli._startup_fast import project_root_str
+
+_PROJECT_ROOT = Path(project_root_str())
 _boot_fingerprint: str | None = None
 
 
@@ -67,10 +69,10 @@ def require_current_model_code() -> None:
     if skew is None:
         return
     from agent.i18n import t
-    from hermes_state_runtime import RuntimeStoreError
+    from persistence.core.errors import AuthorityRefusal
 
     boot_rev, disk_rev = skew
-    error = RuntimeStoreError('code_skew')
+    error = AuthorityRefusal('code_skew')
     error.wire_code = 5098
     error.wire_message = t('gateway.model.error_prefix', error=t(
         'gateway.model.err_skew', boot_rev=boot_rev, disk_rev=disk_rev))

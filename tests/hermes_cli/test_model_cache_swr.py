@@ -162,6 +162,25 @@ class TestProviderModelsSWR:
             assert mod.cached_provider_model_ids("openai-codex", non_blocking=True) == []
         spawn.assert_called_once_with("openai-codex")
 
+    @pytest.mark.parametrize("fallback,age,expected", [(False, 0, True), (True, 0, False), (False, 2, False)])
+    def test_codex_gpt62_cache_requires_fresh_verified_discovery(self, monkeypatch, fallback, age, expected):
+        from hermes_cli import models as mod
+
+        gated = ["gpt-6.2-sol", "openai/gpt-6.2-astra"]
+        row = {**self._cache_entry([*gated, "gpt-6-sol"], age), "fallback": fallback}
+        monkeypatch.setattr(mod, "_load_provider_models_cache", lambda: {"openai-codex": row})
+        monkeypatch.setattr(mod, "_credential_fingerprint", lambda _: "fp")
+        monkeypatch.setattr(mod, "_spawn_swr_refresh", lambda _: None)
+        monkeypatch.setattr(mod, "provider_model_ids", lambda *a, **kw: [])
+        def unverified(served):
+            if fallback:  # served as this version's offline defaults, still without gated models
+                return "gpt-6-sol" in served and not set(gated) & set(served)
+            return served == ["gpt-6-sol"]
+
+        served = mod.cached_provider_model_ids("openai-codex", ttl_seconds=1, non_blocking=True)
+        assert served == row["models"] if expected else unverified(served)
+        assert unverified(mod.cached_provider_model_ids("openai-codex", force_refresh=True))
+
     def test_force_refresh_bypasses_swr(self):
         import hermes_cli.models as mod
 

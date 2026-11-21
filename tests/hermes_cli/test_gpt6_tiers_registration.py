@@ -73,7 +73,8 @@ def test_gpt61_sol_resolves_context_and_pricing_like_its_tier():
     from agent.usage_pricing import _OFFICIAL_DOCS_PRICING
 
     assert DEFAULT_CONTEXT_LENGTHS["gpt-6.1-sol"] == DEFAULT_CONTEXT_LENGTHS["gpt-6-sol"]
-    assert _CODEX_OAUTH_CONTEXT_FALLBACK["gpt-6.1-sol"] == _CODEX_OAUTH_CONTEXT_FALLBACK["gpt-6-sol"]
+    # Codex OAuth gives Sol 6.1 a 500K default window; 6 Sol keeps 272K.
+    assert (_CODEX_OAUTH_CONTEXT_FALLBACK["gpt-6.1-sol"], _CODEX_OAUTH_CONTEXT_FALLBACK["gpt-6-sol"]) == (500_000, 272_000)
     base = _OFFICIAL_DOCS_PRICING[("openai", "gpt-6.1-sol")]
     assert _OFFICIAL_DOCS_PRICING[("openai", "gpt-6.1-sol-pro")] is base
     assert base.cache_read_cost_per_million == base.input_cost_per_million / 20  # 5%, not 6 Sol's 10%
