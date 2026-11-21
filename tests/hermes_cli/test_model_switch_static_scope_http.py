@@ -61,7 +61,7 @@ def test_static_scope_survives_switch_refresh_sdk(
         assert all(h.get("authorization") == "Bearer " + endpoint.token for _, h, _ in endpoint.calls)
         assert old_endpoint.calls == []
         assert [params["payload"]["provider"] for method, params in peer.calls
-                if method == "session.mutate"] == ["custom:relay"]
+                if method == "session.mutate"] == ["relay"]
     finally:
         if scope is not None:
             secret_scope.reset_secret_scope(scope)

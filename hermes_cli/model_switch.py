@@ -1480,14 +1480,13 @@ def _creds_for_switched_provider(st: _Switch) -> Optional[ModelSwitchResult]:
                      or resolve_user_provider(st.target_provider, st.user_providers))
     if user_pdef is not None and user_pdef.base_url:
         from hermes_cli import runtime_provider
-        from hermes_cli.runtime_provider_custom import _entry_credential
-        from hermes_cli.providers import custom_provider_slug
+        from hermes_cli.runtime_provider_custom import _entry_credential, persisted_provider_id
         entry_name = user_pdef.id
         ucfg = st.user_providers.get(entry_name) or {}
-        # Retain the entry identity on the next turn, even when its key is a built-in name. A
-        # ``providers.custom`` entry already is bare ``custom``'s own endpoint, not ``custom:custom``.
-        if _clean(user_pdef.id).lower() != "custom":
-            st.target_provider = custom_provider_slug(user_pdef.name, user_pdef.id)
+        # Same identity rule as the persisted switch: the entry keeps its plain name, and only a
+        # built-in name it shadows becomes its ``custom:<key>`` identity, so the runtime below
+        # resolves the entry (and its command) instead of the built-in.
+        st.target_provider = persisted_provider_id(st.target_provider, st.user_providers)
         st.provider_label = user_pdef.name
         # Commands stay lazy and first; static references keep the picker's scoped .env reads
         # (per-profile secret scope on a multiplexed gateway).

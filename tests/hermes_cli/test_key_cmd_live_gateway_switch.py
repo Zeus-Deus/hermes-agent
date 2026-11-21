@@ -11,7 +11,7 @@ import sys
 import pytest
 
 from agent.command_token_source import CommandTokenSource
-from hermes_cli.config import atomic_config_write, load_config, read_user_config_raw
+from hermes_cli.config import atomic_config_write, get_compatible_custom_providers, load_config, read_user_config_raw
 from hermes_cli.model_switch import persist_model_selection, switch_model
 from tests.hermes_cli import test_gateway_agent as gateway_contract
 from tests.hermes_cli import test_key_cmd_model_switch_http as http_contract
@@ -19,6 +19,14 @@ from tests.hermes_cli import test_key_cmd_model_switch_http as http_contract
 
 endpoint = http_contract.endpoint
 make_agent = gateway_contract.make_agent
+# Entry keys that are also built-in provider names: only these take the ``custom:<key>`` identity.
+BUILTIN_NAMED = {"deepseek", "anthropic", "openrouter"}
+
+
+def route_identity(slug):
+    """The provider a switch to ``providers.<slug>`` reports and persists: the plain entry key,
+    or ``custom:<key>`` when the key would otherwise route to the built-in of that name."""
+    return "custom:" + slug.lower() if slug.lower() in BUILTIN_NAMED else slug
 
 def sdk_request(cli):
     from openai import OpenAI
@@ -64,7 +72,7 @@ def test_live_agent_switch_refresh_and_token_rotation(tmp_path, monkeypatch, end
         explicit_provider=slug.lower(), user_providers=load_config()["providers"])
     assert picked.success, picked.error_message
     assert not picked.warning_message, picked.warning_message
-    assert picked.target_provider == "custom:" + slug.lower()
+    assert picked.target_provider == route_identity(slug)
     assert picked.provider_label == "Fixture Relay"
     assert picked.api_mode == api_mode
     source = picked.api_key
@@ -131,16 +139,17 @@ def test_live_agent_switch_refresh_and_token_rotation(tmp_path, monkeypatch, end
 
 @pytest.mark.platforms("posix")
 @pytest.mark.parametrize("slug", ["deepseek", "MixedRelay"])
-def test_saved_custom_identity_can_be_selected_without_compat_projection(tmp_path, monkeypatch, endpoint, slug):
+def test_saved_custom_identity_keeps_its_command(tmp_path, monkeypatch, endpoint, slug):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     command = shlex.join([sys.executable, "-c", "print('fixture-token-one')"])
     atomic_config_write(tmp_path / "config.yaml", {
         "model": {"provider": "custom", "default": "fixture-old"},
         "providers": {slug: {"name": "Fixture Relay", "base_url": endpoint.base_url,
                             "key_cmd": command, "api_mode": "chat_completions"}}})
+    cfg = load_config()
     result = switch_model("fixture-selected", "custom", "fixture-old",
         current_base_url="http://127.0.0.1:1/v1", explicit_provider="custom:" + slug.lower(),
-        user_providers=load_config()["providers"])
+        user_providers=cfg["providers"], custom_providers=get_compatible_custom_providers(cfg))
     assert result.success, result.error_message
     assert not result.warning_message
     assert result.target_provider == "custom:" + slug.lower()

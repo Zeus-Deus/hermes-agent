@@ -80,14 +80,14 @@ def test_second_selection_keeps_named_route(tmp_path, monkeypatch, endpoint, old
     with client:
         assert request() == expected
     assert old_endpoint.calls == []
-    assert cli.requested_provider == "custom:" + slug.lower()
+    assert cli.requested_provider == live.route_identity(slug)
     assert cli.base_url == endpoint.base_url
     assert cli.api_mode == api_mode
     assert isinstance(cli.api_key, CommandTokenSource)
     assert [p for p, _, _ in endpoint.calls] == ["/v1/models", "/v1/models", path]
     assert all(h.get("authorization") == "Bearer fixture-token-one" for _, h, _ in endpoint.calls)
     mutations = [params for method, params in peer.calls if method == "session.mutate"]
-    assert [p["payload"]["provider"] for p in mutations] == ["custom:" + slug.lower()] * 2
+    assert [p["payload"]["provider"] for p in mutations] == [live.route_identity(slug)] * 2
 
 
 @pytest.mark.platforms("posix")
@@ -99,7 +99,7 @@ def test_named_route_in_picker_reset_and_once(tmp_path, monkeypatch, endpoint, o
     catalog_of_two(endpoint)
     command = shlex.join([sys.executable, "-c", "print('fixture-token-one')"])
     atomic_config_write(tmp_path / "config.yaml", {
-        "model": {"provider": "custom:relay", "default": "fixture-selected"},
+        "model": {"provider": "relay", "default": "fixture-selected"},
         "providers": {"relay": {"base_url": endpoint.base_url, "key_cmd": command}}})
     cfg = load_config()
     cli, connection, peer = cli_for(old_endpoint, make_agent)
@@ -110,7 +110,7 @@ def test_named_route_in_picker_reset_and_once(tmp_path, monkeypatch, endpoint, o
     if path == "picker":
         monkeypatch.setattr(switching, "_show_model_picker", lambda owner, ctx, refresh: observed.append(ctx))
         cli._handle_model_switch("/model")
-        assert observed[0].current_provider == "custom:relay"
+        assert observed[0].current_provider == "relay"
     elif path == "reset":
         cli._confirm_and_apply_cli_model_switch = lambda *args: observed.append(args)
         cli._handle_model_switch("/model reset")
@@ -124,8 +124,8 @@ def test_named_route_in_picker_reset_and_once(tmp_path, monkeypatch, endpoint, o
         cli._restore_model_runtime_snapshot(snapshot)
         mutations = [params for method, params in peer.calls if method == "session.mutate"]
         assert len(mutations) == 1  # Once and restore never mutate the session.
-        assert cli.requested_provider == "custom:relay"
-        assert cli.agent.provider == "custom:relay"
+        assert cli.requested_provider == "relay"
+        assert cli.agent.provider == "relay"
 
 
 @pytest.mark.parametrize("provider,requested", [("openai", "auto"), ("openai", "anthropic"),
