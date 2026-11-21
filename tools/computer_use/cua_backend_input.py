@@ -24,26 +24,6 @@ def _refuse(action: str, message: str, **fields: Any) -> ActionResult:
 class _InputMixin:
     """Pointer / keyboard / value-setter actions against the sticky target."""
 
-    def _prepare_element_target(self, action: str, args: dict[str, Any]) -> Optional[ActionResult]:
-        """Translate cached indices only when a snapshot token can carry their authority."""
-        idx = args.get("element_index")
-        if idx is None:
-            return None
-        supports_token = (self._session.supports_input_property(action, "element_token")
-                          or self._session.supports_capability("accessibility.element_tokens", tool=action))
-        if not supports_token:
-            return None  # Minimum-runtime drivers retain their index-based addressing.
-        token = self._snapshot_tokens.get(idx) if isinstance(idx, int) else None
-        if token:
-            args["element_token"] = token
-        if not self._session.supports_input_property(action, "element_index"):
-            # 0.38 removed indices. Never drop the sole target or invent a handle for an uncaptured row.
-            if not args.get("element_token"):
-                return _refuse(action, "No snapshot token for this element — call capture() again.",
-                               code="snapshot_token_required")
-            del args["element_index"]
-        return None
-
     def _target_args(self, action: str, *, need_window: bool = False) -> tuple[Optional[ActionResult], dict[str, Any]]:
         """``(refusal, base args)`` for an input action against the sticky target."""
         if self._active_pid is None or (need_window and self._active_window_id is None):

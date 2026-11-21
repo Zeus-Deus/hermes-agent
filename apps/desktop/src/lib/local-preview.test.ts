@@ -62,7 +62,8 @@ describe('remote HTML previews', () => {
       ...remoteTarget,
       dataUrl
     })
-    expect(readDesktopFileDataUrl).toHaveBeenCalledWith('/srv/report.html')
+    // No session scope: the read names none.
+    expect(readDesktopFileDataUrl).toHaveBeenCalledWith('/srv/report.html', undefined)
   })
 
   it('falls back to source mode when the transport is not canonical HTML', async () => {
@@ -133,6 +134,18 @@ describe('remote HTML previews', () => {
     expect(new TextDecoder().decode(saveImageBuffer.mock.calls[0]?.[0])).toBe('<h1>remote</h1>')
     expect(saveImageBuffer).toHaveBeenCalledWith(expect.any(Uint8Array), '.html')
     expect(openPreviewInBrowser).toHaveBeenCalledWith('file:///tmp/report%20%231%3F.html')
+  })
+
+  // saveImageBuffer rejects an empty buffer; an empty remote document still opens, as a blank page.
+  it('stages an empty remote HTML document as a blank page', async () => {
+    const saveImageBuffer = vi.fn(async (_data: ArrayBuffer | Uint8Array, _ext: string) => '/tmp/empty.html')
+    const openPreviewInBrowser = vi.fn(async () => undefined)
+    window.hermesDesktop = { openPreviewInBrowser, saveImageBuffer } as never
+
+    await openPreviewTargetInBrowser({ ...remoteTarget, dataUrl: 'data:text/html;base64,' })
+
+    expect(new TextDecoder().decode(saveImageBuffer.mock.calls[0]?.[0])).toBe('<!doctype html>')
+    expect(openPreviewInBrowser).toHaveBeenCalledWith('file:///tmp/empty.html')
   })
 
   it('passes browser blob staging URLs through unchanged', async () => {
