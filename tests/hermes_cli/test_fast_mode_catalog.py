@@ -72,11 +72,25 @@ def test_picker_and_interactive_checks_follow_exact_advertised_models(proxy):
     assert str(proxy.probes[0].url).startswith(BASE + "/models?client_version=")
 
 
+def test_unbound_runtime_headers_cannot_reuse_picker_catalog(proxy):
+    route = {"provider": "custom:example", "base_url": BASE}
+    assert resolve_fast_mode_overrides("future-model", tier="ultrafast", **route) == {"service_tier": "ultrafast"}
+    with OpenAI(api_key="test-endpoint-key", base_url=BASE) as sdk:
+        agent = SimpleNamespace(**route, api_mode="codex_responses", api_key=sdk.api_key,
+                                model="future-model", client=sdk, request_overrides={"service_tier": "ultrafast"})
+        kwargs = ResponsesApiTransport().build_kwargs(
+            model=agent.model, messages=[{"role": "user", "content": "hello"}], tools=[], **route,
+            request_overrides=effective_request_overrides(agent))
+        sdk.responses.create(**kwargs)
+    assert "service_tier" not in proxy.bodies[-1]
+
+
 def test_responses_sdk_omits_unavailable_pinned_tier_and_preserves_other_options(proxy):
     agent = SimpleNamespace(provider="custom:example", base_url=BASE, api_mode="codex_responses",
                             api_key="test-endpoint-key", model="gpt-6.2-sol")
     messages = [{"role": "user", "content": "hello"}]
-    with OpenAI(api_key=agent.api_key, base_url=BASE) as sdk:
+    with OpenAI(api_key=agent.api_key, base_url=BASE, default_headers={"X-Tenant": "example"}) as sdk:
+        agent.client = sdk
         for model, preference, expected in [
             ("gpt-6.2-sol", "ultrafast", "ultrafast"), ("gpt-6.2-astra", "ultrafast", None),
             ("gpt-6.2-astra", "priority", "priority"), ("gpt-6.1-sol", "priority", None),
@@ -175,6 +189,7 @@ def test_catalog_key_cmd_and_request_share_the_runtime_token_source(proxy, monke
     source = command_token_source.build_command_token_provider("example-token-helper", "example")
     agent = SimpleNamespace(provider="custom", requested_provider="example", base_url=BASE,
                             api_mode="codex_responses", api_key=source, model="future-model",
+                            _client_kwargs={"default_headers": {"X-Tenant": "example"}},
                             request_overrides={"service_tier": "ultrafast"})
     assert source() == "test-endpoint-key"
     assert effective_request_overrides(agent) == {"service_tier": "ultrafast"}
@@ -201,10 +216,20 @@ def test_shared_url_uses_the_named_tenant_for_picker_and_cli_turn(proxy):
     assert HermesCLI._resolve_turn_agent_config(shell, "hello")["request_overrides"] == {"service_tier": "ultrafast"}
 
 
-def test_lazy_session_rejects_ultrafast_for_priority_only_proxy_model(proxy, monkeypatch):
+@pytest.mark.parametrize("model_only", [False, True])
+def test_lazy_session_rejects_ultrafast_for_priority_only_proxy_model(proxy, monkeypatch, model_only):
     from tui_gateway import server
 
-    session = {"agent": None, "model_override": {"model": "gpt-6.2-astra", "provider": "example", "base_url": BASE}}
+    # The TUI server caches its process home; the pytest profile changes per case.
+    monkeypatch.setattr(server, "_hermes_home", str(get_hermes_home()))
+    model_route = {"provider": "example", "base_url": BASE}
+    if model_only:
+        config_path = get_hermes_home() / "config.yaml"
+        config = yaml.safe_load(config_path.read_text())
+        config["model"] = {"default": "gpt-6.2-sol", **model_route}
+        config_path.write_text(yaml.safe_dump(config))
+        model_route = {}
+    session = {"agent": None, "model_override": {"model": "gpt-6.2-astra", **model_route}}
     monkeypatch.setitem(server._sessions, "draft", session)
     def select(mode):
         return server._methods["config.set"]("rid", {"key": "fast", "session_id": "draft", "value": mode})

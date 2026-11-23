@@ -317,10 +317,12 @@ def _negotiate_custom_tier(agent: Any, overrides: dict[str, Any], model: str) ->
         if requested not in _PAID_TIERS:
             return
         client_kwargs = getattr(agent, "_client_kwargs", None) or {}
+        client = getattr(agent, "client", None)
+        bound_headers = getattr(client, "_custom_headers", client_kwargs.get("default_headers"))
         headers: dict[str, str] = {}
-        for source in (client_kwargs.get("default_headers", entry.get("extra_headers")), overrides.get("extra_headers")):
+        for source in (bound_headers, overrides.get("extra_headers")):
             headers.update({key.lower(): value for key, value in normalize_extra_headers(source).items()})
-        client_url = str(client_kwargs.get("base_url") or base_url).rstrip("/")
+        client_url = str(getattr(client, "base_url", None) or client_kwargs.get("base_url") or base_url).rstrip("/")
         allowed = (route["api_mode"] == "codex_responses" and client_url == base_url.rstrip("/")
                    and isinstance(model, str) and requested in custom_catalog_tiers(
                        entry, model, runtime_key=route["access_token"] or "no-key-required", runtime_headers=headers))
