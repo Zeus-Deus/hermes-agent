@@ -26,11 +26,13 @@ def resolve_verify(base_url: str = ""):
 
 
 @contextmanager
-def stream(url: str, *, headers=None, params=None, timeout=10.0, verify=None):
+def stream(url: str, *, headers=None, params=None, timeout=10.0, verify=None,
+           follow_redirects=True, deadline=None):
     import httpx
     from agent.deadline import DeadlineExpired, run_bounded_sync
     from hermes_cli.urllib_security import url_origin
 
+    deadline = TOTAL_DEADLINE_S if deadline is None else deadline
     origin = url_origin(url)
     private_headers = {name.lower() for name in headers or {} if name.lower() not in {"accept", "user-agent"}}
     private_headers.update({"authorization", "cookie", "proxy-authorization"})
@@ -46,7 +48,7 @@ def stream(url: str, *, headers=None, params=None, timeout=10.0, verify=None):
     with httpx.Client(
         verify=resolve_verify() if verify is None else verify,
         timeout=timeout,
-        follow_redirects=True,
+        follow_redirects=follow_redirects,
         event_hooks={"request": [scope_credentials]},
     ) as client:
         def fetch():
@@ -59,14 +61,14 @@ def stream(url: str, *, headers=None, params=None, timeout=10.0, verify=None):
         # httpx timeouts bound each socket op, not the exchange: a body trickling in under the read
         # timeout, or a hung DNS lookup, would hold the caller for as long as it lasts. Leaving the
         # client block on expiry closes the pool under the abandoned worker.
-        bounded = run_bounded_sync(fetch, TOTAL_DEADLINE_S, label=f"model metadata {origin}")
+        bounded = run_bounded_sync(fetch, deadline, label=f"model metadata {origin}")
         if bounded.timed_out:
-            raise DeadlineExpired(f"model metadata {origin}", TOTAL_DEADLINE_S)
+            raise DeadlineExpired(f"model metadata {origin}", deadline)
         try:
             yield bounded.value
         finally:
             bounded.value.close()
 
-def get(url: str, *, headers=None, params=None, timeout=10.0, verify=None):
-    with stream(url, headers=headers, params=params, timeout=timeout, verify=verify) as response:
+def get(url: str, **options):
+    with stream(url, **options) as response:
         return response

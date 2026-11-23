@@ -74,18 +74,29 @@ def begin_turn(agent: Any, conversation_history: Any) -> None:
     agent._fast_until = time.monotonic() + max(window, 0.0)
 
 
+def fast_mode_route(runtime: Any) -> dict[str, Any]:
+    """Keep a named custom tenant when the runtime reports the shared 'custom' adapter."""
+    field = runtime.get if isinstance(runtime, dict) else lambda key: getattr(runtime, key, None)
+    provider = field("provider")
+    requested = field("requested_provider")
+    if provider == "custom" and requested and requested != "auto":
+        provider = requested
+    api_mode = field("api_mode")
+    base_url = field("base_url")
+    if api_mode == "anthropic_messages":
+        base_url = field("_anthropic_base_url") or base_url
+    return {"provider": provider, "base_url": base_url, "api_mode": api_mode, "access_token": field("api_key")}
+
+
 def effective_request_overrides(agent: Any) -> dict[str, Any]:
     """``agent.request_overrides`` plus the fast override while the window is open, minus
     ``speed`` for a model this session learned has no fast capacity."""
     overrides = dict(getattr(agent, "request_overrides", None) or {})
-    if getattr(agent, "service_tier", None) in BOUNDED_MODES and time.monotonic() < getattr(agent, "_fast_until", 0.0):
+    tier = getattr(agent, "service_tier", None)
+    if tier in BOUNDED_MODES and time.monotonic() < getattr(agent, "_fast_until", 0.0):
         from hermes_cli.models import resolve_fast_mode_overrides
-        base_url = getattr(agent, "base_url", None)
-        if getattr(agent, "api_mode", None) == "anthropic_messages":
-            base_url = getattr(agent, "_anthropic_base_url", None) or base_url
-        overrides.update(
-            resolve_fast_mode_overrides(getattr(agent, "model", None), provider=getattr(agent, "provider", None), base_url=base_url) or {}
-        )
+        overrides.update(resolve_fast_mode_overrides(
+            overrides.get("model", getattr(agent, "model", None)), **fast_mode_route(agent)) or {})
     if "speed" in overrides and getattr(agent, "model", None) in (getattr(agent, "_fast_mode_unavailable_models", None) or ()):
         overrides.pop("speed", None)
     from agent.codex_service_tiers import apply_daybreak, negotiate_request_tier

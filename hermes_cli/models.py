@@ -1228,11 +1228,15 @@ def _strip_vendor_prefix(model_id: str) -> str:
     return raw.split("/", 1)[1] if "/" in raw else raw
 
 
-def model_supports_fast_mode(model_id: Optional[str], *, provider: Optional[str] = None, base_url: Optional[str] = None) -> bool:
+def model_supports_fast_mode(model_id: Optional[str], *, provider: Optional[str] = None, base_url: Optional[str] = None,
+                             api_mode: Optional[str] = None, access_token: Any = None) -> bool:
     """Whether to expose /fast for this model; a Bedrock-only one only on the route its request builder tiers."""
     from agent.model_metadata import is_grok_46_family
     if model_id in BEDROCK_ULTRAFAST_ROUTES:
         return normalize_provider(provider) == "bedrock" and bedrock_fast_mode_overrides(model_id, base_url, "ultrafast") is not None
+    if base_url or (provider and provider != "auto"):
+        return resolve_fast_mode_overrides(model_id, provider=provider, base_url=base_url, api_mode=api_mode,
+                                           access_token=access_token) is not None
     return (
         _is_anthropic_fast_model(model_id)
         or _is_openai_fast_model(model_id)
@@ -1247,29 +1251,6 @@ def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
     return is_anthropic_fast_mode_model(model_id)
 
 
-def _fast_mode_route_supported(
-    model_id: Optional[str], provider: Optional[str], base_url: Optional[str], tier: Optional[str] = None) -> bool:
-    """Only first-party and explicitly opted-in custom routes may receive fast-mode params."""
-    from urllib.parse import urlparse
-
-    from agent.model_metadata import is_grok_46_family
-    from hermes_cli.config_providers import custom_provider_fast_mode_opt_in
-
-    host = (urlparse(str(base_url or "")).hostname or "").lower()
-    if _is_anthropic_fast_model(model_id):
-        allowed = {"anthropic": "api.anthropic.com"}
-    elif is_grok_46_family(str(model_id or "")):
-        allowed = {"xai": "api.x.ai"}
-    else:
-        from hermes_cli.models_fast_regions import openai_fast_region_allows
-        if openai_fast_region_allows(base_url, model_id, tier):
-            host = "api.openai.com"  # Eligibility only; custom matching still gets the actual URL.
-        allowed = {"openai": "api.openai.com", "openai-api": "api.openai.com", "openai-codex": "chatgpt.com"}
-    if (not provider or normalize_provider(provider) in allowed) and (not host or host in allowed.values()):
-        return True
-    return custom_provider_fast_mode_opt_in(provider, base_url)
-
-
 def model_supports_ultrafast(model_id: Optional[str]) -> bool:
     """OpenAI Ultrafast (``service_tier: "ultrafast"``) is published per model, not per family."""
     from agent.model_metadata import strip_codex_context_variant_suffix
@@ -1280,15 +1261,29 @@ def model_supports_ultrafast(model_id: Optional[str]) -> bool:
 
 def resolve_fast_mode_overrides(
     model_id: Optional[str], *, provider: Optional[str] = None, base_url: Optional[str] = None,
-    tier: Optional[str] = None,
+    tier: Optional[str] = None, api_mode: Optional[str] = None, access_token: Any = None,
+    config: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any] | None:
-    """Route/model-gated fast overrides for /fast and bounded windows; None if unsupported.
-    Ultrafast never silently downgrades to Priority. Bedrock has its own capability matrix."""
+    """Return only the requested tier when this model and route offer it."""
+    from agent.codex_service_tiers import custom_catalog_tiers
+    from hermes_cli.config_providers import custom_fast_mode_entry
+    from hermes_cli.models_fast_regions import first_party_fast_mode_route, first_party_fast_host
+
     if normalize_provider(provider) == "bedrock":
         return bedrock_fast_mode_overrides(model_id, base_url, tier)
+    if (provider or base_url) and not first_party_fast_mode_route(model_id, provider, base_url, tier):
+        if first_party_fast_host(base_url):
+            return None
+        entry = custom_fast_mode_entry(provider, base_url, config=config)
+        if not entry:
+            return None
+        if entry["capabilities"]["fast_mode"] == "catalog":
+            if api_mode and api_mode != "codex_responses":
+                return None
+            wanted = "ultrafast" if tier == "ultrafast" else "priority"
+            tiers = custom_catalog_tiers(entry, model_id or "", runtime_key=access_token)
+            return {"service_tier": wanted} if wanted in tiers else None
     if not model_supports_fast_mode(model_id):
-        return None
-    if (provider or base_url) and not _fast_mode_route_supported(model_id, provider, base_url, tier):
         return None
     if tier == "ultrafast":
         return {"service_tier": "ultrafast"} if model_supports_ultrafast(model_id) else None
@@ -2062,7 +2057,9 @@ def clear_provider_models_cache(provider: Optional[str] = None) -> None:
     """Drop one provider's cache entry, or wipe the whole cache (``provider=None``). Used by
     ``/model --refresh`` and ``hermes model --refresh``."""
     try:
+        from agent.codex_service_tiers import clear_custom_catalogs
         from hermes_cli.model_catalog import clear_fetch_backoff
+        clear_custom_catalogs()
         clear_fetch_backoff()  # a recovered catalog is fetched now, not after the offline backoff
         # Native Ollama tags are keyed by root URL, not provider slug: clear them on every refresh.
         _OLLAMA_LOCAL_MODELS_CACHE.clear()

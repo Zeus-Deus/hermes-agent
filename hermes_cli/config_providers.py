@@ -261,7 +261,7 @@ def _normalize_custom_provider_entry(
     if isinstance(capabilities, dict):
         _put("capabilities", {
             key: value for key, value in capabilities.items()
-            if isinstance(key, str) and isinstance(value, bool)})
+            if isinstance(key, str) and (isinstance(value, bool) or (key == "fast_mode" and value == "catalog"))})
 
     for field, ok in (
         ("context_length", lambda v: isinstance(v, int) and v > 0),
@@ -298,7 +298,7 @@ def _custom_provider_entry_to_provider_config(
     for field in (
         "name", "api_key", "key_env", "key_cmd", "models", "models_discovered", "context_length",
         "rate_limit_delay", "discover_models", "extra_body", "extra_headers",
-        "session_affinity_header", "ssl_ca_cert", "ssl_verify", "catalog_provider"):
+        "session_affinity_header", "ssl_ca_cert", "ssl_verify", "catalog_provider", "capabilities"):
         if field in normalized:
             provider_entry[field] = normalized[field]
     if "model" in normalized:
@@ -533,30 +533,66 @@ def get_custom_provider_session_affinity_header(
     return ""
 
 
-def custom_provider_fast_mode_opt_in(
-    provider: Any, base_url: Any, config: Optional[dict[str, Any]] = None) -> bool:
-    """Whether the custom endpoint at *base_url* declares ``capabilities: {fast_mode: true}``.
+def custom_fast_mode_entry(provider: Any, base_url: Any, config: Optional[dict[str, Any]] = None) -> Optional[dict]:
+    """Select the endpoint's speed declaration without reading or minting credentials.
 
-    Fast-mode params otherwise reach only the first-party endpoint that bills for them; this flag is
-    the user's statement that a proxy forwards them. Off by default and keyed on the endpoint URL,
-    never on a provider label: every entry declaring that URL (deduplication skipped, so an alias
-    cannot hide) must opt in. With no URL, a named provider stands for the URL the runtime would
-    route it to (same credential-free lookup).
+    All aliases at the URL must agree. Catalog probes also need the particular entry the
+    runtime routes through, since named tenants can share a URL but send different headers.
     """
     from hermes_cli.config import load_config_readonly
-    from hermes_cli.runtime_provider_custom import _get_named_custom_provider
+    from hermes_cli.runtime_provider_custom import custom_provider_config_path_for_url, named_custom_provider_config_path
+
     if config is None:
         config = load_config_readonly()
-    if not base_url and str(provider or "").strip().lower() not in ("", "custom"):
-        named = _get_named_custom_provider(str(provider), config=config, resolve_credentials=False)
-        base_url = (named or {}).get("base_url")
-    legacy = config.get("custom_providers")
-    entries = [e for e in map(_normalize_custom_provider_entry, legacy if isinstance(legacy, list) else []) if e]
-    entries += providers_dict_to_custom_providers(config.get("providers"))
+    if not (config.get("providers") or config.get("custom_providers")):
+        return None
+    entries = _fast_mode_entries(config)
+    name = str(provider or "").strip().lower()
     target = normalize_route_base_url(base_url)
-    flags = {(e.get("capabilities") or {}).get("fast_mode") is True
-             for e in entries if target and normalize_route_base_url(e["base_url"]) == target}
-    return flags == {True}
+    path = None
+    if not target and name not in ("", "custom"):
+        path = named_custom_provider_config_path(name, config)
+        target = normalize_route_base_url(entries.get(path, {}).get("base_url"))
+    matches = [e for e in entries.values() if target and normalize_route_base_url(e["base_url"]) == target]
+    modes = {(e.get("capabilities") or {}).get("fast_mode") for e in matches}
+    if modes == {True}:
+        return matches[0]
+    if modes != {"catalog"} or not name:
+        return None
+    if path is None:
+        path = (custom_provider_config_path_for_url(base_url, config) if name == "custom"
+                else named_custom_provider_config_path(name, config))
+    entry = entries.get(path)
+    if entry and entry.get("api_mode") == "codex_responses" and (
+            not base_url or str(base_url).rstrip("/") == entry["base_url"].rstrip("/")):
+        return entry
+    return None
+
+
+def _fast_mode_entries(config: dict) -> dict:
+    """Keep even aliases hidden by picker deduplication, indexed by the runtime's config path."""
+    from hermes_cli.runtime_provider_custom import _entry_url
+
+    entries = {}
+    legacy = config.get("custom_providers")
+    for index, raw in enumerate(legacy if isinstance(legacy, list) else []):
+        if entry := _normalize_custom_provider_entry(raw):
+            entries["custom_providers", index] = entry
+    providers = config.get("providers")
+    for key, raw in (providers.items() if isinstance(providers, dict) else []):
+        if isinstance(raw, dict) and is_provider_enabled(raw):
+            # Named resolution chooses api before url or base_url. A compatibility field
+            # must never bind this entry's credential to a different destination.
+            if entry := _normalize_custom_provider_entry({**raw, "base_url": _entry_url(raw)}, provider_key=key):
+                entries["providers", key] = entry
+    return entries
+
+
+def custom_provider_fast_mode_opt_in(
+    provider: Any, base_url: Any, config: Optional[dict[str, Any]] = None) -> bool:
+    """Whether an endpoint explicitly enables static, model-gated fast mode."""
+    entry = custom_fast_mode_entry(provider, base_url, config)
+    return bool(entry and entry["capabilities"]["fast_mode"] is True)
 
 
 def get_custom_provider_context_length(

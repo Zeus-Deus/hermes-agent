@@ -9,6 +9,9 @@ https://developers.openai.com/api/docs/guides/fast-mode#is-fast-mode-compatible-
 """
 
 from typing import Optional
+from urllib.parse import urlparse
+
+from utils import base_url_hostname
 
 # Host -> documented Fast models; None = every model the global endpoint accepts.
 _FAST_REGION_MODELS: dict[str, Optional[frozenset[str]]] = {
@@ -21,7 +24,6 @@ def openai_fast_region_allows(base_url: Optional[str], model_id: Optional[str], 
     """True when a regional OpenAI host documents fast tiers for this model."""
     from agent.model_metadata import strip_codex_context_variant_suffix
     from hermes_cli.models import _strip_vendor_prefix
-    from utils import base_url_hostname
 
     host = base_url_hostname(str(base_url or ""))
     if host not in _FAST_REGION_MODELS:
@@ -32,3 +34,27 @@ def openai_fast_region_allows(base_url: Optional[str], model_id: Optional[str], 
     if host == "eu.api.openai.com" and tier == "ultrafast" and base in {"gpt-6.2-astra", "gpt-6.2-sol"}:
         return False
     return models is None or base in models
+
+
+def first_party_fast_mode_route(
+    model_id: Optional[str], provider: Optional[str], base_url: Optional[str], tier: Optional[str] = None) -> bool:
+    """Check the provider, host and region of a first-party route."""
+    from agent.model_metadata import is_anthropic_fast_mode_model, is_grok_46_family
+    from hermes_cli.models import normalize_provider
+
+    host = (urlparse(str(base_url or "")).hostname or "").lower()
+    if is_anthropic_fast_mode_model(model_id):
+        allowed = {"anthropic": "api.anthropic.com"}
+    elif is_grok_46_family(str(model_id or "")):
+        allowed = {"xai": "api.x.ai"}
+    else:
+        if openai_fast_region_allows(base_url, model_id, tier):
+            host = "api.openai.com"  # Eligibility only; custom matching still gets the actual URL.
+        allowed = {"openai": "api.openai.com", "openai-api": "api.openai.com", "openai-codex": "chatgpt.com"}
+    return (not provider or normalize_provider(provider) in allowed) and (not host or host in allowed.values())
+
+
+def first_party_fast_host(base_url: Optional[str]) -> bool:
+    """A custom declaration cannot reopen a first-party model or region denial."""
+    host = base_url_hostname(base_url or "")
+    return host in {"api.openai.com", "chatgpt.com", "api.anthropic.com", "api.x.ai"} or host.endswith(".api.openai.com")

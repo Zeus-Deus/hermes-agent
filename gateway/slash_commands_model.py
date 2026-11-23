@@ -38,8 +38,9 @@ def _fast_route_supports(model: str, runtime: dict, tier: Optional[str] = None) 
     one the session's next request actually carries, so proxies and other providers are refused."""
     from hermes_cli.models import resolve_fast_mode_overrides
 
-    return resolve_fast_mode_overrides(
-        model, provider=runtime.get("provider"), base_url=runtime.get("base_url"), tier=tier) is not None
+    from agent.fast_mode import fast_mode_route
+
+    return resolve_fast_mode_overrides(model, tier=tier, **fast_mode_route(runtime)) is not None
 
 
 # /reasoning display-toggle arguments -> show_reasoning value.
@@ -1100,7 +1101,7 @@ class GatewayModelCommandsMixin:
     async def _handle_fast_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /fast — the CLI Priority Processing toggle; session-scoped unless ``--global``
         (persists agent.service_tier, parity with /model)."""
-        from agent.fast_mode import FAST_ARG_ALIASES, service_tier_word
+        from agent.fast_mode import FAST_ARG_ALIASES, fast_mode_route, service_tier_word
         from gateway.run import _load_gateway_config, _resolve_gateway_model
 
         # The /reasoning parser strips --global (any position) and normalizes unicode dashes.
@@ -1122,8 +1123,7 @@ class GatewayModelCommandsMixin:
             return t("gateway.fast.not_supported")
         args = FAST_ARG_ALIASES.get(args, args)
         from agent.codex_service_tiers import ultrafast_offered
-        ultrafast = ultrafast_offered(model, provider=runtime.get("provider"), base_url=runtime.get("base_url"),
-                                      access_token=runtime.get("api_key"))
+        ultrafast = ultrafast_offered(model, **fast_mode_route(runtime))
         if args == "ultrafast" and not ultrafast:
             return t("gateway.fast.ultrafast_not_supported", model=model)
         if args and args != "status":

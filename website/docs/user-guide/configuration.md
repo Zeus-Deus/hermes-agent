@@ -2217,7 +2217,23 @@ providers:
       fast_mode: true
 ```
 
-`/fast` and the Fast toggle in Desktop and the TUI then become available for that endpoint and send the same params the first-party route would. The opt-in is off by default, must be a YAML boolean, and applies only to requests sent to that provider's `api` URL; fallbacks and other providers do not inherit it. If several provider entries point at the same URL, every one of them must opt in. The model must still support fast mode, and `ultrafast` still needs a model that offers it. Hermes cannot check whether your proxy forwards the params or what the upstream bills for them, so only set it for an endpoint you run or trust.
+With `fast_mode: true`, Hermes uses its published model support rules. A capable Claude route gets Fast through Anthropic’s `speed` parameter. Ultrafast is unavailable for Claude.
+
+For a trusted Responses proxy that publishes Codex-style model metadata, use catalog mode:
+
+```yaml
+providers:
+  example:
+    api: https://proxy.example.com/v1
+    transport: responses
+    key_env: EXAMPLE_PROXY_KEY
+    capabilities:
+      fast_mode: catalog
+```
+
+Hermes queries the endpoint’s versioned `/models` catalog with its configured credentials and headers. Each exact model slug gets Fast for an advertised `priority` tier and Ultrafast for an advertised `ultrafast` tier. An explicit empty `service_tiers` list means Normal only, even if legacy speed fields list more tiers. An unreadable catalog or missing model also leaves Normal only. A catalog describes what the proxy advertises. Your upstream account determines availability and billing. Use `/model --refresh` to refresh cached offers.
+
+Both opt-ins are scoped to the configured endpoint. If several entries share a URL they must agree on the opt-in. Omitting `fast_mode` or setting it to `false` keeps it off.
 
 **Prompt cache:** only the per-request parameter changes between requests; the system prompt, tools, and messages stay byte-identical. Anthropic keeps a separate prompt cache for each speed, so on Anthropic every `auto`/`cold` window boundary re-writes the conversation prefix at the new speed. For long Anthropic sessions, `fast` or `normal` keeps a single warm cache.
 
@@ -2227,7 +2243,7 @@ When an Anthropic organization has no fast-mode capacity for a model (the API an
 
 ### Fast tiers behind a gateway or proxy
 
-The first-party-only rule is deliberate: a fast-tier parameter is a billing instruction, and Hermes only sends it to the endpoint whose price list it knows. If you run an OpenAI-compatible gateway, router, or proxy that exposes its own priority tier (its own `service_tier` value, or a differently named field), request it through that provider's `extra_body` instead of `agent.service_tier`. `extra_body` on a [named custom provider](../integrations/providers.md#named-custom-providers) is merged into **every** chat-completions request routed to that endpoint, survives gateway turns and `/fast` changes, and is dropped again when you `/model` away from the provider:
+If you run an OpenAI-compatible gateway, router, or proxy that exposes its own priority tier (its own `service_tier` value, or a differently named field), request it through that provider's `extra_body` instead of `agent.service_tier`. `extra_body` on a [named custom provider](../integrations/providers.md#named-custom-providers) is merged into **every** chat-completions request routed to that endpoint, survives gateway turns and `/fast` changes, and is dropped again when you `/model` away from the provider:
 
 ```yaml
 providers:

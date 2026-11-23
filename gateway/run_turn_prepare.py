@@ -313,7 +313,7 @@ class GatewayTurnPrepareMixin:
         ``tier`` defaults to the runner's per-turn ``_service_tier``; an off-turn builder (a cold
         ``/review``) passes the session's own instead of writing that shared slot."""
         from gateway.run import _deep_merge_request_overrides
-        from agent.fast_mode import STATIC_TIERS
+        from agent.fast_mode import STATIC_TIERS, fast_mode_route
         from hermes_cli.models import resolve_fast_mode_overrides
         # Tests bind this method onto bare namespaces, so no class-level tables here.
         runtime = {
@@ -342,7 +342,7 @@ class GatewayTurnPrepareMixin:
             return route
         try:
             overrides = resolve_fast_mode_overrides(
-                route["model"], provider=runtime["provider"], base_url=runtime["base_url"], tier=tier,
+                route["model"], tier=tier, **fast_mode_route(runtime),
             )
         except Exception:
             overrides = None

@@ -275,13 +275,14 @@ class CLIInfoMixin:
 
     def _fast_command_available(self) -> bool:
         try:
+            from agent.fast_mode import fast_mode_route
             from hermes_cli.models import model_supports_fast_mode
         except Exception:
             return False
         agent = getattr(self, "agent", None)
-        def route(field):
-            return getattr(agent, field, None) or getattr(self, field, None)
-        return model_supports_fast_mode(route("model"), provider=route("provider"), base_url=route("base_url"))
+        model = getattr(agent, "model", None) or getattr(self, "model", None)
+        runtime = agent if getattr(agent, "provider", None) else self
+        return model_supports_fast_mode(model, **fast_mode_route(runtime))
 
     def _command_available(self, slash_command: str) -> bool:
         if slash_command == "/fast":

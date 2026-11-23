@@ -529,7 +529,7 @@ def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None
     serving aggregator's detail overrides models.dev (adds ``can_disable_reasoning``). ``supported_efforts``
     is deliberately NOT forwarded — it under-reports levels that work."""
     from agent.codex_service_tiers import daybreak_offered, ultrafast_offered
-    from hermes_cli.models import model_supports_ultrafast, resolve_fast_mode_overrides
+    from hermes_cli.models import resolve_fast_mode_overrides
 
     try:
         from agent.models_dev import get_model_capabilities
@@ -556,10 +556,9 @@ def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None
                     reasoning = True
 
             fast = resolve_fast_mode_overrides(
-                model, provider=slug, base_url=row.get("api_url")) is not None
+                model, provider=slug, base_url=row.get("api_url"), config=metadata_config) is not None
             entry: dict[str, Any] = {"fast": fast, "reasoning": reasoning}
-            if fast and model_supports_ultrafast(model) and ultrafast_offered(
-                    model, provider=slug, base_url=row.get("api_url")):
+            if ultrafast_offered(model, provider=slug, base_url=row.get("api_url"), config=metadata_config):
                 entry["ultrafast"] = True
             if not _app_server and daybreak_offered(model, provider=slug, base_url=row.get("api_url")):
                 entry["daybreak"] = True

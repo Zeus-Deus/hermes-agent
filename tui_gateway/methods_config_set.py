@@ -245,7 +245,7 @@ def _set_fast(rid, params, key, value, session):
         current_tier = session["create_service_tier_override"] or None  # pre-build pin beats global
     else:
         current_tier = _load_service_tier()
-    from agent.fast_mode import STATIC_TIERS, service_tier_word
+    from agent.fast_mode import STATIC_TIERS, fast_mode_route, service_tier_word
     if raw == "status":
         return _kv(rid, key, service_tier_word(current_tier))
     nv = _FAST_WORDS.get(raw, ("normal" if current_tier in STATIC_TIERS else "fast") if raw in {"", "toggle"} else None)
@@ -256,19 +256,22 @@ def _set_fast(rid, params, key, value, session):
         from hermes_cli.models import resolve_fast_mode_overrides
         if agent is not None:
             target_model = getattr(agent, "model", None)
+            route = fast_mode_route(agent)
         else:  # a pre-build session may carry a picked model (desktop draft): validate against THAT
             session_override = (session or {}).get("model_override") or {}
-            target_model = (isinstance(session_override, dict) and session_override.get("model")) or _resolve_model()
+            selected = session_override if isinstance(session_override, dict) else {}
+            saved = (_load_cfg() or {}).get("model")
+            saved = saved if isinstance(saved, dict) else {}
+            if not selected.get("provider"):
+                selected = {**saved, **selected}
+            route = fast_mode_route(selected)
+            target_model = selected.get("model") or selected.get("default") or _resolve_model()
         if not target_model:
             return _err(rid, 4002, "fast mode is not available without a selected model")
-        overrides = resolve_fast_mode_overrides(target_model, provider=getattr(agent, "provider", None),
-                                                base_url=getattr(agent, "base_url", None),
-                                                tier="ultrafast" if nv == "ultrafast" else None)
+        overrides = resolve_fast_mode_overrides(target_model, tier=nv, **route)
         if overrides is not None and nv == "ultrafast":
             from agent.codex_service_tiers import ultrafast_offered
-            if not ultrafast_offered(target_model, provider=getattr(agent, "provider", None),
-                                     base_url=getattr(agent, "base_url", None),
-                                     access_token=getattr(agent, "api_key", None)):
+            if not ultrafast_offered(target_model, **route):
                 overrides = None
         if overrides is None:
             return _err(rid, 4002, f"{nv} mode is not available for this model")

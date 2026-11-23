@@ -18,6 +18,15 @@ logger = logging.getLogger(__name__)
 _KEY_CMD_SOURCES: dict[tuple[str, str], Any] = {}
 
 
+def declared_command_probe_key(command: str, name: str) -> str:
+    """Materialize the profile's cached command token for an endpoint-owned probe."""
+    from agent.command_token_source import build_command_token_provider, materialize_probe_api_key
+    from hermes_constants import hermes_home_key
+
+    source = _KEY_CMD_SOURCES.setdefault((hermes_home_key(), command), build_command_token_provider(command, name))
+    return materialize_probe_api_key(source)
+
+
 def default_api_key_base_url(api_key: str, default: str, env_url: str) -> str:
     return env_url.rstrip("/") if env_url else default
 
@@ -69,11 +78,7 @@ def resolve_declared_api_key_provider(provider_id: str) -> dict[str, Any]:
     source = "config"
     key_cmd = str(entry.get("key_cmd") or "").strip()
     if key_cmd:
-        from agent.command_token_source import build_command_token_provider, materialize_probe_api_key
-        from hermes_constants import hermes_home_key
-        token_source = _KEY_CMD_SOURCES.setdefault(
-            (hermes_home_key(), key_cmd), build_command_token_provider(key_cmd, str(entry.get("name") or provider_id)))
-        api_key = materialize_probe_api_key(token_source)
+        api_key = declared_command_probe_key(key_cmd, str(entry.get("name") or provider_id))
         source = "key_cmd" if api_key else source
     if not api_key:
         api_key = str(entry.get("api_key") or "").strip()

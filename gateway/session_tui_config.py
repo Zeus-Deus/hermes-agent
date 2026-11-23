@@ -247,26 +247,30 @@ def current_tier(connection, ref, policy):
 def service_tier_options(connection, ref, policy, *, include_ultrafast=True):
     """The session route's speed choices, resolved under its credential scope."""
     from agent.codex_service_tiers import ultrafast_offered
+    from agent.fast_mode import fast_mode_route
     from gateway.run import _profile_runtime_scope
     from hermes_cli.models import resolve_fast_mode_overrides
     with _profile_runtime_scope(Path(connection.authority.profile_id)):
         agent = connection.authority.agent(ref)
         config, model = policy.effective(connection.authority, secrets=False) if policy else ({}, None)
         route = config.get('model') or {}
-        provider, base_url = route.get('provider'), route.get('base_url')
+        speed_route = fast_mode_route(route)
         if policy is not None and policy.follows_profile:
             from gateway.session_policy import route_launch_key
-            access_token = route_launch_key(connection.authority, policy, config) or route.get('api_key')
-        else:
+            speed_route["access_token"] = route_launch_key(connection.authority, policy, config) or route.get('api_key')
+        elif agent is not None:
             model = getattr(agent, 'model', None) or model
-            provider = getattr(agent, 'provider', None) or provider
-            base_url = getattr(agent, 'base_url', None) or base_url
-            access_token = getattr(agent, 'api_key', None)
-        if not model or resolve_fast_mode_overrides(model, provider=provider, base_url=base_url) is None:
+            speed_route.update({k: v for k, v in fast_mode_route(agent).items() if v is not None})
+        if not model:
             return []
-        options = ['normal', 'fast', 'auto', 'cold']
-        if include_ultrafast and ultrafast_offered(model, provider=provider, base_url=base_url,
-                                                   access_token=access_token):
+        fast = resolve_fast_mode_overrides(model, **speed_route) is not None
+        ultra = include_ultrafast and ultrafast_offered(model, **speed_route)
+        if not (fast or ultra):
+            return []
+        options = ['normal']
+        if fast:
+            options.extend(['fast', 'auto', 'cold'])
+        if ultra:
             options.append('ultrafast')
         return options
 
