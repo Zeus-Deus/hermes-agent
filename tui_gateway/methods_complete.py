@@ -326,10 +326,12 @@ def _(rid, params: dict) -> dict:
         return skew
     from hermes_cli.inventory import build_model_options_payload
     # A spawned agent owns the live provider/model/base_url; empty attributes must
-    # NOT clobber disk config (with_overrides is truthy-only).
+    # NOT clobber disk config (with_overrides is truthy-only). The chat model menu is the only
+    # surface that offers Daybreak on an opted-in relay (REST settings editors never do).
     return _ok(rid, build_model_options_payload(
         _model_picker_context(_session_agent(params)), explicit_only=bool(params.get("explicit_only")),
-        include_unconfigured=bool(params.get("include_unconfigured")), refresh=bool(params.get("refresh"))))
+        include_unconfigured=bool(params.get("include_unconfigured")), refresh=bool(params.get("refresh")),
+        relay_daybreak=True))
 
 
 @method("model.save_key")

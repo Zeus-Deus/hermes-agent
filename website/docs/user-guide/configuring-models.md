@@ -238,6 +238,20 @@ providers:
       openai_native_compaction: true
 ```
 
+<a id="cyber_access_programs"></a>**`cyber_access_programs`** — set this capability to `true` only on a `transport: codex_responses` relay that serves you alone, uses the same OpenAI account as your Codex login and keeps model IDs unchanged, so it can forward OpenAI's `access_programs` field. Shared or pooled relays are not supported. It lets the [Daybreak switch](configuration.md#openai-daybreak-daybreak) reach that relay and grants nothing on its own:
+
+```yaml
+providers:
+  my-relay:
+    api: https://relay.example/v1
+    transport: codex_responses
+    key_cmd: cat ~/.config/my-relay/key
+    capabilities:
+      cyber_access_programs: true   # off by default
+```
+
+The switch then appears in the chat model menu on that provider's models your account is approved for, with the same per-request, per-model and owner-chat checks. Delegated subagents and delegation routes never use it on a relay. Eligibility comes from the official OpenAI Codex catalog, read with this profile's own `openai-codex` OAuth login (`hermes auth add openai-codex`); an API key never reads it. Without that login, or when the catalog can't be read, the switch stays hidden and nothing is sent. The login is used only for that lookup and is never sent to the relay, and the relay's key is never used for it.
+
 For a gateway that resolves a bare model alias only after receiving the
 request, opt the alias into prompt-cache markers with the per-model
 `prompt_caching` capability:

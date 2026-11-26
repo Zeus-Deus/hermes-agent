@@ -80,7 +80,7 @@ def build_models_payload(
     capabilities: bool = False, featured: bool = False, force_fresh_nous_tier: bool = False,
     refresh: bool = False, probe_custom_providers: bool = True, probe_current_custom_provider: bool = False,
     for_picker: bool = False, max_models: int | None = None, non_blocking_catalogs: bool = False,
-    fast_custom_probe: bool | None = None,
+    fast_custom_probe: bool | None = None, relay_daybreak: bool = False,
 ) -> dict:
     """Build the ``{providers, model, provider}`` shape every consumer needs. ``explicit_only`` keeps
     only providers the user explicitly configured — hides ambient/auto-seeded credentials from
@@ -143,7 +143,7 @@ def build_models_payload(
         except Exception:
             metadata_config = None
     if capabilities:
-        _apply_capabilities(rows, metadata_config=metadata_config)
+        _apply_capabilities(rows, metadata_config=metadata_config, relay_daybreak=relay_daybreak)
     if featured:
         _apply_featured(rows, metadata_config=metadata_config)
     _apply_custom_aliases(rows)
@@ -210,7 +210,7 @@ def _strip_aggregator_overlaps(rows: list[dict]) -> None:
 
 def build_model_options_payload(
     ctx: ConfigContext, *, explicit_only: bool = False, include_unconfigured: bool = False,
-    refresh: bool = False,
+    refresh: bool = False, relay_daybreak: bool = False,
 ) -> dict:
     """Shared API-server/dashboard/TUI payload. Normal open probes only the current custom provider so
     offline saved endpoints don't block the picker; explicit refresh probes all and busts the cache.
@@ -230,7 +230,7 @@ def build_model_options_payload(
         picker_hints=True, canonical_order=True, pricing=True, pricing_cache_only=not refresh,
         capabilities=True, featured=True, for_picker=True, fast_custom_probe=False,
         refresh=refresh, probe_custom_providers=refresh, probe_current_custom_provider=not refresh,
-        non_blocking_catalogs=not refresh,
+        non_blocking_catalogs=not refresh, relay_daybreak=relay_daybreak,
     )
     _apply_limits(payload["providers"])
     _apply_usage(payload["providers"])
@@ -523,12 +523,13 @@ def _reasoning_catalog_reader(slug: str):
     return read
 
 
-def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None) -> None:
+def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None, relay_daybreak: bool = False) -> None:
     """Attach ``{model: {fast, reasoning, ...}}`` per row. ``reasoning`` defaults True when the catalog is
     silent (the dial is a no-op on models that ignore it; hiding it from a capable model is worse). A
     serving aggregator's detail overrides models.dev (adds ``can_disable_reasoning``). ``supported_efforts``
-    is deliberately NOT forwarded — it under-reports levels that work."""
-    from agent.codex_service_tiers import daybreak_offered, ultrafast_offered
+    is deliberately NOT forwarded — it under-reports levels that work. ``relay_daybreak`` marks Daybreak on
+    an opted-in relay's rows: only the chat model menu sets it, so settings editors never offer it there."""
+    from agent.codex_service_tiers import daybreak_models, ultrafast_offered
     from hermes_cli.models import model_supports_ultrafast, resolve_fast_mode_overrides
 
     try:
@@ -545,6 +546,10 @@ def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None
         slug = row.get("slug") or ""
         caps: dict[str, dict[str, Any]] = {}
         read_reasoning_catalog = _reasoning_catalog_reader(slug.lower())
+        # A relay's opt-in is read from the payload's config snapshot, not config.yaml once per model.
+        daybreak = set() if _app_server else daybreak_models(
+            row.get("models") or [], provider=slug, base_url=row.get("api_url"), config=metadata_config,
+            relays=relay_daybreak)
         for model in row.get("models") or []:
             reasoning = True
             if get_model_capabilities is not None and slug:
@@ -561,7 +566,7 @@ def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None
             if fast and model_supports_ultrafast(model) and ultrafast_offered(
                     model, provider=slug, base_url=row.get("api_url")):
                 entry["ultrafast"] = True
-            if not _app_server and daybreak_offered(model, provider=slug, base_url=row.get("api_url")):
+            if model in daybreak:
                 entry["daybreak"] = True
 
             if reasoning and read_reasoning_catalog is not None:

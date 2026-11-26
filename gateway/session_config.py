@@ -242,6 +242,8 @@ async def model_options(connection, ref, params):
                 from hermes_cli.runtime_provider import canonical_custom_identity
                 selected = canonical_custom_identity(base_url=base_url, config_provider=ctx.current_provider, model=model,
                                                      requested=getattr(agent, 'requested_provider', None)) or selected
+            # The chat model menu: the one surface that offers Daybreak on an opted-in relay.
             return build_model_options_payload(ctx.with_overrides(current_provider=selected,
-                current_model=model, current_base_url=base_url), **{k: params[k] for k in flags & params.keys()})
+                current_model=model, current_base_url=base_url), relay_daybreak=True,
+                **{k: params[k] for k in flags & params.keys()})
     return await asyncio.to_thread(discover)

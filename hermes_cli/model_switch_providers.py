@@ -990,7 +990,7 @@ def _lap_canonical_rows(b: _PickerBuild) -> None:
 
 def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
     """Section 3: ``providers:`` dict entries, grouped by (api_url, credential, api_mode,
-    extra_headers) so keyed providers on one endpoint with the same wire protocol collapse into
+    extra_headers, Daybreak relay opt-in) so keyed providers on one endpoint with the same wire protocol collapse into
     one row (two Palantir Claude entries -> one "Palantir Claude" row); a different
     key_env/api_mode/headers keeps distinct rows since the wire protocol or tenant differs."""
     from hermes_cli.model_switch import _scoped_key_env
@@ -1003,7 +1003,10 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
         api_url = _entry_base_url(ep_cfg, ("base_url", "api", "url"))
         inline_api_key, key_env, cred_identity = _entry_credentials(ep_cfg, "key_env", "api_key_env")
         headers = _extra_headers_from_config(ep_cfg)
-        group_key = (_norm_url(api_url), cred_identity, _entry_api_mode(ep_cfg), tuple(sorted(headers.items())))
+        # A relay's Daybreak opt-in is per entry, so an opted-in sibling keeps its own selectable row.
+        daybreak_relay = (ep_cfg.get("capabilities") or {}).get("cyber_access_programs") is True
+        group_key = (_norm_url(api_url), cred_identity, _entry_api_mode(ep_cfg), tuple(sorted(headers.items())),
+                     daybreak_relay)
 
         if group_key not in ep_groups:
             # slug = first ep_name encountered; probe key from the first member (inline api_key,

@@ -19,6 +19,8 @@ _catalogs: dict[str, tuple[dict[str, frozenset[str]], float, dict[str, frozenset
 _TTL = 3600
 _MAX_CATALOGS = 128
 DAYBREAK_PROGRAM = "daybreak_blue"
+# ``providers.<name>.capabilities`` opt-in: this named ``codex_responses`` relay forwards ``access_programs``.
+RELAY_CYBER_CAPABILITY = "cyber_access_programs"
 
 
 def _advertised_tiers(entry: dict[str, Any]) -> frozenset[str] | None:
@@ -121,14 +123,126 @@ def codex_account_offers_tier(
     return None if supported is None else tier in supported
 
 
-def daybreak_offered(model: Any, *, provider: Any = None, base_url: Any = None, access_token: Any = None) -> bool:
+def _relay_route_entry(route_ids: tuple, base_url: Any, config: dict) -> dict | None:
+    """The ``providers:`` entry the runtime resolver routes this route's provider id through, only when
+    every id resolves to that same entry, it serves ``base_url``, and no other entry at that URL answers
+    to the id (an alias collision is ambiguous, so None)."""
+    from hermes_cli.config_providers import _normalize_custom_provider_entry, providers_dict_to_custom_providers
+    from hermes_cli.providers import custom_provider_aliases, custom_provider_slug
+    from hermes_cli.route_identity import normalize_route_base_url
+    from hermes_cli.runtime_provider_custom import named_custom_provider_config_path
+    # Bare ``custom`` labels every custom route; it names no entry.
+    ids = {str(p).strip().lower().replace(" ", "-") for p in route_ids if str(p or "").strip().lower() not in ("", "custom")}
+    paths = {named_custom_provider_config_path(route_id, config) for route_id in ids}
+    url = normalize_route_base_url(base_url)
+    if len(paths) != 1 or not url:
+        return None
+    (path,) = paths
+    if not path or path[0] != "providers":  # a legacy ``custom_providers:`` entry never opts in
+        return None
+    legacy = config.get("custom_providers")
+    entries = [e for e in [*providers_dict_to_custom_providers(config.get("providers")),
+                           *(_normalize_custom_provider_entry(e) for e in (legacy if isinstance(legacy, list) else ()))]
+               if e and normalize_route_base_url(e.get("base_url")) == url]
+    claimed = [e for e in entries if ids & custom_provider_aliases(str(e.get("name") or ""), str(e.get("provider_key") or ""))]
+    key = custom_provider_slug(str(path[1]))
+    if len(claimed) != 1 or custom_provider_slug(str(claimed[0].get("provider_key") or "")) != key:
+        return None
+    return claimed[0]
+
+
+def _relay_forwards_daybreak(route_ids: tuple, base_url: Any, config: Any = None) -> bool:
+    """Whether the route's resolved ``providers:`` entry is a ``codex_responses`` relay that declares
+    ``capabilities.cyber_access_programs: true``: it forwards ``access_programs`` unchanged. The
+    declaration grants nothing; eligibility still comes from the official catalog. ``config`` None reads
+    the current config, so a revoked opt-in holds; a config that can't be read never opts in."""
+    from hermes_cli.config_read_errors import FailedConfigRead
+    if config is None:
+        from hermes_cli.config import load_config_readonly
+        from hermes_cli.config_backend import ConfigBackendUnavailable
+        try:
+            config = load_config_readonly()
+        except (ConfigBackendUnavailable, OSError):  # the backend's outage is a SystemExit: unknown, so omitted
+            return False
+    if not isinstance(config, dict) or isinstance(config, FailedConfigRead):  # defaults or last-known-good
+        return False
+    entry = _relay_route_entry(route_ids, base_url, config)
+    return entry is not None and entry.get("api_mode") == "codex_responses" and (
+        entry.get("capabilities") or {}).get(RELAY_CYBER_CAPABILITY) is True
+
+
+def _oauth_pool_row(token: str) -> bool:
+    """Whether ``token`` is a pooled ``openai-codex`` row the OAuth flow stored (refreshable), not an API key."""
+    from hermes_cli.auth import read_credential_pool
+    return any(isinstance(row, dict) and str(row.get("access_token") or "").strip() == token
+               and row.get("auth_type") == "oauth" and row.get("refresh_token")
+               for row in read_credential_pool("openai-codex") or ())
+
+
+def _relay_catalog_token() -> str | None:
+    """This profile's own ChatGPT OAuth login, read without refresh or writes: the token the OAuth flow
+    stored (the Codex login itself, or a refreshable OAuth pool row), bound to the official Codex URL.
+    The only credential that reads the catalog for a relay: never the relay's key, never an API-key row."""
+    from agent.codex_headers import is_official_codex_base_url
+    from hermes_cli.auth_codex import resolve_codex_runtime_credentials
+    from hermes_cli.auth_constants import AuthError, _decode_jwt_claims
+    from hermes_cli.config_backend import ConfigBackendUnavailable
+    try:
+        creds = resolve_codex_runtime_credentials(read_only=True)
+        token = creds.get("api_key")
+        if (not isinstance(token, str) or not _decode_jwt_claims(token)
+                or not is_official_codex_base_url(str(creds.get("base_url") or ""))):
+            return None
+        source = creds.get("source")
+        oauth = source == "hermes-auth-store" or (source == "credential_pool" and _oauth_pool_row(token))
+    except (AuthError, OSError, ConfigBackendUnavailable):  # no login or an unreadable store: unknown, so omitted
+        return None
+    return token if oauth else None
+
+
+def _relay_daybreak_models(models: Any, route_ids: tuple, base_url: Any, config: Any = None) -> set:
+    """Of ``models`` on an opted-in relay, those the official Codex catalog, read with this profile's own
+    Codex login, lists for ``daybreak_blue``. The lookup never goes to the relay or uses its key, and the
+    login never goes to the relay. No login, or a catalog that can't be refreshed, lists none."""
+    if not _relay_forwards_daybreak(route_ids, base_url, config):
+        return set()
+    token = _relay_catalog_token()
+    if token is None:
+        return set()
+    from agent.codex_headers import CODEX_AUX_BASE_URL
+    return {model for model in models
+            if DAYBREAK_PROGRAM in (_cyber_programs_for_model(token, CODEX_AUX_BASE_URL, model) or ())}
+
+
+def daybreak_models(models: Any, *, provider: Any = None, base_url: Any = None, config: Any = None,
+                    relays: bool = True) -> set:
+    """:func:`daybreak_offered` for a picker row's models; an opted-in relay (``provider`` its config key)
+    resolves its route and the profile's Codex login once per row, unless ``relays`` is False. ``config``
+    is the caller's config snapshot."""
+    from agent.model_metadata import _bare_codex_slug
+    from hermes_cli.models import normalize_provider
+    if not provider or normalize_provider(provider) == "openai-codex":
+        return {model for model in models if daybreak_offered(model, provider=provider, base_url=base_url)}
+    if not relays:
+        return set()
+    slugs = {model: _bare_codex_slug(str(model or "")) for model in models}
+    listed = _relay_daybreak_models(set(slugs.values()), (str(provider),), base_url, config)
+    return {model for model, slug in slugs.items() if slug in listed}
+
+
+def daybreak_offered(model: Any, *, provider: Any = None, base_url: Any = None, access_token: Any = None,
+                     config: Any = None) -> bool:
     """Whether the Daybreak switch is offered for ``model``: the ChatGPT/Codex subscription route, and
     this account's own Codex catalog lists ``daybreak_blue`` for the model. Unknown is False, so the
-    switch stays hidden rather than offering something the account may not have."""
+    switch stays hidden rather than offering something the account may not have. An opted-in relay
+    (:func:`daybreak_models`) reads the official catalog with the profile's Codex login instead;
+    ``config`` is a caller's config snapshot (None reads config.yaml)."""
     from agent.codex_headers import CODEX_AUX_BASE_URL, is_official_codex_base_url
     from hermes_cli.models import normalize_provider
-    if not provider or normalize_provider(provider) != "openai-codex":
+    if not provider:
         return False
+    if normalize_provider(provider) != "openai-codex":
+        return bool(daybreak_models((model,), provider=provider, base_url=base_url, config=config))
     base = str(base_url or "").strip() or CODEX_AUX_BASE_URL
     if not is_official_codex_base_url(base):
         return False
@@ -143,20 +257,30 @@ def daybreak_offered(model: Any, *, provider: Any = None, base_url: Any = None, 
 def apply_daybreak(agent: Any, overrides: dict[str, Any]) -> None:
     """Add ``access_programs.cyber: daybreak_blue`` when the user turned Daybreak on and this request's
     credential and model are listed for it. Checked per request, so a model switch, credential rotation
-    or expired catalog never carries the program to a model or account without it."""
+    or expired catalog never carries the program to a model or account without it. On an opted-in relay
+    the profile's Codex login, not the relay's key, is the credential that must list the model."""
     from agent.codex_headers import is_official_codex_base_url
     base_url = str(getattr(agent, "base_url", "") or "")
-    if (getattr(agent, "daybreak", False) is not True
-            or getattr(agent, "api_mode", None) != "codex_responses"
-            or getattr(agent, "provider", None) != "openai-codex"
-            or not is_official_codex_base_url(base_url)):
+    if getattr(agent, "daybreak", False) is not True or getattr(agent, "api_mode", None) != "codex_responses":
         return
-    token = getattr(agent, "api_key", None)
-    if not isinstance(token, str) or not token:
-        return
-    programs = _cyber_programs_for_model(token, base_url, overrides.get("model", getattr(agent, "model", "")))
-    if not programs or DAYBREAK_PROGRAM not in programs:
-        return
+    model = overrides.get("model", getattr(agent, "model", ""))
+    provider = getattr(agent, "provider", None)
+    if provider != "openai-codex":
+        # A delegated child is never the owner's own chat on a relay, whatever its route says.
+        if getattr(agent, "_delegate_depth", 0) or getattr(agent, "platform", None) == "subagent":
+            return
+        # A provider ``extra_body.model`` is merged into the body last, past the transport's own model
+        # normalization, so the model actually sent is unknown here: never Daybreak.
+        ids = (str(provider or ""), str(getattr(agent, "requested_provider", "") or ""))
+        if "model" in (overrides.get("extra_body") or {}) or not _relay_daybreak_models((model,), ids, base_url):
+            return
+    else:
+        token = getattr(agent, "api_key", None)
+        if not is_official_codex_base_url(base_url) or not isinstance(token, str) or not token:
+            return
+        programs = _cyber_programs_for_model(token, base_url, model)
+        if not programs or DAYBREAK_PROGRAM not in programs:
+            return
     extra_body = dict(overrides.get("extra_body") or {})
     extra_body["access_programs"] = {**dict(extra_body.get("access_programs") or {}), "cyber": DAYBREAK_PROGRAM}
     overrides["extra_body"] = extra_body
