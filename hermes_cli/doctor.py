@@ -27,6 +27,7 @@ from hermes_cli.doctor_tools import _safe_which
 from hermes_cli.doctor_config import (
     _check_config_drift,
     _check_config_file,
+    _check_daybreak_relay_hint,
     _check_env_file,
     _check_mcp_security,
     _check_relay_plugins,
@@ -119,7 +120,7 @@ DOCTOR_CHECKS = (
     (None, _check_config_file), (None, _check_config_drift),
     ('xAI Model Retirement (May 15, 2026)', _check_xai_retirement),
     ('Session Reset (timers removed Sep 7, 2026)', _check_retired_session_reset),
-    ('Auth Providers', _check_auth_providers),
+    ('Auth Providers', _check_auth_providers), (None, _check_daybreak_relay_hint),
     ('Directory Structure', _check_directory_structure), (None, _check_state_db), (None, _check_cron_store),
     (None, _check_checkpoint_store),
     (None, _check_gateway_supervision), (None, _check_command_installation),

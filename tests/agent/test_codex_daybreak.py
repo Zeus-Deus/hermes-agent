@@ -520,3 +520,36 @@ def test_an_opted_in_sibling_keeps_its_own_picker_row(relay):
         f"    capabilities: {{cyber_access_programs: true}}\n{MODELS}", encoding="utf-8")
     assert _menu(relay.home, True) == {("plain", "gpt-6-sol"): False, ("plain", "gpt-6.1-sol"): False,
                                        ("my-relay", "gpt-6-sol"): True, ("my-relay", "gpt-6.1-sol"): False}
+
+
+# --- ``hermes doctor`` names the opt-in; it never sets it ------------------------------------------------------------
+
+def _doctor_hint(capsys):
+    from hermes_cli.doctor_config import _check_daybreak_relay_hint
+    finding = _check_daybreak_relay_hint(False)
+    assert not finding.issues and not finding.manual_issues  # a note, never an issue or a non-zero exit
+    return capsys.readouterr().out
+
+
+def test_doctor_notes_a_relay_without_the_opt_in_when_the_login_has_daybreak(relay, capsys):
+    _relay_config(relay.home, opt_in=False)
+    before = (relay.home / "config.yaml").read_text(encoding="utf-8")
+    out = _doctor_hint(capsys)
+    assert "providers.my-relay" in out and "gpt-6-sol" in out and "cyber_access_programs: true" in out
+    assert "gpt-6.1-sol" not in out  # only models the catalog lists for daybreak_blue
+    assert (relay.home / "config.yaml").read_text(encoding="utf-8") == before  # never written
+    assert all(url.startswith(BASE + "/") for url, _ in relay.requests)  # official catalog, never the relay
+
+
+@pytest.mark.parametrize("case", ["opted_in", "chat_completions", "no_login", "account_without_daybreak"])
+def test_doctor_stays_silent_when_the_hint_does_not_apply(relay, capsys, case):
+    from hermes_cli.auth_constants import AuthError
+    _relay_config(relay.home, opt_in=case == "opted_in",
+                  transport="chat_completions" if case == "chat_completions" else "codex_responses")
+    if case == "no_login":
+        relay.login = AuthError("not logged in")
+    if case == "account_without_daybreak":
+        relay.login = {**LOGIN, "api_key": token("B")}
+    assert _doctor_hint(capsys) == ""
+    if case in ("opted_in", "chat_completions", "no_login"):
+        assert relay.requests == []  # no catalog read without a candidate relay and a login

@@ -214,6 +214,36 @@ def _relay_daybreak_models(models: Any, route_ids: tuple, base_url: Any, config:
             if DAYBREAK_PROGRAM in (_cyber_programs_for_model(token, CODEX_AUX_BASE_URL, model) or ())}
 
 
+def relay_daybreak_hint(config: Any = None) -> tuple[list[str], list[str]]:
+    """For ``hermes doctor``: the ``providers:`` keys of ``codex_responses`` relays without the
+    ``cyber_access_programs`` opt-in, and the models this profile's own Codex login lists for Daybreak.
+    Both empty unless both are found. Hermes can't tell whether a relay is the owner's own, so this only
+    names the opt-in; it never sets it. The catalog is read only when such a relay exists."""
+    from hermes_cli.config_providers import providers_dict_to_custom_providers
+    from hermes_cli.config_read_errors import FailedConfigRead
+    if config is None:
+        from hermes_cli.config import load_config_readonly
+        from hermes_cli.config_backend import ConfigBackendUnavailable
+        try:
+            config = load_config_readonly()
+        except (ConfigBackendUnavailable, OSError):
+            return [], []
+    if not isinstance(config, dict) or isinstance(config, FailedConfigRead):
+        return [], []
+    relays = sorted({str(e.get("provider_key")) for e in providers_dict_to_custom_providers(config.get("providers"))
+                     if e and e.get("provider_key") and e.get("api_mode") == "codex_responses"
+                     and (e.get("capabilities") or {}).get(RELAY_CYBER_CAPABILITY) is not True})
+    if not relays:
+        return [], []
+    token = _relay_catalog_token()
+    if token is None:
+        return [], []
+    from agent.codex_headers import CODEX_AUX_BASE_URL
+    cached = _fresh_catalog(token, CODEX_AUX_BASE_URL)
+    models = sorted(m for m, programs in (cached[2] if cached else {}).items() if DAYBREAK_PROGRAM in programs)
+    return (relays, models) if models else ([], [])
+
+
 def daybreak_models(models: Any, *, provider: Any = None, base_url: Any = None, config: Any = None,
                     relays: bool = True) -> set:
     """:func:`daybreak_offered` for a picker row's models; an opted-in relay (``provider`` its config key)

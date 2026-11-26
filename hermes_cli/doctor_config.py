@@ -605,6 +605,23 @@ def _check_config_drift(should_fix: bool, f: Finding) -> None:
     _check_channel_record_hygiene()
 
 
+@doctor_check("")
+def _check_daybreak_relay_hint(should_fix: bool, f: Finding) -> None:
+    """A note, not an issue: a Codex Responses relay could carry Daybreak if it opts in. Only the owner
+    knows whether the relay is theirs alone, so doctor names the setting and never sets it."""
+    from agent.codex_service_tiers import RELAY_CYBER_CAPABILITY, relay_daybreak_hint
+    relays, models = relay_daybreak_hint()
+    if not relays:
+        return
+    _section("OpenAI Daybreak")
+    listed = ", ".join(models[:3]) + (f" +{len(models) - 3} more" if len(models) > 3 else "")
+    for key in relays:
+        check_info(f"providers.{key} is a codex_responses relay and your Codex login has Daybreak ({listed})")
+    check_info(f"If a relay is yours alone, on the same OpenAI account, add `capabilities: "
+               f"{{{RELAY_CYBER_CAPABILITY}: true}}` under it to show the Daybreak switch there "
+               f"(docs: configuring-models#{RELAY_CYBER_CAPABILITY}). Leave it off for shared relays.")
+
+
 @doctor_check("xAI retirement check skipped", "({e})")
 def _check_xai_retirement(should_fix: bool, f: Finding) -> None:
     from hermes_cli.config import load_config

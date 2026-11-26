@@ -250,7 +250,7 @@ providers:
       cyber_access_programs: true   # off by default
 ```
 
-The switch then appears in the chat model menu on that provider's models your account is approved for, with the same per-request, per-model and owner-chat checks. Delegated subagents and delegation routes never use it on a relay. Eligibility comes from the official OpenAI Codex catalog, read with this profile's own `openai-codex` OAuth login (`hermes auth add openai-codex`); an API key never reads it. Without that login, or when the catalog can't be read, the switch stays hidden and nothing is sent. The login is used only for that lookup and is never sent to the relay, and the relay's key is never used for it.
+The switch then appears in the chat model menu on that provider's models your account is approved for, with the same per-request, per-model and owner-chat checks. Delegated subagents and delegation routes never use it on a relay. Eligibility comes from the official OpenAI Codex catalog, read with this profile's own `openai-codex` OAuth login (`hermes auth add openai-codex`); an API key never reads it. Without that login, or when the catalog can't be read, the switch stays hidden and nothing is sent. The login is used only for that lookup and is never sent to the relay, and the relay's key is never used for it. `hermes doctor` notes a `codex_responses` relay without this capability when your Codex login has Daybreak; it never sets it for you.
 
 For a gateway that resolves a bare model alias only after receiving the
 request, opt the alias into prompt-cache markers with the per-model
